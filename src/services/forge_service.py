@@ -687,7 +687,6 @@ class ForgeService:
                     shutil.move(str(course_dir), str(hidden_staging_dir))
                                         # Fix permissions for Storyteller (node uid 1000)
                     try:
-                        import os
                         if not hasattr(hidden_staging_dir, '_mock_name'):
                             for chmod_root, chmod_dirs, chmod_files in os.walk(str(hidden_staging_dir)):
                                 for d in chmod_dirs: 
@@ -978,7 +977,6 @@ class ForgeService:
                     shutil.move(str(course_dir), str(hidden_staging_dir))
                                         # Fix permissions for Storyteller (node uid 1000)
                     try:
-                        import os
                         if not hasattr(hidden_staging_dir, '_mock_name'):
                             for chmod_root, chmod_dirs, chmod_files in os.walk(str(hidden_staging_dir)):
                                 for d in chmod_dirs: 
