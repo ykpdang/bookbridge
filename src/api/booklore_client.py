@@ -1566,9 +1566,9 @@ class BookloreClient:
             return False
         headers = {"Authorization": f"Bearer {token}"}
         urls = [
-            f"{self.base_url}/api/v1/audiobooks/{book_id}/stream",
             f"{self.base_url}/api/v1/audiobooks/{book_id}/download",
             f"{self.base_url}/api/v1/audiobooks/{book_id}/file",
+            f"{self.base_url}/api/v1/audiobooks/{book_id}/stream",
         ]
         for url in urls:
             try:
@@ -1584,6 +1584,15 @@ class BookloreClient:
                             f"url={url} status={response.status_code}"
                         )
                         return False
+
+                    # Check Content-Length if available early
+                    content_length = response.headers.get('Content-Length')
+                    if content_length and expected_size and int(content_length) < expected_size * 0.1:
+                        logger.warning(
+                            f"Booklore download candidate too small ({content_length} bytes) on {url}, searching for larger stream..."
+                        )
+                        continue
+
                     output_path = Path(output_path)
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(output_path, "wb") as handle:
@@ -1592,6 +1601,14 @@ class BookloreClient:
                                 handle.write(chunk)
                     actual_size = output_path.stat().st_size
                     size_display = f"{actual_size // (1024 * 1024)} MiB" if actual_size > 1024 * 1024 else f"{actual_size // 1024} KiB"
+                    
+                    # If we downloaded a file that is still too small, try next endpoint
+                    if expected_size and actual_size < expected_size * 0.1:
+                        logger.warning(
+                            f"Booklore downloaded file too small ({size_display}) from {url}, trying next endpoint..."
+                        )
+                        continue
+
                     logger.info(
                         f"Booklore audiobook download: book_id={book_id} "
                         f"-> '{output_path.name}' ({size_display}) via {url.split('/')[-1]}"
