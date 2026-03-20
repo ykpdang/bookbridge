@@ -293,6 +293,44 @@ class TestDatabaseServiceIntegration(unittest.TestCase):
         self.assertEqual(updated_stats['total_books'], initial_books + 1)
         self.assertEqual(updated_stats['total_states'], initial_states + 1)
 
+    def test_save_hardcover_details_preserves_existing_values_on_partial_update(self):
+        book = self.Book(abs_id='hardcover-preserve', abs_title='Preserve Test', status='active')
+        self.db_service.save_book(book)
+
+        self.db_service.save_hardcover_details(
+            self.HardcoverDetails(
+                abs_id='hardcover-preserve',
+                hardcover_book_id='hc-1',
+                hardcover_slug='slug-1',
+                hardcover_edition_id='ed-1',
+                hardcover_pages=321,
+                isbn='9781234567890',
+                asin='B000TEST',
+                matched_by='isbn',
+            )
+        )
+
+        updated = self.db_service.save_hardcover_details(
+            self.HardcoverDetails(
+                abs_id='hardcover-preserve',
+                hardcover_book_id=None,
+                hardcover_slug=None,
+                hardcover_edition_id='ed-2',
+                hardcover_pages=None,
+                isbn=None,
+                asin=None,
+                matched_by=None,
+            )
+        )
+
+        self.assertEqual(updated.hardcover_book_id, 'hc-1')
+        self.assertEqual(updated.hardcover_slug, 'slug-1')
+        self.assertEqual(updated.hardcover_edition_id, 'ed-2')
+        self.assertEqual(updated.hardcover_pages, 321)
+        self.assertEqual(updated.isbn, '9781234567890')
+        self.assertEqual(updated.asin, 'B000TEST')
+        self.assertEqual(updated.matched_by, 'isbn')
+
     def test_migration_should_migrate(self):
         """Test migration detection logic."""
         with tempfile.TemporaryDirectory() as temp_dir:

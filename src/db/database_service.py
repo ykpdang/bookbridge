@@ -417,7 +417,10 @@ class DatabaseService:
                 for attr in ['hardcover_book_id', 'hardcover_slug', 'hardcover_edition_id', 'hardcover_pages',
                            'hardcover_audio_seconds', 'isbn', 'asin', 'matched_by']:
                     if hasattr(details, attr):
-                        setattr(existing, attr, getattr(details, attr))
+                        new_value = getattr(details, attr)
+                        if new_value is None and getattr(existing, attr) is not None:
+                            continue
+                        setattr(existing, attr, new_value)
                 session.flush()
                 session.refresh(existing)
                 session.expunge(existing)

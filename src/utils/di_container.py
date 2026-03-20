@@ -89,6 +89,7 @@ class Container(containers.DeclarativeContainer):
         BookloreClient,
         database_service=database_service
     )
+    kavita_client = providers.Object(None)
 
     hardcover_client = providers.Singleton(HardcoverClient)
 

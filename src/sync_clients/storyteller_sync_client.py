@@ -50,6 +50,48 @@ class StorytellerSyncClient(SyncClient):
 
         return current
 
+    @staticmethod
+    def _anchor_text_from_request(request: UpdateProgressRequest) -> Optional[str]:
+        return getattr(request, "anchor_excerpt", None) or request.txt
+
+    def _href_exists_in_epub(self, epub: str, href: Optional[str]) -> bool:
+        if not epub or not href:
+            return False
+        try:
+            book_path = self.ebook_parser.resolve_book_path(epub)
+            _full_text, spine_map = self.ebook_parser.extract_text_and_map(book_path)
+            href_str = str(href)
+            return any(
+                item.get("href") == href_str
+                or item.get("href", "").endswith(href_str)
+                or href_str.endswith(item.get("href", ""))
+                for item in spine_map
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _merge_locator(base: LocatorResult, resolved: Optional[LocatorResult]) -> LocatorResult:
+        if not isinstance(resolved, LocatorResult):
+            return base
+
+        return LocatorResult(
+            percentage=resolved.percentage if resolved.percentage is not None else base.percentage,
+            xpath=base.xpath or resolved.xpath,
+            match_index=resolved.match_index if resolved.match_index is not None else base.match_index,
+            cfi=resolved.cfi or base.cfi,
+            href=resolved.href or base.href,
+            fragment=resolved.fragment or base.fragment,
+            perfect_ko_xpath=base.perfect_ko_xpath or resolved.perfect_ko_xpath,
+            css_selector=resolved.css_selector or base.css_selector,
+            chapter_progress=(
+                resolved.chapter_progress
+                if resolved.chapter_progress is not None
+                else base.chapter_progress
+            ),
+            fragments=resolved.fragments or base.fragments,
+        )
+
     def get_service_state(self, book: Book, prev_state: Optional[State], title_snip: str = "", bulk_context: dict = None) -> Optional[ServiceState]:
         # [Tri-Link Fix] Strict UUID Sync Only
         uuid = book.storyteller_uuid
@@ -60,24 +102,55 @@ class StorytellerSyncClient(SyncClient):
             return None
 
         st_pct, st_ts, st_href, st_frag, st_chapter_progress = None, None, None, None, None
+        st_fragments, st_css_selector, st_position, st_cfi = None, None, None, None
 
         try:
-            position_details = None
-            rich_fetch = getattr(self.storyteller_client, "get_position_details_rich", None)
-            if callable(rich_fetch):
-                rich_details = rich_fetch(uuid)
-                if isinstance(rich_details, tuple) and len(rich_details) >= 4:
-                    position_details = rich_details
+            position_payload = None
+            payload_fetch = getattr(self.storyteller_client, "get_position_details_payload", None)
+            if callable(payload_fetch):
+                position_payload = payload_fetch(uuid)
 
-            if position_details is None:
-                position_details = self.storyteller_client.get_position_details(uuid)
-
-            if isinstance(position_details, tuple) and len(position_details) >= 5:
-                st_pct, st_ts, st_href, st_frag, st_chapter_progress = position_details[:5]
-            elif isinstance(position_details, tuple) and len(position_details) >= 4:
-                st_pct, st_ts, st_href, st_frag = position_details[:4]
+            if isinstance(position_payload, dict):
+                st_pct = position_payload.get("pct")
+                st_ts = position_payload.get("ts")
+                st_href = position_payload.get("href")
+                st_frag = position_payload.get("fragment") or position_payload.get("frag")
+                st_fragments = position_payload.get("fragments")
+                st_chapter_progress = position_payload.get("chapter_progress")
+                st_css_selector = position_payload.get("css_selector")
+                st_position = position_payload.get("position") or position_payload.get("match_index")
+                st_cfi = position_payload.get("cfi")
             else:
-                raise ValueError("Storyteller position response is not a tuple")
+                position_details = None
+                rich_fetch = getattr(self.storyteller_client, "get_position_details_rich", None)
+                if callable(rich_fetch):
+                    rich_details = rich_fetch(uuid)
+                    if isinstance(rich_details, tuple) and len(rich_details) >= 4:
+                        position_details = rich_details
+
+                if position_details is None:
+                    position_details = self.storyteller_client.get_position_details(uuid)
+
+                if isinstance(position_details, tuple) and len(position_details) >= 8:
+                    (
+                        st_pct,
+                        st_ts,
+                        st_href,
+                        st_frag,
+                        st_chapter_progress,
+                        st_fragments,
+                        st_css_selector,
+                        st_position,
+                        *extra_fields,
+                    ) = position_details
+                    if extra_fields:
+                        st_cfi = extra_fields[0]
+                elif isinstance(position_details, tuple) and len(position_details) >= 5:
+                    st_pct, st_ts, st_href, st_frag, st_chapter_progress = position_details[:5]
+                elif isinstance(position_details, tuple) and len(position_details) >= 4:
+                    st_pct, st_ts, st_href, st_frag = position_details[:4]
+                else:
+                    raise ValueError("Storyteller position response is not a tuple")
         except Exception as e:
             logger.warning(f"'{title_snip}' Storyteller UUID fetch failed for '{uuid}': {e}")
             return None
@@ -95,9 +168,21 @@ class StorytellerSyncClient(SyncClient):
         else:
             delta = abs(st_pct - prev_storyteller_pct)
 
-        current = {"pct": st_pct, "ts": st_ts, "href": st_href, "frag": st_frag}
+        current = {"pct": st_pct, "ts": st_ts, "href": st_href}
+        if st_frag:
+            current["frag"] = st_frag
+            current["fragment"] = st_frag
+        if st_fragments:
+            current["fragments"] = st_fragments
         if st_chapter_progress is not None:
             current["chapter_progress"] = st_chapter_progress
+        if st_css_selector:
+            current["css_selector"] = st_css_selector
+        if st_position is not None:
+            current["position"] = st_position
+            current["match_index"] = st_position
+        if st_cfi:
+            current["cfi"] = st_cfi
 
         return ServiceState(
             current=current,
@@ -114,7 +199,13 @@ class StorytellerSyncClient(SyncClient):
         epub = self._resolve_storyteller_epub_filename(book)
         if not epub:
             return None
-        st_pct, href, frag = state.current.get("pct"), state.current.get("href"), state.current.get("frag")
+        st_pct = state.current.get("pct")
+        href = state.current.get("href")
+        frag = (
+            state.current.get("frag")
+            or state.current.get("fragment")
+            or next(iter(state.current.get("fragments") or []), None)
+        )
         txt = None
         if href and frag:
             txt = self.ebook_parser.resolve_locator_id(epub, href, frag)
@@ -133,61 +224,23 @@ class StorytellerSyncClient(SyncClient):
         pct = request.locator_result.percentage
         locator = request.locator_result
 
-        # Always prefer remapping with matched text in Storyteller EPUB context.
-        if request.txt:
+        anchor_text = self._anchor_text_from_request(request)
+
+        if anchor_text:
             enriched = self.ebook_parser.find_text_location(
-                epub, request.txt, hint_percentage=pct
+                epub,
+                anchor_text,
+                hint_percentage=pct,
             )
             if isinstance(enriched, LocatorResult) and enriched.href:
-                logger.debug(f"Enriched Storyteller locator with href={enriched.href}")
-                locator = enriched
-        elif locator.href:
-            try:
-                if not self.ebook_parser.resolve_locator_id(epub, locator.href, locator.fragment):
-                    locator = LocatorResult(
-                        percentage=pct,
-                        xpath=locator.xpath,
-                        match_index=locator.match_index,
-                        cfi=locator.cfi,
-                        href=None,
-                        fragment=None,
-                        perfect_ko_xpath=locator.perfect_ko_xpath,
-                        css_selector=locator.css_selector,
-                        chapter_progress=locator.chapter_progress,
-                        fragments=locator.fragments,
-                    )
-            except Exception:
-                locator = LocatorResult(
-                    percentage=pct,
-                    xpath=locator.xpath,
-                    match_index=locator.match_index,
-                    cfi=locator.cfi,
-                    href=None,
-                    fragment=None,
-                    perfect_ko_xpath=locator.perfect_ko_xpath,
-                    css_selector=locator.css_selector,
-                    chapter_progress=locator.chapter_progress,
-                    fragments=locator.fragments,
-                )
-
-        if not locator.href:
-            # Fallback: if we still don't have href, try to resolve from percentage
-            fallback_href = self._resolve_href_from_percentage(epub, pct)
-            if fallback_href:
-                # Merge: keep the percentage but add the href
-                locator = LocatorResult(
-                    percentage=pct,
-                    href=fallback_href,
-                    css_selector=locator.css_selector,
-                    xpath=locator.xpath,
-                    match_index=locator.match_index,
-                    cfi=locator.cfi,
-                    fragment=locator.fragment,
-                    perfect_ko_xpath=locator.perfect_ko_xpath,
-                    chapter_progress=locator.chapter_progress,
-                    fragments=locator.fragments,
-                )
-                logger.debug(f"Resolved Storyteller href from percentage: {locator.href}")
+                locator = self._merge_locator(locator, enriched)
+                logger.debug(f"Enriched Storyteller locator with href={locator.href}")
+            else:
+                locator = self._merge_locator(locator, self._resolve_href_from_percentage(epub, pct))
+        elif locator.href and not self._href_exists_in_epub(epub, locator.href):
+            locator = self._merge_locator(locator, self._resolve_href_from_percentage(epub, pct))
+        elif not locator.href:
+            locator = self._merge_locator(locator, self._resolve_href_from_percentage(epub, pct))
 
         if book.storyteller_uuid:
             success = self.storyteller_client.update_position(book.storyteller_uuid, pct, locator)
@@ -203,19 +256,45 @@ class StorytellerSyncClient(SyncClient):
             logger.debug(f"Skipping Storyteller update for {book.abs_title}: No linked UUID")
             success = False
 
-        return SyncResult(pct, success)
+        updated_state = {'pct': pct}
+        if locator.href:
+            updated_state['href'] = locator.href
+        if locator.fragment:
+            updated_state['frag'] = locator.fragment
+            updated_state['fragment'] = locator.fragment
+        if locator.fragments:
+            updated_state['fragments'] = locator.fragments
+        if locator.cfi:
+            updated_state['cfi'] = locator.cfi
+        if locator.chapter_progress is not None:
+            updated_state['chapter_progress'] = locator.chapter_progress
+        if locator.css_selector:
+            updated_state['css_selector'] = locator.css_selector
+        if locator.match_index is not None:
+            updated_state['position'] = locator.match_index
+            updated_state['match_index'] = locator.match_index
 
-    def _resolve_href_from_percentage(self, epub: str, pct: float) -> Optional[str]:
-        """Find which spine item href contains the given percentage."""
+        return SyncResult(pct, success, updated_state)
+
+    def _resolve_href_from_percentage(self, epub: str, pct: float) -> Optional[LocatorResult]:
+        """Map percentage into Storyteller EPUB spine context."""
         try:
             book_path = self.ebook_parser.resolve_book_path(epub)
             full_text, spine_map = self.ebook_parser.extract_text_and_map(book_path)
             if not full_text or not spine_map:
                 return None
-            target_index = int(len(full_text) * pct)
+            target_index = min(max(int(len(full_text) * pct), 0), max(len(full_text) - 1, 0))
             for item in spine_map:
-                if item["start"] <= target_index < item["end"]:
-                    return item["href"]
+                if item["start"] <= target_index < item["end"] or (
+                    target_index == len(full_text) - 1 and item["end"] >= len(full_text)
+                ):
+                    span = max(item["end"] - item["start"], 1)
+                    chapter_progress = min(max((target_index - item["start"]) / span, 0.0), 1.0)
+                    return LocatorResult(
+                        percentage=pct,
+                        href=item["href"],
+                        chapter_progress=chapter_progress,
+                    )
         except Exception:
             pass
         return None

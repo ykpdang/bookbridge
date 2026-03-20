@@ -52,6 +52,7 @@ class BookloreClient:
         self._last_audiobook_search_miss_refresh_attempt = 0
         self._refresh_lock = threading.Lock()
         self._cache_lock = threading.RLock()
+        self._epub_cfi_write_disabled_for_books = set()
 
         self._token = None
         self._token_timestamp = 0
@@ -255,6 +256,12 @@ class BookloreClient:
             return (response.text or "")[:limit]
         except Exception:
             return "<unavailable>"
+
+    @staticmethod
+    def _normalize_optional_string(value):
+        if value in (None, ""):
+            return None
+        return str(value)
 
     def _parse_json_response(self, response, context):
         try:
@@ -1796,6 +1803,7 @@ class BookloreClient:
 
         clear_reset = book_type == 'EPUB' and percentage <= 0
         cfi = rich_locator.cfi if rich_locator and rich_locator.cfi else None
+        cfi_write_disabled = str(book_id) in self._epub_cfi_write_disabled_for_books
 
         payload_variants = []
         if book_type == 'EPUB':
@@ -1808,11 +1816,19 @@ class BookloreClient:
                 ]
             else:
                 if cfi is not None:
-                    logger.debug(f"Booklore: Setting CFI: {cfi}")
-                    payload_variants = [
-                        ("with_cfi", {"bookId": book_id, "epubProgress": {"percentage": pct_display, "cfi": cfi}}),
-                        ("no_cfi", base_payload),
-                    ]
+                    if cfi_write_disabled:
+                        logger.debug(
+                            "Booklore: skipping with_cfi variant for file=%s book_id=%s due to prior verified incompatibility",
+                            safe_filename,
+                            book_id,
+                        )
+                        payload_variants = [("no_cfi", base_payload)]
+                    else:
+                        logger.debug(f"Booklore: Setting CFI: {cfi}")
+                        payload_variants = [
+                            ("with_cfi", {"bookId": book_id, "epubProgress": {"percentage": pct_display, "cfi": cfi}}),
+                            ("no_cfi", base_payload),
+                        ]
                 else:
                     payload_variants = [("standard", base_payload)]
         elif book_type == 'PDF':
@@ -1830,6 +1846,7 @@ class BookloreClient:
         )
 
         last_status = "No response"
+        with_cfi_failed = False
         for variant_idx, (variant_name, payload) in enumerate(payload_variants, start=1):
             if clear_reset:
                 logger.debug(f"Booklore: Clearing CFI for 0% reset (variant={variant_name})")
@@ -1891,6 +1908,8 @@ class BookloreClient:
                         continue
                 elif verified_pct is not None:
                     if abs(verified_pct - percentage) > 0.005:
+                        if variant_name == "with_cfi":
+                            with_cfi_failed = True
                         logger.warning(
                             f"Booklore progress write mismatch for {safe_filename} "
                             f"(variant={variant_name}, expected={pct_display:.2f}%, observed={verified_pct * 100:.2f}%). Retrying..."
@@ -1924,6 +1943,12 @@ class BookloreClient:
                         logger.debug(f"Booklore: Cache updated in-place for book {book_id}")
             except Exception:
                 logger.debug("Booklore: In-place cache update failed, will refresh on next read")
+            if variant_name == "no_cfi" and with_cfi_failed and cfi is not None and not clear_reset:
+                self._epub_cfi_write_disabled_for_books.add(str(book_id))
+                logger.info(
+                    "Booklore: disabling with_cfi retries for book_id=%s after verified no_cfi fallback success",
+                    book_id,
+                )
             return True
 
         logger.debug(

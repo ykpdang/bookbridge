@@ -163,3 +163,81 @@ def test_storyteller_update_prefers_storyteller_epub_remap_when_text_available()
     assert args[2].href == "OEBPS/Text/part0083.xhtml"
     assert args[2].fragment == "x_c079-sentence123"
 
+
+def test_storyteller_get_service_state_includes_rich_locator_fields():
+    storyteller_api = MagicMock()
+    storyteller_api.is_configured.return_value = True
+    storyteller_api.get_position_details_payload.return_value = {
+        "pct": 0.4,
+        "ts": 1234,
+        "href": "Text/chapter-1.xhtml",
+        "frag": "frag-1",
+        "fragment": "frag-1",
+        "fragments": ["frag-1", "frag-2"],
+        "chapter_progress": 0.2,
+        "css_selector": "p:nth-child(2)",
+        "position": 17,
+        "match_index": 17,
+        "cfi": "epubcfi(/6/4!/4:0)",
+    }
+    ebook_parser = MagicMock()
+    client = StorytellerSyncClient(storyteller_api, ebook_parser)
+
+    book = SimpleNamespace(storyteller_uuid="uuid-1")
+    state = client.get_service_state(book, None)
+
+    assert state.current["href"] == "Text/chapter-1.xhtml"
+    assert state.current["frag"] == "frag-1"
+    assert state.current["fragment"] == "frag-1"
+    assert state.current["fragments"] == ["frag-1", "frag-2"]
+    assert state.current["chapter_progress"] == 0.2
+    assert state.current["css_selector"] == "p:nth-child(2)"
+    assert state.current["position"] == 17
+    assert state.current["match_index"] == 17
+    assert state.current["cfi"] == "epubcfi(/6/4!/4:0)"
+
+
+def test_storyteller_update_returns_rich_updated_state():
+    storyteller_api = MagicMock()
+    storyteller_api.update_position.return_value = True
+    ebook_parser = MagicMock()
+    ebook_parser.resolve_book_path.return_value = "/tmp/storyteller_uuid.epub"
+    ebook_parser.find_text_location.return_value = LocatorResult(
+        percentage=0.61,
+        href="OEBPS/Text/part0083.xhtml",
+        fragment="x_c079-sentence123",
+        cfi="epubcfi(/6/8!/4:0)",
+        css_selector="p:nth-child(3)",
+        chapter_progress=0.45,
+        match_index=312,
+        fragments=["x_c079-sentence123"],
+    )
+    client = StorytellerSyncClient(storyteller_api, ebook_parser)
+
+    book = SimpleNamespace(
+        abs_id="abs-9",
+        abs_title="Test",
+        ebook_filename="original.epub",
+        storyteller_uuid="st-uuid-9",
+    )
+    request = UpdateProgressRequest(
+        locator_result=LocatorResult(percentage=0.61, href="orig.xhtml"),
+        txt="anchor text from leader",
+    )
+
+    result = client.update_progress(book, request)
+
+    assert result.success is True
+    assert result.updated_state == {
+        "pct": 0.61,
+        "href": "OEBPS/Text/part0083.xhtml",
+        "frag": "x_c079-sentence123",
+        "fragment": "x_c079-sentence123",
+        "fragments": ["x_c079-sentence123"],
+        "cfi": "epubcfi(/6/8!/4:0)",
+        "chapter_progress": 0.45,
+        "css_selector": "p:nth-child(3)",
+        "position": 312,
+        "match_index": 312,
+    }
+

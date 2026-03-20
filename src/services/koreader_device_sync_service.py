@@ -29,8 +29,8 @@ class KOReaderDeviceSyncService:
         abs_client,
         booklore_client,
         cwa_client,
-        kavita_client,
-        epub_cache_dir,
+        kavita_client=None,
+        epub_cache_dir=None,
     ):
         self.database_service = database_service
         self.ebook_parser = ebook_parser
@@ -38,7 +38,7 @@ class KOReaderDeviceSyncService:
         self.booklore_client = booklore_client
         self.cwa_client = cwa_client
         self.kavita_client = kavita_client
-        self.epub_cache_dir = Path(epub_cache_dir)
+        self.epub_cache_dir = Path(epub_cache_dir) if epub_cache_dir is not None else Path("/data/epub_cache")
 
     def build_manifest(self) -> dict:
         books = sorted(
