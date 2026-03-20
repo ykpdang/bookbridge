@@ -2307,7 +2307,8 @@ def match():
         if hardcover_sync_client and hardcover_sync_client.is_configured():
             hardcover_sync_client._automatch_hardcover(book)
 
-        container.abs_client().add_to_collection(abs_id, ABS_COLLECTION_NAME)
+        if not str(abs_id).startswith('booklore:'):
+            container.abs_client().add_to_collection(abs_id, ABS_COLLECTION_NAME)
         if container.booklore_client().is_configured():
             # Use original filename for shelf if we switched to storyteller
             shelf_filename = original_ebook_filename or ebook_filename
@@ -2542,7 +2543,8 @@ def batch_match():
                     if hardcover_sync_client and hardcover_sync_client.is_configured():
                         hardcover_sync_client._automatch_hardcover(book)
 
-                    container.abs_client().add_to_collection(item['abs_id'], ABS_COLLECTION_NAME)
+                    if not str(item['abs_id']).startswith('booklore:'):
+                        container.abs_client().add_to_collection(item['abs_id'], ABS_COLLECTION_NAME)
                     if container.booklore_client().is_configured():
                         shelf_filename = original_ebook_filename or ebook_filename
                         container.booklore_client().add_to_shelf(shelf_filename, BOOKLORE_SHELF_NAME)
@@ -2813,7 +2815,8 @@ def batch_match():
                 if hardcover_sync_client and hardcover_sync_client.is_configured():
                     hardcover_sync_client._automatch_hardcover(book)
 
-                container.abs_client().add_to_collection(item['abs_id'], ABS_COLLECTION_NAME)
+                if not str(item['abs_id']).startswith('booklore:'):
+                    container.abs_client().add_to_collection(item['abs_id'], ABS_COLLECTION_NAME)
                 if container.booklore_client().is_configured():
                     shelf_filename = original_ebook_filename or ebook_filename
                     container.booklore_client().add_to_shelf(shelf_filename, BOOKLORE_SHELF_NAME)
@@ -3411,7 +3414,8 @@ def suggestions_page():
                 if hardcover_sync_client and hardcover_sync_client.is_configured():
                     hardcover_sync_client._automatch_hardcover(book)
 
-                container.abs_client().add_to_collection(item['abs_id'], ABS_COLLECTION_NAME)
+                if not str(item['abs_id']).startswith('booklore:'):
+                    container.abs_client().add_to_collection(item['abs_id'], ABS_COLLECTION_NAME)
                 if container.booklore_client().is_configured():
                     shelf_filename = original_ebook_filename or ebook_filename
                     container.booklore_client().add_to_shelf(shelf_filename, BOOKLORE_SHELF_NAME)
@@ -3688,14 +3692,18 @@ def cleanup_mapping_resources(book):
         logger.info(f"🗑️ Deleting KOSync document record for ebook-only mapping: '{book.kosync_doc_id}'")
         database_service.delete_kosync_document(book.kosync_doc_id)
 
-    if getattr(book, 'sync_mode', 'audiobook') != 'ebook_only':
+    is_abs_backed = (
+        getattr(book, 'sync_mode', 'audiobook') != 'ebook_only'
+        and not str(book.abs_id).startswith('booklore:')
+    )
+    if is_abs_backed:
         collection_name = os.environ.get('ABS_COLLECTION_NAME', 'Synced with KOReader')
         try:
             container.abs_client().remove_from_collection(book.abs_id, collection_name)
         except Exception as e:
             logger.warning(f"⚠️ Failed to remove from ABS collection: {e}")
     else:
-        logger.info(f"Skipping ABS collection cleanup for ebook-only mapping '{book.abs_id}'")
+        logger.info(f"Skipping ABS collection cleanup for non-ABS mapping '{book.abs_id}'")
 
     storyteller_uuid = getattr(book, 'storyteller_uuid', None)
     if not storyteller_uuid and getattr(book, 'ebook_filename', None):
