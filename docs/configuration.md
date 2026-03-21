@@ -63,13 +63,15 @@ The bridge talks to Storyteller through the REST API only.
 | Username | `STORYTELLER_USER` | empty | Storyteller username. |
 | Password | `STORYTELLER_PASSWORD` | empty | Storyteller password. |
 | Collection Name | `STORYTELLER_COLLECTION_NAME` | `Synced with KOReader` | Collection used when linked books are added to Storyteller. |
-| Library Path | `STORYTELLER_LIBRARY_DIR` | `/storyteller_library` | Where Forge writes Storyteller-ready books. |
+| Library Path | `STORYTELLER_LIBRARY_DIR` | `/storyteller_library` | Optional local Storyteller library path used for fallback/download helpers. Forge uploads go through the API. |
 | Assets Path | `STORYTELLER_ASSETS_DIR` | empty | Root path that contains `/assets/{title}/transcriptions`. |
+| Upload Chunk Size | `STORYTELLER_UPLOAD_CHUNK_SIZE` | `5242880` | TUS PATCH chunk size in bytes for direct Storyteller uploads. |
 | Poll Mode | `STORYTELLER_POLL_MODE` | `global` | `global` uses the main sync cycle. `custom` polls Storyteller separately. |
 | Poll Interval | `STORYTELLER_POLL_SECONDS` | `45` | Used when Poll Mode is `custom`. |
 
 Storyteller notes:
 
+- Forge imports use the Storyteller REST/TUS API directly. A Storyteller library mount is optional unless you want local fallback access to generated artifacts.
 - If you mount `/path/to/storyteller/assets:/storyteller/assets`, set **Storyteller Assets Path** to `/storyteller`.
 - Storyteller timing data stays the preferred alignment source whenever valid transcript assets are available.
 - **Settings -> Storyteller Backfill** rechecks existing Storyteller-linked books and rebuilds their alignment data without rerunning Whisper.
@@ -201,9 +203,9 @@ Suggestions notes:
 | Data Directory | `DATA_DIR` | `/data` | Database, cache, and working state. |
 | Books Directory | `BOOKS_DIR` | `/books` | Local ebook library path inside the container. |
 | Audiobooks Directory | `AUDIOBOOKS_DIR` | `/audiobooks` | Optional local audiobook path. |
-| Storyteller Library Directory | `STORYTELLER_LIBRARY_DIR` | `/storyteller_library` | Forge destination path. |
+| Storyteller Library Directory | `STORYTELLER_LIBRARY_DIR` | `/storyteller_library` | Optional local Storyteller library path for fallback/download helpers. |
 | Storyteller Assets Directory | `STORYTELLER_ASSETS_DIR` | empty | Optional transcript asset root. |
-| Forge Processing Directory | `PROCESSING_DIR` | `/tmp` | Temporary staging area before Forge moves files into Storyteller. |
+| Storyteller Upload Chunk Size | `STORYTELLER_UPLOAD_CHUNK_SIZE` | `5242880` | TUS upload chunk size in bytes for direct Storyteller uploads. |
 | Ebook Cache Size | `EBOOK_CACHE_SIZE` | `3` | Parsed-ebook cache size. |
 
 ---

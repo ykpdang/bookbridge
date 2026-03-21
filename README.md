@@ -52,9 +52,11 @@ services:
     volumes:
       - ./data:/data
       - /path/to/ebooks:/books
-      # - /path/to/storyteller/library:/storyteller_library  # Optional: Forge output
+      # - /path/to/storyteller/library:/storyteller_library  # Optional: local Storyteller fallback/download access
       # - /path/to/storyteller/assets:/storyteller/assets    # Optional: Storyteller transcript ingest
 ```
+
+Forge now uploads directly to Storyteller over the API, so a Storyteller library mount is no longer required for normal Forge ingestion.
 
 For full installation instructions, checking logs, and advanced configuration, please visit the **[Documentation Site](https://cporcellijr.github.io/abs-kosync-bridge/)**.
 

@@ -4,6 +4,19 @@
 
 All notable changes to ABS-KoSync Enhanced will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- Storyteller Forge now uploads staged EPUB and audio files directly to Storyteller over the REST/TUS API instead of relying on watched-library folder hand-offs.
+- Storyteller direct-upload settings now expose `STORYTELLER_UPLOAD_CHUNK_SIZE` for tuning TUS PATCH chunk size when needed.
+
+### Fixed
+
+- Fixed Storyteller TUS `Upload-Metadata` formatting for direct Forge uploads. Metadata pairs are now serialized without post-comma whitespace, which restores compatibility with Storyteller `web-v2.9.3` and prevents `400 Invalid upload-metadata` failures during Auto-Forge and manual Forge.
+
+---
+
 ## [6.3.3] - 2026-03-08
 
 ### Added
@@ -79,14 +92,14 @@ All notable changes to ABS-KoSync Enhanced will be documented in this file.
 ### � Critical Update Requirements
 
 - **Storyteller API v2 Requirement:** The bridge has fully transitioned to the Storyteller REST API v2 endpoints (`/api/v2/`). **You MUST update your Storyteller container to the latest version to use Bridge v6.3.0.** Legacy Storyteller versions are no longer supported and will result in 404 connection errors.
-- **Docker Compose Volume Mounts for "Forge":** The new Auto-Forge pipeline requires proper volume mapping for directory transfers. Ensure your `docker-compose.yml` includes mappings for `STORYTELLER_LIBRARY_DIR`, `BOOKS_DIR`, and any relevant processing directories for the Forge tab to function without "Directory not found" errors.
+- **Docker Compose Volume Mounts for "Forge":** The new Auto-Forge pipeline requires the local content paths it reads from, such as `BOOKS_DIR` and any optional transcript/local-fallback mounts, to be mapped correctly in `docker-compose.yml`.
 - **Database Migration:** This update includes a major database schema upgrade (Alembic) to support the Tri-Link architecture. **Highly Recommended: Backup your `database.db` and legacy JSON files before pulling this update.** If you encounter a boot-loop due to a locked database, simply deleting the DB and letting it rebuild is the fastest fix, as the bridge can auto-match most entries automatically.
 - **KOSync "Stuck" Progress on Old Links:** Books matched under older versions of the bridge might lack the `original_ebook_filename` required by the new Tri-Link architecture. If an older book stops syncing progress to KOReader after this update, simply delete the mapping from the dashboard and re-match it to rebuild the link correctly.
 
 ### �🚀 New Features & Integrations
 
 - **Tri-Link Architecture**: Maintain a three-way link between ABS audiobook, KOReader ebook, and Storyteller entries.
-- **Auto-Forge Pipeline**: Automated downloading, staging, and hand-off to Storyteller for processing.
+- **Auto-Forge Pipeline**: Automated downloading, staging, and upload to Storyteller for processing.
 - **Hardcover.app Audiobook Support**: Link specific editions and sync listening progress (in seconds).
 - **Booklore & CWA (OPDS) Integration**: Fetch ebooks from Booklore and OPDS sources, including backward-compatible fallbacks for Booklore v2.
 - **Split-Port Security Mode**: Run sync and admin UI on separate ports.
@@ -416,8 +429,8 @@ If you see "Using Storyteller SQLite fallback", check your credentials.
 | `DATA_DIR` | `/data` | Database, cache, and working state |
 | `BOOKS_DIR` | `/books` | Local ebook library path inside the container |
 | `AUDIOBOOKS_DIR` | `/audiobooks` | Optional local audiobook path |
-| `STORYTELLER_LIBRARY_DIR` | `/storyteller_library` | Forge destination path |
-| `PROCESSING_DIR` | `/tmp` | Temporary Forge staging directory |
+| `STORYTELLER_LIBRARY_DIR` | `/storyteller_library` | Optional local Storyteller library path for fallback/download helpers |
+| `STORYTELLER_UPLOAD_CHUNK_SIZE` | `5242880` | TUS upload chunk size in bytes for direct Storyteller uploads |
 | `EBOOK_CACHE_SIZE` | `3` | Parsed-ebook cache size |
 | `JOB_MAX_RETRIES` | `5` | Retry count for failed background jobs |
 | `JOB_RETRY_DELAY_MINS` | `15` | Delay before retrying failed jobs |

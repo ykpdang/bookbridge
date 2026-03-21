@@ -73,7 +73,7 @@ services:
     volumes:
       - ./data:/data
       - /path/to/ebooks:/books
-      # - /path/to/storyteller/library:/storyteller_library  # Optional: Forge output
+      # - /path/to/storyteller/library:/storyteller_library  # Optional: local Storyteller fallback/download access
       # - /path/to/storyteller/assets:/storyteller/assets    # Optional: Storyteller transcript ingest
 ```
 
@@ -91,6 +91,8 @@ If you want to expose only the KOSync endpoint to the internet:
     It is usually easiest to start with the minimal compose file above and finish configuration in the Web UI.
 
     If you enable Booklore, the bridge can use it for both ebook matching and Booklore audiobook sources.
+
+    Forge uploads directly to Storyteller over the API, so a Storyteller library mount is not required for normal Forge imports.
 
     If you mount Storyteller assets at `/storyteller/assets`, set **Storyteller Assets Path** in Settings to `/storyteller`.
     The assets path can be configured entirely in the UI; `STORYTELLER_ASSETS_DIR` is optional.
