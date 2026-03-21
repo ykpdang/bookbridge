@@ -4,6 +4,19 @@ For the full history of changes, please refer to the **[GitHub Releases](https:/
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- Forge now uploads EPUB and audio inputs directly to Storyteller through the REST/TUS API instead of depending on a watched library hand-off.
+- Added documentation for `STORYTELLER_UPLOAD_CHUNK_SIZE` so direct-upload chunk size can be tuned when needed.
+
+### Fixed
+
+- Fixed Storyteller direct-upload metadata formatting so Forge no longer fails with `400 Invalid upload-metadata` on Storyteller `web-v2.9.3`.
+
+---
+
 ## [6.3.3] - 2026-03-08
 
 ### Added
@@ -30,7 +43,7 @@ For the full history of changes, please refer to the **[GitHub Releases](https:/
 ### 🚀 Features
 
 - **Tri-Link Architecture**: Maintain a three-way link between ABS audiobook, KOReader ebook, and Storyteller entries.
-- **Auto-Forge Pipeline**: Automated downloading, staging, and hand-off to Storyteller for processing. Triggered from the Matcher — automatically creates the sync mapping after Storyteller finishes.
+- **Auto-Forge Pipeline**: Automated downloading, staging, and upload to Storyteller for processing. Triggered from the Matcher — automatically creates the sync mapping after Storyteller finishes.
 - **Hardcover.app Audiobook Support**: Link specific editions and sync listening progress (in seconds).
 - **Booklore & CWA (OPDS) Integration**: Fetch ebooks from Booklore and OPDS sources.
 - **Split-Port Security Mode**: Run sync and admin UI on separate ports.

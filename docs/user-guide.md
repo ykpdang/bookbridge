@@ -97,7 +97,7 @@ The bridge can pull ebook choices from:
 ### Final actions
 
 - **Create Mapping** creates the link immediately.
-- **Forge & Match** stages the book for Storyteller processing first, then finishes the link when Forge completes.
+- **Forge & Match** uploads the book to Storyteller for processing first, then finishes the link when Forge completes.
 
 If you skip audio, **Create Mapping** makes an ebook-only link instead.
 
@@ -158,13 +158,13 @@ Suggestions can create:
 ### Two ways to use it
 
 1. **Forge & Match from Add Book**
-   - Starts the Storyteller workflow
+   - Starts the Storyteller upload and processing workflow
    - Finishes the mapping when processing completes
 
 2. **Standalone Forge page**
-   - Stages a Storyteller-ready book without creating a sync mapping yet
+   - Uploads a Storyteller-ready book without creating a sync mapping yet
 
-Forge uses `PROCESSING_DIR` if you set it, and falls back to `/tmp` if you do not.
+Forge stages files locally, then uploads them directly to Storyteller over the API. A Storyteller library mount is optional and only needed for local fallback access to Storyteller-generated files.
 
 ---
 

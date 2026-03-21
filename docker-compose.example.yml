@@ -55,8 +55,9 @@ services:
       - /path/to/ebooks:/books          # Your EPUB library (Required unless using CWA/Booklore exclusively)
 
       # === OPTIONAL: Forge (Storyteller) ===
-      # - /path/to/storyteller/library:/storyteller_library
-      # - /path/to/storyteller/assets:/storyteller/assets
+      # Forge uploads directly over the Storyteller API.
+      # - /path/to/storyteller/library:/storyteller_library # Optional: local fallback/download access
+      # - /path/to/storyteller/assets:/storyteller/assets   # Optional: transcript ingest
 
     networks:
       - your-network
