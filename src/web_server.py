@@ -1811,15 +1811,54 @@ def forge():
 
 
 def forge_search_audio():
-    """API: Search ABS audiobooks for Forge (returns JSON)."""
+    """API: Search ABS and BookLore audiobooks for Forge (returns JSON)."""
     query = request.args.get('q', '').strip()
     if not query:
         return jsonify([])
 
     try:
-        all_audiobooks = get_audiobooks_conditionally()
         query_lower = query.lower()
         results = []
+        found_ids = set()
+
+        if container.booklore_client().is_configured():
+            try:
+                for book in container.booklore_client().search_audiobooks(query, include_info=True) or []:
+                    book_id = str(book.get("id") or "").strip()
+                    if not book_id:
+                        continue
+                    bridge_key = _build_bridge_key("BookLore", book_id)
+                    if bridge_key in found_ids:
+                        continue
+                    found_ids.add(bridge_key)
+                    info = book.get("audiobookInfo") or {}
+                    tracks = info.get("tracks") if isinstance(info.get("tracks"), list) else []
+                    num_files = len(tracks) or 1
+                    total_size_bytes = 0
+                    for track in tracks:
+                        try:
+                            total_size_bytes += int(
+                                track.get("sizeBytes")
+                                or track.get("size")
+                                or track.get("metadata", {}).get("size")
+                                or 0
+                            )
+                        except Exception:
+                            continue
+                    results.append({
+                        "id": bridge_key,
+                        "audio_source": "BookLore",
+                        "audio_source_id": book_id,
+                        "title": book.get("title") or book.get("fileName") or f"BookLore {book_id}",
+                        "author": _coerce_author_display(book.get("authors")),
+                        "file_size_mb": round(total_size_bytes / (1024 * 1024), 2) if total_size_bytes else 0,
+                        "num_files": num_files,
+                        "cover_url": f"/api/booklore/audiobook-cover/{book_id}",
+                    })
+            except Exception as e:
+                logger.warning(f"⚠️ Forge audio BookLore search failed: {e}")
+
+        all_audiobooks = get_audiobooks_conditionally()
 
         for ab in all_audiobooks:
             if audiobook_matches_search(ab, query_lower):
@@ -1843,8 +1882,13 @@ def forge_search_audio():
                 if abs_server:
                     cover_url = f"/api/cover-proxy/{ab.get('id')}"
 
+                if str(ab.get("id")) in found_ids:
+                    continue
+                found_ids.add(str(ab.get("id")))
                 results.append({
                     "id": ab.get("id"),
+                    "audio_source": "ABS",
+                    "audio_source_id": ab.get("id"),
                     "title": title,
                     "author": metadata.get('authorName') or get_abs_author(ab),
                     "file_size_mb": round(size_mb, 2),
@@ -1970,34 +2014,67 @@ def forge_process():
     if not data:
         return jsonify({"error": "Missing JSON payload"}), 400
 
-    abs_id = data.get('abs_id')
+    requested_abs_id = data.get('abs_id')
+    audio_source = (data.get('audio_source') or ('BookLore' if str(requested_abs_id or '').startswith('booklore:') else 'ABS')).strip()
+    audio_source_id = str(data.get('audio_source_id') or requested_abs_id or '').strip()
+    if audio_source == "BookLore" and audio_source_id.lower().startswith("booklore:"):
+        audio_source_id = audio_source_id.split(":", 1)[1].strip()
     text_item = data.get('text_item')
     forge_stage_mode = data.get('forge_stage_mode')
 
-    if not abs_id or not text_item:
-        return jsonify({"error": "Missing abs_id or text_item"}), 400
+    if not text_item:
+        return jsonify({"error": "Missing text_item"}), 400
+    if audio_source == "ABS" and not requested_abs_id:
+        return jsonify({"error": "Missing abs_id"}), 400
+    if audio_source == "BookLore" and not audio_source_id:
+        return jsonify({"error": "Missing audio_source_id"}), 400
+
+    abs_id = requested_abs_id if audio_source == "ABS" else _build_bridge_key("BookLore", audio_source_id)
 
     # Get title/author from ABS for folder naming
     title = "Unknown"
     author = "Unknown"
     try:
-        item_details = container.abs_client().get_item_details(abs_id)
-        if item_details:
-            metadata = item_details.get('media', {}).get('metadata', {})
-            title = metadata.get('title', 'Unknown')
-            author = metadata.get('authorName', '') or get_abs_author(item_details) or 'Unknown'
+        if audio_source == "BookLore":
+            book_detail = container.booklore_client().get_book_by_id(audio_source_id)
+            if book_detail:
+                metadata = book_detail.get("metadata") or {}
+                title = (
+                    metadata.get("title")
+                    or book_detail.get("title")
+                    or book_detail.get("fileName")
+                    or f"BookLore {audio_source_id}"
+                )
+                author = (
+                    _coerce_author_display(book_detail.get("authors"))
+                    or _coerce_author_display(metadata.get("authors"))
+                    or "Unknown"
+                )
+        else:
+            item_details = container.abs_client().get_item_details(abs_id)
+            if item_details:
+                metadata = item_details.get('media', {}).get('metadata', {})
+                title = metadata.get('title', 'Unknown')
+                author = metadata.get('authorName', '') or get_abs_author(item_details) or 'Unknown'
     except Exception as e:
-        logger.warning(f"⚠️ Forge: Could not get ABS metadata for '{abs_id}': {e}")
+        logger.warning(f"⚠️ Forge: Could not get audio metadata for '{abs_id}': {e}")
 
     # Start manual forge in service
     try:
+        forge_kwargs = {}
+        if audio_source == "BookLore":
+            forge_kwargs["audio_source"] = "BookLore"
+            forge_kwargs["audio_source_id"] = audio_source_id
         if forge_stage_mode:
+            forge_kwargs["stage_mode"] = forge_stage_mode
+
+        if forge_kwargs:
             container.forge_service().start_manual_forge(
                 abs_id,
                 text_item,
                 title,
                 author,
-                stage_mode=forge_stage_mode,
+                **forge_kwargs,
             )
         else:
             container.forge_service().start_manual_forge(abs_id, text_item, title, author)

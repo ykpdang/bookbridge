@@ -715,6 +715,9 @@ class StorytellerAPIClient:
             log_fn = logger.debug if polling else logger.warning
             log_fn(f"⚠️ API download raised exception: {e}")
 
+        if polling:
+            return False
+
         # Fallback: Local File Copy
         try:
             # 1. Get Book Details for Filepath

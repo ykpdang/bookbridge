@@ -354,6 +354,57 @@ class TestMatchPathsRegression(unittest.TestCase):
             stage_mode="hardlink",
         )
 
+    def test_forge_search_audio_includes_booklore_results(self):
+        self.mock_container.mock_booklore_client.search_audiobooks.return_value = [
+            {
+                "id": "42",
+                "title": "BookLore Audio",
+                "authors": "BookLore Author",
+                "audiobookInfo": {
+                    "tracks": [{"sizeBytes": 1048576}, {"sizeBytes": 1048576}],
+                },
+            }
+        ]
+        self.mock_container.mock_abs_client.get_all_audiobooks.return_value = []
+
+        response = self.client.get("/api/forge/search_audio?q=booklore")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["audio_source"], "BookLore")
+        self.assertEqual(payload[0]["audio_source_id"], "42")
+        self.assertEqual(payload[0]["id"], "booklore:42")
+
+    def test_forge_process_booklore_audio_uses_bridge_key_and_audio_kwargs(self):
+        self.mock_container.mock_booklore_client.get_book_by_id.return_value = {
+            "id": "42",
+            "title": "BookLore Audio",
+            "authors": "BookLore Author",
+        }
+
+        response = self.client.post(
+            "/api/forge/process",
+            json={
+                "abs_id": "booklore:42",
+                "audio_source": "BookLore",
+                "audio_source_id": "42",
+                "text_item": {"source": "Booklore", "booklore_id": "77"},
+                "forge_stage_mode": "hardlink",
+            },
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.mock_container.mock_forge_service.start_manual_forge.assert_called_once_with(
+            "booklore:42",
+            {"source": "Booklore", "booklore_id": "77"},
+            "BookLore Audio",
+            "BookLore Author",
+            audio_source="BookLore",
+            audio_source_id="42",
+            stage_mode="hardlink",
+        )
+
     @patch("src.web_server.get_kosync_id_for_ebook", return_value="hash-forge-booklore")
     def test_match_forge_booklore_uses_bridge_key_identity(self, _mock_kosync):
         response = self.client.post(

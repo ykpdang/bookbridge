@@ -181,6 +181,75 @@ class TestStorytellerAPIClientDownload(unittest.TestCase):
             self.assertTrue(result)
             self.assertTrue(output_path.exists())
 
+    @patch.dict(os.environ, {
+        'STORYTELLER_API_URL': 'http://test-storyteller:8001',
+        'STORYTELLER_USER': 'testuser',
+        'STORYTELLER_PASSWORD': 'testpass'
+    })
+    def test_download_book_polling_mode_does_not_use_local_fallback(self):
+        from src.api.storyteller_api import StorytellerAPIClient
+
+        client = StorytellerAPIClient()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / 'downloaded.epub'
+            local_readaloud = Path(tmpdir) / 'local-readaloud.epub'
+            local_readaloud.write_bytes(b'local artifact')
+
+            api_response = Mock()
+            api_response.status_code = 404
+            api_response.text = 'could not open readaloud'
+            api_response.__enter__ = Mock(return_value=api_response)
+            api_response.__exit__ = Mock(return_value=False)
+
+            details_response = Mock(status_code=200)
+            details_response.json.return_value = {
+                'readaloud': {'filepath': str(local_readaloud)}
+            }
+
+            with patch.object(client, '_get_fresh_token', return_value='test-token'):
+                with patch.object(client.session, 'get', return_value=api_response):
+                    with patch.object(client, '_make_request', return_value=details_response) as mock_details:
+                        result = client.download_book('test-uuid', output_path, polling=True)
+
+            self.assertFalse(result)
+            self.assertFalse(output_path.exists())
+            mock_details.assert_not_called()
+
+    @patch.dict(os.environ, {
+        'STORYTELLER_API_URL': 'http://test-storyteller:8001',
+        'STORYTELLER_USER': 'testuser',
+        'STORYTELLER_PASSWORD': 'testpass'
+    })
+    def test_download_book_non_polling_mode_can_still_use_local_fallback(self):
+        from src.api.storyteller_api import StorytellerAPIClient
+
+        client = StorytellerAPIClient()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / 'downloaded.epub'
+            local_readaloud = Path(tmpdir) / 'local-readaloud.epub'
+            local_readaloud.write_bytes(b'local artifact')
+
+            api_response = Mock()
+            api_response.status_code = 404
+            api_response.text = 'could not open readaloud'
+            api_response.__enter__ = Mock(return_value=api_response)
+            api_response.__exit__ = Mock(return_value=False)
+
+            details_response = Mock(status_code=200)
+            details_response.json.return_value = {
+                'readaloud': {'filepath': str(local_readaloud)}
+            }
+
+            with patch.object(client, '_get_fresh_token', return_value='test-token'):
+                with patch.object(client.session, 'get', return_value=api_response):
+                    with patch.object(client, '_make_request', return_value=details_response):
+                        result = client.download_book('test-uuid', output_path, polling=False)
+
+            self.assertTrue(result)
+            self.assertTrue(output_path.exists())
+
 
 class TestStorytellerAPIClientCollectionRemoval(unittest.TestCase):
     """Test Storyteller collection removal by UUID."""

@@ -532,6 +532,32 @@ def _normalize_title_key(title: str) -> str:
     return re.sub(r"\s+", " ", collapsed).strip()
 
 
+def _strip_storyteller_instance_suffix(name: str) -> str:
+    stripped = str(name or "").strip()
+    return re.sub(r"\s+\[[^\[\]]+\]\s*$", "", stripped).strip()
+
+
+def _storyteller_dir_has_transcriptions(title_dir: Path) -> bool:
+    transcriptions_dir = Path(title_dir) / "transcriptions"
+    return transcriptions_dir.is_dir() and any(transcriptions_dir.glob("*.json"))
+
+
+def _iter_storyteller_title_dir_candidates(assets_dir: Path, target_title: str) -> list[Path]:
+    target_key = _normalize_title_key(target_title)
+    if not target_key:
+        return []
+
+    candidates = []
+    for child in assets_dir.iterdir():
+        if not child.is_dir():
+            continue
+        child_key = _normalize_title_key(child.name)
+        base_key = _normalize_title_key(_strip_storyteller_instance_suffix(child.name))
+        if child.name == target_title or child_key == target_key or base_key == target_key:
+            candidates.append(child)
+    return candidates
+
+
 def _storyteller_filename_for_abs_chapter(chapter_index: int, prefix: str = "00000") -> str:
     """
     Build the bridge-managed canonical chapter filename for ABS chapter index N (0-based).
@@ -548,48 +574,64 @@ def _resolve_storyteller_title_dir(
     storyteller_title: str = None,
 ) -> Optional[Path]:
     """
-    Resolve the Storyteller title directory using exact match first,
-    then normalized exact match (must be unique).
+    Resolve the Storyteller title directory, preferring transcript-ready
+    directories and supporting Storyteller's `Title [id]` suffix pattern.
     """
     assets_dir = assets_root / "assets"
     if not assets_dir.exists() or not assets_dir.is_dir():
         return None
 
+    candidates: list[Path] = []
+    seen = set()
+    raw_titles = []
     if storyteller_title:
-        exact_storyteller_dir = assets_dir / storyteller_title
-        if exact_storyteller_dir.exists() and exact_storyteller_dir.is_dir():
-            return exact_storyteller_dir
+        raw_titles.append(storyteller_title)
+    if abs_title and abs_title not in raw_titles:
+        raw_titles.append(abs_title)
 
-        storyteller_key = _normalize_title_key(storyteller_title)
-        if storyteller_key:
-            storyteller_candidates = [
-                child
-                for child in assets_dir.iterdir()
-                if child.is_dir() and _normalize_title_key(child.name) == storyteller_key
-            ]
-            if len(storyteller_candidates) == 1:
-                return storyteller_candidates[0]
+    for target_title in raw_titles:
+        for candidate in _iter_storyteller_title_dir_candidates(assets_dir, target_title):
+            resolved = str(candidate.resolve())
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            candidates.append(candidate)
 
-    exact_dir = assets_dir / abs_title
-    if exact_dir.exists() and exact_dir.is_dir():
-        return exact_dir
-
-    target_key = _normalize_title_key(abs_title)
-    if not target_key:
+    if not candidates:
         return None
 
-    candidates = []
-    for child in assets_dir.iterdir():
-        if child.is_dir() and _normalize_title_key(child.name) == target_key:
-            candidates.append(child)
+    transcript_ready = [candidate for candidate in candidates if _storyteller_dir_has_transcriptions(candidate)]
+    if transcript_ready:
+        ignored = [candidate for candidate in candidates if candidate not in transcript_ready]
+        for candidate in ignored:
+            logger.info(
+                "Storyteller transcript resolver: ignoring stale non-transcription dir '%s'",
+                candidate,
+            )
+        candidates = transcript_ready
 
     if len(candidates) == 1:
-        return candidates[0]
+        selected = candidates[0]
+        if _strip_storyteller_instance_suffix(selected.name) != selected.name:
+            logger.info(
+                "Storyteller transcript resolver: selected suffixed assets dir '%s' for '%s'",
+                selected,
+                _sanitize_log_data(storyteller_title or abs_title),
+            )
+        return selected
+
+    for target_title in [storyteller_title, abs_title]:
+        if not target_title:
+            continue
+        exact_matches = [candidate for candidate in candidates if candidate.name == target_title]
+        if len(exact_matches) == 1:
+            return exact_matches[0]
 
     if len(candidates) > 1:
         logger.warning(
-            f"Storyteller assets match is ambiguous for '{_sanitize_log_data(abs_title)}' "
-            f"({len(candidates)} directories)"
+            "Storyteller transcript resolver: ambiguous transcript-ready matches for '%s' (%d directories)",
+            _sanitize_log_data(storyteller_title or abs_title),
+            len(candidates),
         )
     return None
 
@@ -776,6 +818,77 @@ def _read_storyteller_chapter_metrics(chapter_file_path: Path) -> tuple[int, int
     return text_len, text_len_utf16, local_duration
 
 
+def probe_storyteller_transcripts(
+    abs_title: str,
+    chapters: list,
+    storyteller_title: str = None,
+) -> dict:
+    """
+    Non-mutating readiness probe for Storyteller transcript assets.
+    """
+    result = {
+        "ready": False,
+        "reason": "unknown",
+        "transcriptions_dir": None,
+        "expected_count": 0,
+        "found_count": 0,
+        "source_files": [],
+        "expected_files": [],
+        "chapterless_mode": False,
+    }
+
+    assets_dir_raw = os.environ.get("STORYTELLER_ASSETS_DIR", "").strip()
+    if not assets_dir_raw:
+        result["ready"] = True
+        result["reason"] = "assets_not_configured"
+        return result
+
+    chapter_list = chapters if isinstance(chapters, list) else []
+    assets_root = Path(assets_dir_raw)
+    title_dir = _resolve_storyteller_title_dir(
+        assets_root,
+        abs_title or "",
+        storyteller_title=storyteller_title,
+    )
+    if not title_dir:
+        result["reason"] = "title_dir_missing"
+        return result
+
+    transcriptions_dir = title_dir / "transcriptions"
+    result["transcriptions_dir"] = transcriptions_dir
+    if not transcriptions_dir.exists() or not transcriptions_dir.is_dir():
+        result["reason"] = "transcriptions_dir_missing"
+        return result
+
+    numeric_pattern = re.compile(r"^\d{5}-\d{5}\.json$")
+    numeric_files = [p.name for p in transcriptions_dir.glob("*.json") if numeric_pattern.match(p.name)]
+    result["found_count"] = len(numeric_files)
+
+    expected_count = len(chapter_list)
+    chapterless_mode = expected_count <= 0
+    result["chapterless_mode"] = chapterless_mode
+    if chapterless_mode:
+        expected_count = len(numeric_files)
+        if expected_count <= 0:
+            result["reason"] = "chapter_set_incomplete"
+            return result
+
+    result["expected_count"] = expected_count
+
+    is_valid, source_files, expected_files = _validate_storyteller_chapters(
+        transcriptions_dir, expected_count
+    )
+    result["source_files"] = source_files
+    result["expected_files"] = expected_files
+    if not is_valid:
+        result["reason"] = "chapter_set_incomplete"
+        return result
+
+    result["ready"] = True
+    result["reason"] = "validated"
+    return result
+
+
 def ingest_storyteller_transcripts(
     abs_id: str,
     abs_title: str,
@@ -786,51 +899,41 @@ def ingest_storyteller_transcripts(
     Copy Storyteller chapter JSON files into bridge-managed data storage and write a manifest.
     Returns manifest path on success.
     """
-    assets_dir_raw = os.environ.get("STORYTELLER_ASSETS_DIR", "").strip()
-    if not assets_dir_raw:
-        return None
-
-    chapter_list = chapters if isinstance(chapters, list) else []
-
-    assets_root = Path(assets_dir_raw)
-    title_dir = _resolve_storyteller_title_dir(
-        assets_root,
-        abs_title or "",
+    probe = probe_storyteller_transcripts(
+        abs_title,
+        chapters,
         storyteller_title=storyteller_title,
     )
-    if not title_dir:
+    if probe["reason"] == "assets_not_configured":
+        return None
+    if probe["reason"] == "title_dir_missing":
         logger.info(f"Storyteller transcripts not found for '{abs_id}' (title='{_sanitize_log_data(abs_title)}')")
         return None
-
-    transcriptions_dir = title_dir / "transcriptions"
-    if not transcriptions_dir.exists() or not transcriptions_dir.is_dir():
+    if probe["reason"] == "transcriptions_dir_missing":
+        transcriptions_dir = probe["transcriptions_dir"]
         logger.info(f"Storyteller transcriptions directory missing for '{abs_id}' at '{transcriptions_dir}'")
         return None
-
-    expected_count = len(chapter_list)
-    chapterless_mode = expected_count <= 0
-    if chapterless_mode:
-        numeric_pattern = re.compile(r"^\d{5}-\d{5}\.json$")
-        numeric_files = [p.name for p in transcriptions_dir.glob("*.json") if numeric_pattern.match(p.name)]
-        expected_count = len(numeric_files)
-        if expected_count <= 0:
-            logger.info(
-                f"Storyteller ingest skipped for '{abs_id}': no ABS chapters and no storyteller chapter files at "
-                f"'{transcriptions_dir}'"
-            )
-            return None
-        logger.info(
-            f"Storyteller ingest chapterless mode for '{abs_id}': deriving {expected_count} chapters from "
-            f"'{transcriptions_dir}'"
-        )
-
-    is_valid, source_files, expected_files = _validate_storyteller_chapters(transcriptions_dir, expected_count)
-    if not is_valid:
+    if not probe["ready"]:
+        transcriptions_dir = probe["transcriptions_dir"]
+        expected_count = probe["expected_count"]
         logger.info(
             f"Storyteller transcripts rejected for '{abs_id}': expected {expected_count} chapter files at "
             f"'{transcriptions_dir}'"
         )
         return None
+
+    chapter_list = chapters if isinstance(chapters, list) else []
+    transcriptions_dir = probe["transcriptions_dir"]
+    expected_count = probe["expected_count"]
+    source_files = probe["source_files"]
+    expected_files = probe["expected_files"]
+    chapterless_mode = probe["chapterless_mode"]
+
+    if chapterless_mode:
+        logger.info(
+            f"Storyteller ingest chapterless mode for '{abs_id}': deriving {expected_count} chapters from "
+            f"'{transcriptions_dir}'"
+        )
 
     data_dir = Path(os.environ.get("DATA_DIR", "/data"))
     target_dir = data_dir / "transcripts" / "storyteller" / abs_id

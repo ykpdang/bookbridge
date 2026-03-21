@@ -1,15 +1,17 @@
 import logging
 import threading
 import shutil
+import tempfile
 import time
 import os
 import html
 import re
+import uuid
 from pathlib import Path
 from urllib.parse import urljoin
 import requests
 
-from src.services.alignment_service import ingest_storyteller_transcripts
+from src.services.alignment_service import ingest_storyteller_transcripts, probe_storyteller_transcripts
 from src.utils.storyteller_transcript import StorytellerTranscript
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,181 @@ class ForgeService:
         if normalized not in VALID_STAGE_MODES:
             return DEFAULT_STAGE_MODE
         return normalized
+
+    @staticmethod
+    def _path_is_within(child: Path, parent: Path) -> bool:
+        try:
+            child.resolve().relative_to(parent.resolve())
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _existing_anchor(path: Path) -> Path:
+        current = Path(path)
+        while not current.exists() and current != current.parent:
+            current = current.parent
+        return current
+
+    @staticmethod
+    def _same_device(path_a: Path, path_b: Path) -> bool:
+        try:
+            anchor_a = ForgeService._existing_anchor(path_a)
+            anchor_b = ForgeService._existing_anchor(path_b)
+            return anchor_a.resolve().stat().st_dev == anchor_b.resolve().stat().st_dev
+        except Exception:
+            return False
+
+    def _resolve_storyteller_paths(self, safe_title: str) -> dict:
+        watch_root = Path(os.environ.get("STORYTELLER_LIBRARY_DIR", "/storyteller_library"))
+        sibling_incoming_root = watch_root.with_name(f".{watch_root.name}_incoming")
+        sibling_backup_root = watch_root.with_name(f".{watch_root.name}_replaced")
+        configured_incoming_raw = os.environ.get("STORYTELLER_STAGING_DIR", "").strip()
+        incoming_root = Path(configured_incoming_raw) if configured_incoming_raw else sibling_incoming_root
+        backup_root = sibling_backup_root
+        cross_device = False
+
+        def _choose_roots() -> tuple[Path, Path, bool]:
+            """Return (incoming_root, backup_root, cross_device)."""
+            if self._same_device(sibling_incoming_root, watch_root):
+                return sibling_incoming_root, sibling_backup_root, False
+            # Sibling dir is cross-device (common with Docker volume mounts).
+            # Never fall back to a child of watch_root — Storyteller watches it
+            # recursively and would trigger scans during staging.  Use a system
+            # temp directory instead; the reveal step will use shutil.copytree.
+            tmp_root = Path(tempfile.mkdtemp(prefix=".forge_stage_"))
+            logger.info(
+                "Forge: sibling staging root '%s' is cross-device from watched root '%s'; "
+                "using temp dir '%s'",
+                sibling_incoming_root,
+                watch_root,
+                tmp_root,
+            )
+            return tmp_root, tmp_root, True
+
+        if configured_incoming_raw:
+            invalid_location = (
+                incoming_root.resolve() == watch_root.resolve()
+                or self._path_is_within(incoming_root, watch_root)
+            )
+            if invalid_location:
+                incoming_root, backup_root, cross_device = _choose_roots()
+                logger.warning(
+                    "Forge: STORYTELLER_STAGING_DIR '%s' is inside watched root '%s'; using '%s' instead",
+                    configured_incoming_raw,
+                    watch_root,
+                    incoming_root,
+                )
+            elif not self._same_device(incoming_root, watch_root):
+                incoming_root, backup_root, cross_device = _choose_roots()
+                logger.warning(
+                    "Forge: STORYTELLER_STAGING_DIR '%s' is cross-device from '%s'; using '%s' instead",
+                    configured_incoming_raw,
+                    watch_root,
+                    incoming_root,
+                )
+        else:
+            incoming_root, backup_root, cross_device = _choose_roots()
+
+        run_suffix = uuid.uuid4().hex[:8]
+        staging_course_dir = incoming_root / f"{safe_title}.{run_suffix}"
+        final_course_dir = watch_root / safe_title
+        backup_course_dir = backup_root / f"{safe_title}.{run_suffix}"
+        return {
+            "watch_root": watch_root,
+            "incoming_root": incoming_root,
+            "backup_root": backup_root,
+            "final_course_dir": final_course_dir,
+            "staging_course_dir": staging_course_dir,
+            "backup_course_dir": backup_course_dir,
+            "cross_device": cross_device,
+        }
+
+    @staticmethod
+    def _prepare_storyteller_stage_dir(staging_course_dir: Path) -> Path:
+        staging_course_dir.mkdir(parents=True, exist_ok=True)
+        return staging_course_dir
+
+    @staticmethod
+    def _prepare_storyteller_stage_permissions(staging_course_dir: Path) -> None:
+        if hasattr(staging_course_dir, "_mock_name"):
+            return
+        for path in [staging_course_dir] + [p for p in staging_course_dir.rglob("*") if p.is_dir()]:
+            try:
+                os.chmod(str(path), 0o777)
+            except Exception:
+                pass
+
+    def _reveal_storyteller_stage_dir(
+        self,
+        staging_course_dir: Path,
+        final_course_dir: Path,
+        backup_course_dir: Path,
+        cross_device: bool = False,
+    ) -> Path:
+        staging_course_dir = Path(staging_course_dir)
+        final_course_dir = Path(final_course_dir)
+        backup_course_dir = Path(backup_course_dir)
+        final_course_dir.parent.mkdir(parents=True, exist_ok=True)
+        if not cross_device:
+            backup_course_dir.parent.mkdir(parents=True, exist_ok=True)
+
+        backup_created = False
+        if not cross_device and backup_course_dir.exists():
+            shutil.rmtree(backup_course_dir)
+
+        try:
+            if final_course_dir.exists():
+                if cross_device:
+                    logger.info(
+                        "Forge: removing existing watched folder '%s' (cross-device, no backup)",
+                        final_course_dir,
+                    )
+                    shutil.rmtree(final_course_dir)
+                else:
+                    logger.info(
+                        "Forge: replacing existing watched folder '%s' via backup '%s'",
+                        final_course_dir,
+                        backup_course_dir,
+                    )
+                    final_course_dir.rename(backup_course_dir)
+                    backup_created = True
+
+            if cross_device:
+                logger.info("Forge: revealing staged folder into watched root with copytree")
+                shutil.copytree(str(staging_course_dir), str(final_course_dir))
+                shutil.rmtree(staging_course_dir)
+            else:
+                logger.info("Forge: revealing staged folder into watched root with single rename")
+                staging_course_dir.rename(final_course_dir)
+        except Exception:
+            if backup_created and not final_course_dir.exists() and backup_course_dir.exists():
+                try:
+                    backup_course_dir.rename(final_course_dir)
+                except Exception as rollback_err:
+                    logger.error(
+                        "Forge: failed to restore backup '%s' -> '%s': %s",
+                        backup_course_dir,
+                        final_course_dir,
+                        rollback_err,
+                    )
+            raise
+
+        if backup_created and backup_course_dir.exists():
+            shutil.rmtree(backup_course_dir)
+
+        return final_course_dir
+
+    @staticmethod
+    def _cleanup_temp_staging_root(incoming_root: Path, cross_device: bool) -> None:
+        """Remove the temp directory created by mkdtemp when cross-device staging was used."""
+        if not cross_device:
+            return
+        try:
+            if incoming_root.exists():
+                shutil.rmtree(incoming_root, ignore_errors=True)
+        except Exception:
+            pass
 
     def _should_cleanup_staged_sources(self, stage_mode: str) -> bool:
         return self._normalize_stage_mode(stage_mode) == DEFAULT_STAGE_MODE
@@ -285,22 +462,26 @@ class ForgeService:
         safe_title: str,
         epub_filename: str,
         title: str,
+        chapters: list,
         course_dir: Path,
         epub_cache: Path,
         found_uuid: str,
         processing_triggered: bool,
         poll_count: int,
+        existing_probe_download_path: Path = None,
     ):
         """
         Execute one completion-poll cycle for auto-forge.
         """
         completion_method = None
         readaloud_path = None
-        probe_download_path = None
+        probe_download_path = existing_probe_download_path if existing_probe_download_path else None
         api_ready_seen = False
         details = None
         processing_ready = False
         processing_state = "not_checked"
+        transcript_probe = probe_storyteller_transcripts(title, chapters, storyteller_title=None)
+        transcripts_ready = bool(transcript_probe.get("ready"))
 
         if not found_uuid:
             recovered_uuid = self._discover_storyteller_uuid(st_client, safe_title, epub_filename, title)
@@ -312,6 +493,12 @@ class ForgeService:
             details, processing_ready, processing_state = self._get_storyteller_processing_state(
                 st_client, found_uuid
             )
+            transcript_probe = probe_storyteller_transcripts(
+                title,
+                chapters,
+                storyteller_title=details.get("title") if isinstance(details, dict) else None,
+            )
+            transcripts_ready = bool(transcript_probe.get("ready"))
 
         if found_uuid and not processing_triggered and processing_ready:
             try:
@@ -326,16 +513,16 @@ class ForgeService:
             )
 
         readaloud_path = self._find_processed_epub(course_dir)
-        if readaloud_path:
-            completion_method = "local_readaloud"
-            return {
-                "found_uuid": found_uuid,
-                "processing_triggered": processing_triggered,
-                "readaloud_path": readaloud_path,
-                "completion_method": completion_method,
-                "probe_download_path": probe_download_path,
-                "api_ready_seen": api_ready_seen,
-            }
+        if readaloud_path and poll_count % 4 == 0:
+            logger.info(
+                "Auto-Forge: Local readaloud candidate seen at %s, not yet considered complete",
+                readaloud_path,
+            )
+        if not transcripts_ready and transcript_probe.get("reason") != "assets_not_configured" and poll_count % 4 == 0:
+            logger.info(
+                "Auto-Forge: Transcript assets not ready yet (reason=%s)",
+                transcript_probe.get("reason"),
+            )
 
         if found_uuid:
             readaloud_meta = details.get("readaloud", {}) if isinstance(details, dict) else {}
@@ -345,6 +532,11 @@ class ForgeService:
                 # Track readiness for diagnostics, but do not mark completion yet.
                 api_ready_seen = True
 
+            if probe_download_path and Path(probe_download_path).exists():
+                api_ready_seen = True
+                if transcripts_ready:
+                    completion_method = "api_download"
+
             if poll_count % 4 == 0:
                 probe_path = epub_cache / f".storyteller_probe_{found_uuid}.epub"
                 try:
@@ -352,11 +544,19 @@ class ForgeService:
                         if probe_path.exists() and probe_path.stat().st_size > 0:
                             probe_download_path = probe_path
                             api_ready_seen = True
-                            completion_method = "api_download"
+                            if transcripts_ready:
+                                completion_method = "api_download"
+                            else:
+                                logger.info(
+                                    "Auto-Forge: API readaloud downloadable for %s, waiting for transcript assets",
+                                    found_uuid,
+                                )
+                    elif poll_count % 8 == 0:
+                        logger.info("Auto-Forge: API readaloud still not downloadable for %s", found_uuid)
                 except Exception as probe_err:
                     logger.debug(f"Auto-Forge: probe download not ready for {found_uuid}: {probe_err}")
                 finally:
-                    if completion_method != "api_download" and probe_path.exists():
+                    if probe_download_path != probe_path and probe_path.exists():
                         try:
                             probe_path.unlink()
                         except Exception:
@@ -369,6 +569,7 @@ class ForgeService:
             "completion_method": completion_method,
             "probe_download_path": probe_download_path,
             "api_ready_seen": api_ready_seen,
+            "transcript_probe": transcript_probe,
         }
 
     def _copy_audio_files(self, abs_id: str, dest_folder: Path, stage_mode: str = DEFAULT_STAGE_MODE):
@@ -443,8 +644,110 @@ class ForgeService:
             logger.error(f"❌ Failed to copy ABS '{abs_id}': {e}", exc_info=True)
             return False
 
-    def _copy_booklore_audio_files(self, book_id: str, dest_folder: Path) -> bool:
-        """Download audiobook tracks from Booklore into dest_folder."""
+    def _iter_booklore_audio_candidates(self, book_detail) -> list[dict]:
+        if not isinstance(book_detail, dict):
+            return []
+
+        candidates = []
+        for entry in [book_detail.get("primaryFile")]:
+            if isinstance(entry, dict):
+                candidates.append(entry)
+
+        for key in ("bookFiles", "alternativeFormats", "supplementaryFiles"):
+            entries = book_detail.get(key) or []
+            if isinstance(entries, list):
+                candidates.extend(entry for entry in entries if isinstance(entry, dict))
+
+        audio_candidates = []
+        for candidate in candidates:
+            file_name = str(candidate.get("fileName") or candidate.get("filename") or "").strip()
+            file_path = str(candidate.get("filePath") or candidate.get("filepath") or "").strip()
+            suffix = Path(file_name or file_path).suffix.lower()
+            book_type = str(candidate.get("bookType") or "").upper()
+            if book_type != "AUDIOBOOK" and suffix not in AUDIO_EXTENSIONS:
+                continue
+            audio_candidates.append(
+                {
+                    **candidate,
+                    "fileName": file_name,
+                    "filePath": file_path,
+                }
+            )
+        return audio_candidates
+
+    def _resolve_booklore_local_path(self, file_info: dict) -> Path | None:
+        if not isinstance(file_info, dict):
+            return None
+
+        raw_path = str(file_info.get("filePath") or file_info.get("filepath") or "").strip()
+        file_name = str(file_info.get("fileName") or file_info.get("filename") or "").strip()
+
+        if raw_path:
+            candidate = Path(raw_path)
+            if candidate.exists():
+                return candidate
+
+            parts = Path(raw_path).parts
+            for i in range(4, 0, -1):
+                if len(parts) < i:
+                    continue
+                suffix = Path(*parts[-i:])
+                candidate = self.ABS_AUDIO_ROOT / suffix
+                if candidate.exists():
+                    return candidate
+
+        if file_name:
+            matches = list(self.ABS_AUDIO_ROOT.glob(f"**/{Path(file_name).name}"))
+            if matches:
+                return matches[0]
+
+        return None
+
+    def _resolve_booklore_local_audio_files(self, book_id: str, info: dict) -> list[dict]:
+        book_detail = self.booklore_client.get_book_by_id(book_id)
+        candidates = self._iter_booklore_audio_candidates(book_detail)
+        resolved = []
+        seen = set()
+
+        for candidate in candidates:
+            local_path = self._resolve_booklore_local_path(candidate)
+            if not local_path:
+                continue
+
+            resolved_path = self._safe_resolve(local_path)
+            if resolved_path in seen:
+                continue
+            seen.add(resolved_path)
+
+            resolved.append(
+                {
+                    **candidate,
+                    "local_path": local_path,
+                    "resolved_name": Path(local_path).name,
+                }
+            )
+
+        return resolved
+
+    @staticmethod
+    def _track_sort_key(idx: int, track: dict):
+        raw_index = track.get("index")
+        if isinstance(raw_index, int):
+            return (raw_index, idx)
+        return (idx, idx)
+
+    def _stage_booklore_local_file(self, src_path: Path, dest_path: Path, stage_mode: str) -> str:
+        result = self._stage_local_file(src_path, dest_path, stage_mode, "BookLore audio")
+        if result == HARDLINK_STAGE_MODE:
+            logger.info("BookLore audio: staged local file via hardlink '%s' -> '%s'", src_path.name, dest_path.name)
+        elif result == "copy":
+            logger.info("BookLore audio: staged local file via copy '%s' -> '%s'", src_path.name, dest_path.name)
+        else:
+            logger.info("BookLore audio: staged local file already present '%s'", dest_path.name)
+        return result
+
+    def _copy_booklore_audio_files(self, book_id: str, dest_folder: Path, stage_mode: str = DEFAULT_STAGE_MODE) -> bool:
+        """Stage audiobook tracks from BookLore into dest_folder."""
         def infer_ext(track: dict, info: dict) -> str:
             allowed = {"mp3", "m4a", "m4b", "flac", "ogg", "opus", "aac", "wav"}
             raw_ext = str(track.get("extension") or track.get("ext") or "").lower().strip().lstrip(".")
@@ -465,6 +768,7 @@ class ForgeService:
             return "mp3"
 
         try:
+            normalized_stage_mode = self._normalize_stage_mode(stage_mode)
             info = self.booklore_client.get_audiobook_info(book_id)
             if not info:
                 logger.warning(f"No audiobook info found for Booklore book '{book_id}'")
@@ -499,6 +803,90 @@ class ForgeService:
             )
 
             dest_folder.mkdir(parents=True, exist_ok=True)
+            local_files = self._resolve_booklore_local_audio_files(book_id, info)
+            book_detail = self.booklore_client.get_book_by_id(book_id, allow_refresh=False)
+            local_candidate_count = len(self._iter_booklore_audio_candidates(book_detail))
+
+            if local_files:
+                should_use_single_stream_local = (
+                    track_mode == "chapter_markers_single_stream"
+                    or local_candidate_count == 1
+                    or (len(local_files) == 1 and len(tracks) <= 1)
+                )
+                if should_use_single_stream_local:
+                    local_file = local_files[0]
+                    local_path = Path(local_file["local_path"])
+                    ext = local_path.suffix.lstrip(".").lower() or infer_ext({}, info)
+                    dest_path = dest_folder / f"track_000.{ext}"
+                    logger.info("BookLore audio: using single-stream local file '%s'", local_path.name)
+                    self._stage_booklore_local_file(local_path, dest_path, normalized_stage_mode)
+                    return True
+
+                track_names_present = all(
+                    str(track.get("fileName") or track.get("filename") or "").strip()
+                    for track in tracks
+                )
+                if track_names_present:
+                    by_name = {}
+                    by_name_lower = {}
+                    for local_file in local_files:
+                        for name in {
+                            str(local_file.get("fileName") or "").strip(),
+                            str(local_file.get("resolved_name") or "").strip(),
+                        }:
+                            if not name:
+                                continue
+                            by_name.setdefault(name, local_file)
+                            by_name_lower.setdefault(name.lower(), local_file)
+
+                    matched_files = []
+                    used_paths = set()
+                    ordered_tracks = sorted(enumerate(tracks), key=lambda item: self._track_sort_key(item[0], item[1]))
+                    for _, track in ordered_tracks:
+                        track_name = str(track.get("fileName") or track.get("filename") or "").strip()
+                        local_file = by_name.get(track_name) or by_name_lower.get(track_name.lower())
+                        local_path = Path(local_file["local_path"]) if local_file else None
+                        resolved_key = self._safe_resolve(local_path) if local_path else None
+                        if not local_file or resolved_key in used_paths:
+                            matched_files = []
+                            break
+                        used_paths.add(resolved_key)
+                        matched_files.append((track, local_file))
+
+                    if matched_files and len(matched_files) == len(tracks):
+                        logger.info("BookLore audio: using filename-based local track mapping")
+                        for idx, (track, local_file) in enumerate(matched_files):
+                            local_path = Path(local_file["local_path"])
+                            ext = local_path.suffix.lstrip(".").lower() or infer_ext(track, info)
+                            dest_path = dest_folder / f"track_{idx:03d}.{ext}"
+                            self._stage_booklore_local_file(local_path, dest_path, normalized_stage_mode)
+                        return True
+
+                if len(local_files) == len(tracks):
+                    logger.info("BookLore audio: using positional track mapping")
+                    ordered_tracks = [track for _, track in sorted(
+                        enumerate(tracks), key=lambda item: self._track_sort_key(item[0], item[1])
+                    )]
+                    ordered_local_files = sorted(
+                        local_files,
+                        key=lambda item: str(
+                            item.get("fileName") or item.get("resolved_name") or ""
+                        ).lower(),
+                    )
+                    for idx, (track, local_file) in enumerate(zip(ordered_tracks, ordered_local_files)):
+                        local_path = Path(local_file["local_path"])
+                        ext = local_path.suffix.lstrip(".").lower() or infer_ext(track, info)
+                        dest_path = dest_folder / f"track_{idx:03d}.{ext}"
+                        self._stage_booklore_local_file(local_path, dest_path, normalized_stage_mode)
+                    return True
+
+                logger.info(
+                    "BookLore audio: local resolution incomplete, falling back to download "
+                    "(resolved=%s expected=%s)",
+                    len(local_files),
+                    len(tracks),
+                )
+
             downloaded = 0
 
             for idx, track in enumerate(tracks):
@@ -546,14 +934,79 @@ class ForgeService:
             logger.error(f"Failed to copy Booklore audio for book '{book_id}': {e}", exc_info=True)
             return False
 
-    def start_manual_forge(self, abs_id, text_item, title, author, stage_mode: str = DEFAULT_STAGE_MODE):
+    @staticmethod
+    def _collect_audio_files(root_dir: Path) -> list[Path]:
+        root_dir = Path(root_dir)
+        if not root_dir.exists():
+            return []
+        audio_files = []
+        for candidate in sorted(root_dir.rglob("*")):
+            if candidate.is_file() and candidate.suffix.lower() in AUDIO_EXTENSIONS:
+                audio_files.append(candidate)
+        return audio_files
+
+    @staticmethod
+    def _build_local_audio_inputs(audio_files: list[Path]) -> list[dict]:
+        return [
+            {
+                "local_path": str(path),
+                "ext": path.suffix.lstrip("."),
+            }
+            for path in audio_files
+        ]
+
+    def _get_whisper_audio_inputs(
+        self,
+        course_dir: Path,
+        abs_id: str,
+        audio_source: str | None,
+        audio_source_id: str | None,
+    ) -> list[dict]:
+        staged_audio = self._collect_audio_files(course_dir)
+        if staged_audio:
+            logger.info("Auto-Forge: Whisper fallback using staged source audio")
+            return self._build_local_audio_inputs(staged_audio)
+
+        if audio_source == "BookLore" and audio_source_id:
+            cache_root = self.ebook_parser.epub_cache_dir / "whisper_source_audio" / str(audio_source_id)
+            cache_root.mkdir(parents=True, exist_ok=True)
+            cached_audio = self._collect_audio_files(cache_root)
+            if not cached_audio:
+                if not self._copy_booklore_audio_files(audio_source_id, cache_root, stage_mode=DEFAULT_STAGE_MODE):
+                    return []
+                cached_audio = self._collect_audio_files(cache_root)
+            if cached_audio:
+                logger.info("Auto-Forge: Whisper fallback using BookLore audio source")
+                return self._build_local_audio_inputs(cached_audio)
+            return []
+
+        logger.info("Auto-Forge: Whisper fallback using ABS audio source")
+        return self.abs_client.get_audio_files(abs_id) or []
+
+    def start_manual_forge(
+        self,
+        abs_id,
+        text_item,
+        title,
+        author,
+        audio_source: str = None,
+        audio_source_id: str = None,
+        stage_mode: str = DEFAULT_STAGE_MODE,
+    ):
         """
         Start manual forge process in background thread.
         """
         normalized_stage_mode = self._normalize_stage_mode(stage_mode)
         thread_kwargs = {}
+        thread_options = {}
+        if audio_source:
+            thread_options["audio_source"] = audio_source
+        if audio_source_id:
+            thread_options["audio_source_id"] = audio_source_id
         if normalized_stage_mode != DEFAULT_STAGE_MODE:
-            thread_kwargs["kwargs"] = {"stage_mode": normalized_stage_mode}
+            thread_options["stage_mode"] = normalized_stage_mode
+        if thread_options:
+            thread_kwargs["kwargs"] = thread_options
         thread = threading.Thread(
             target=self._forge_background_task,
             args=(abs_id, text_item, title, author),
@@ -562,7 +1015,16 @@ class ForgeService:
         )
         thread.start()
 
-    def _forge_background_task(self, abs_id, text_item, title, author, stage_mode: str = DEFAULT_STAGE_MODE):
+    def _forge_background_task(
+        self,
+        abs_id,
+        text_item,
+        title,
+        author,
+        audio_source: str = None,
+        audio_source_id: str = None,
+        stage_mode: str = DEFAULT_STAGE_MODE,
+    ):
         """
         Background thread: copy files to Storyteller library, trigger processing, cleanup.
         """
@@ -576,33 +1038,31 @@ class ForgeService:
         try:
             safe_author = self.safe_folder_name(author) if author else "Unknown"
             safe_title = self.safe_folder_name(title) if title else "Unknown"
-            
-            st_lib_path = Path(os.environ.get("STORYTELLER_LIBRARY_DIR", "/storyteller_library"))
-            dest_base = Path(os.environ.get("PROCESSING_DIR", "/tmp"))
-
-            final_course_dir = st_lib_path / safe_title
-            hidden_staging_dir = st_lib_path / f".staging_{safe_title}"
-            processing_dir = dest_base / f"forge_staging_{safe_title}"
-
-            if final_course_dir.exists():
-                logger.warning(f"⚠️ Target directory '{final_course_dir}' already exists. Using it directly")
-                course_dir = final_course_dir
-            else:
-                course_dir = processing_dir
-                course_dir.mkdir(parents=True, exist_ok=True)
+            storyteller_paths = self._resolve_storyteller_paths(safe_title)
+            final_course_dir = storyteller_paths["final_course_dir"]
+            staging_course_dir = storyteller_paths["staging_course_dir"]
+            backup_course_dir = storyteller_paths["backup_course_dir"]
+            cross_device = storyteller_paths["cross_device"]
+            course_dir = self._prepare_storyteller_stage_dir(staging_course_dir)
 
             audio_dest = course_dir
-            
-            logger.info(f"⚡ Forge: Staging files for '{title}' in '{course_dir}' (Atomic)")
+
+            logger.info("Forge: staging in %s dir '%s'",
+                        "temp (cross-device)" if cross_device else "sibling",
+                        course_dir)
 
             # Step 1: Copy audio files
-            audio_ok = self._copy_audio_files(abs_id, audio_dest, stage_mode=stage_mode)
+            if audio_source == "BookLore" and audio_source_id:
+                audio_ok = self._copy_booklore_audio_files(audio_source_id, audio_dest, stage_mode=stage_mode)
+            else:
+                audio_ok = self._copy_audio_files(abs_id, audio_dest, stage_mode=stage_mode)
             if not audio_ok:
                 logger.error(f"❌ Forge: Failed to copy audio files for '{abs_id}'")
                 try:
-                    if course_dir.exists() and course_dir != final_course_dir: 
-                        shutil.rmtree(course_dir) 
+                    if course_dir.exists():
+                        shutil.rmtree(course_dir)
                 except: pass
+                self._cleanup_temp_staging_root(storyteller_paths["incoming_root"], cross_device)
                 return
             logger.info(f"⚡ Forge: Audio files copied for '{title}'")
 
@@ -669,47 +1129,32 @@ class ForgeService:
             if not text_success:
                 logger.error(f"❌ Forge: Text acquisition failed — Aborting")
                 try:
-                    if course_dir.exists() and course_dir != final_course_dir:
+                    if course_dir.exists():
                         shutil.rmtree(course_dir)
                 except: pass
+                self._cleanup_temp_staging_root(storyteller_paths["incoming_root"], cross_device)
                 return
 
-            # TWO-STEP ATOMIC TRANSFER
-            if course_dir != final_course_dir:
+            try:
+                logger.info("Forge: preparing Storyteller directory permissions before reveal")
+                self._prepare_storyteller_stage_permissions(course_dir)
+                course_dir = self._reveal_storyteller_stage_dir(
+                    staging_course_dir=course_dir,
+                    final_course_dir=final_course_dir,
+                    backup_course_dir=backup_course_dir,
+                    cross_device=cross_device,
+                )
+            except Exception as e:
+                logger.error(f"❌ Forge: Atomic transfer failed: {e}")
                 try:
-                    logger.info(f"⚡ Forge: Transferring to Storyteller volume as hidden folder...")
-                    if hidden_staging_dir.exists():
-                        shutil.rmtree(hidden_staging_dir)
-                    if final_course_dir.exists():
-                        shutil.rmtree(final_course_dir)
+                    if course_dir.exists():
+                        shutil.rmtree(course_dir)
+                except Exception:
+                    pass
+                self._cleanup_temp_staging_root(storyteller_paths["incoming_root"], cross_device)
+                raise Exception(f"Atomic move failed: {e}")
 
-                    # Step 1: Cross-device move to hidden folder inside Storyteller library
-                    shutil.move(str(course_dir), str(hidden_staging_dir))
-                                        # Fix permissions for Storyteller (node uid 1000)
-                    try:
-                        if not hasattr(hidden_staging_dir, '_mock_name'):
-                            for chmod_root, chmod_dirs, chmod_files in os.walk(str(hidden_staging_dir)):
-                                for d in chmod_dirs: 
-                                    try: os.chmod(os.path.join(chmod_root, d), 0o777)
-                                    except: pass
-                                for f in chmod_files: 
-                                    try: os.chmod(os.path.join(chmod_root, f), 0o666)
-                                    except: pass
-                            try: os.chmod(str(hidden_staging_dir), 0o777)
-                            except: pass
-                    except Exception as chmod_err:
-                        pass
-                    logger.info(f"⚡ Forge: Atomically revealing folder to Storyteller scanner...")
-                    hidden_staging_dir.rename(final_course_dir)
-                    course_dir = final_course_dir
-                except Exception as e:
-                    logger.error(f"❌ Forge: Atomic transfer failed: {e}")
-                    try: shutil.rmtree(course_dir)
-                    except: pass
-                    try: shutil.rmtree(hidden_staging_dir)
-                    except: pass
-                    raise Exception(f"Atomic move failed: {e}")
-
+            self._cleanup_temp_staging_root(storyteller_paths["incoming_root"], cross_device)
             logger.info(f"⚡ Forge: Files staged. Waiting for Storyteller to detect '{title}'...")
 
             # Trigger Storyteller Processing via API
@@ -817,8 +1262,10 @@ class ForgeService:
                         completed_epub_path = processed_epub
                         try:
                             logger.info(f"⚡ Forge: Extracting SMIL transcript from {completed_epub_path.name}...")
-                            item_details = self.abs_client.get_item_details(abs_id)
-                            chapters = item_details.get('media', {}).get('chapters', []) if item_details else []
+                            chapters = []
+                            if audio_source != "BookLore":
+                                item_details = self.abs_client.get_item_details(abs_id)
+                                chapters = item_details.get('media', {}).get('chapters', []) if item_details else []
                             book_text, _ = self.ebook_parser.extract_text_and_map(completed_epub_path)
                             raw_transcript = self.transcriber.transcribe_from_smil(
                                 abs_id, completed_epub_path, chapters, full_book_text=book_text
@@ -905,6 +1352,8 @@ class ForgeService:
         epub_dest = None
         cleanup_requested = False
         cleanup_preserve_paths = []
+        storyteller_paths = None
+        cross_device = False
 
         try:
             original_ebook_filename = self._extract_original_filename(text_item, original_filename)
@@ -912,23 +1361,19 @@ class ForgeService:
             # --- STAGING & TRIGGER ---
             safe_author = self.safe_folder_name(author) if author else "Unknown"
             safe_title = self.safe_folder_name(title) if title else "Unknown"
-            st_lib_path = Path(os.environ.get("STORYTELLER_LIBRARY_DIR", "/storyteller_library"))
-            dest_base = Path(os.environ.get("PROCESSING_DIR", "/tmp"))
+            storyteller_paths = self._resolve_storyteller_paths(safe_title)
+            final_course_dir = storyteller_paths["final_course_dir"]
+            staging_course_dir = storyteller_paths["staging_course_dir"]
+            backup_course_dir = storyteller_paths["backup_course_dir"]
+            cross_device = storyteller_paths["cross_device"]
+            course_dir = self._prepare_storyteller_stage_dir(staging_course_dir)
+            logger.info("Forge: staging in %s dir '%s'",
+                        "temp (cross-device)" if cross_device else "sibling",
+                        course_dir)
 
-            final_course_dir = st_lib_path / safe_title
-            hidden_staging_dir = st_lib_path / f".staging_{safe_title}"
-            processing_dir = dest_base / f"forge_staging_{safe_title}"
-
-            if final_course_dir.exists():
-                logger.warning(f"⚠️ Target directory '{final_course_dir}' already exists. Using it directly")
-                course_dir = final_course_dir
-            else:
-                course_dir = processing_dir
-                course_dir.mkdir(parents=True, exist_ok=True)
-            
             # Copy Audio
             if audio_source == 'BookLore' and audio_source_id:
-                if not self._copy_booklore_audio_files(audio_source_id, course_dir):
+                if not self._copy_booklore_audio_files(audio_source_id, course_dir, stage_mode=stage_mode):
                     raise Exception("Failed to copy Booklore audio files")
             else:
                 if not self._copy_audio_files(abs_id, course_dir, stage_mode=stage_mode):
@@ -964,48 +1409,40 @@ class ForgeService:
             if not epub_dest.exists():
                 raise Exception("Failed to acquire text source")
 
-            # TWO-STEP ATOMIC TRANSFER
-            if course_dir != final_course_dir:
+            try:
+                logger.info("Forge: preparing Storyteller directory permissions before reveal")
+                self._prepare_storyteller_stage_permissions(course_dir)
+                course_dir = self._reveal_storyteller_stage_dir(
+                    staging_course_dir=course_dir,
+                    final_course_dir=final_course_dir,
+                    backup_course_dir=backup_course_dir,
+                    cross_device=cross_device,
+                )
+            except Exception as e:
+                logger.error(f"❌ Forge: Atomic transfer failed: {e}")
                 try:
-                    logger.info(f"⚡ Forge: Transferring to Storyteller volume as hidden folder...")
-                    if hidden_staging_dir.exists():
-                        shutil.rmtree(hidden_staging_dir)
-                    if final_course_dir.exists():
-                        shutil.rmtree(final_course_dir)
+                    if course_dir.exists():
+                        shutil.rmtree(course_dir)
+                except Exception:
+                    pass
+                self._cleanup_temp_staging_root(storyteller_paths["incoming_root"], cross_device)
+                raise Exception(f"Atomic move failed: {e}")
 
-                    # Step 1: Cross-device move to hidden folder inside Storyteller library
-                    shutil.move(str(course_dir), str(hidden_staging_dir))
-                                        # Fix permissions for Storyteller (node uid 1000)
-                    try:
-                        if not hasattr(hidden_staging_dir, '_mock_name'):
-                            for chmod_root, chmod_dirs, chmod_files in os.walk(str(hidden_staging_dir)):
-                                for d in chmod_dirs: 
-                                    try: os.chmod(os.path.join(chmod_root, d), 0o777)
-                                    except: pass
-                                for f in chmod_files: 
-                                    try: os.chmod(os.path.join(chmod_root, f), 0o666)
-                                    except: pass
-                            try: os.chmod(str(hidden_staging_dir), 0o777)
-                            except: pass
-                    except Exception as chmod_err:
-                        pass
-                    logger.info(f"⚡ Forge: Atomically revealing folder to Storyteller scanner...")
-                    hidden_staging_dir.rename(final_course_dir)
-                    course_dir = final_course_dir
-                except Exception as e:
-                    logger.error(f"❌ Forge: Atomic transfer failed: {e}")
-                    try: shutil.rmtree(course_dir)
-                    except: pass
-                    try: shutil.rmtree(hidden_staging_dir)
-                    except: pass
-                    raise Exception(f"Atomic move failed: {e}")
-
+            self._cleanup_temp_staging_root(storyteller_paths["incoming_root"], cross_device)
             logger.info("⚡ Auto-Forge: Files staged. Waiting for Storyteller detection...")
 
             # Trigger Storyteller
             st_client = self.storyteller_client
             found_uuid = None
             epub_filename = f"{safe_title}.epub"
+            item_details = None
+            chapters = []
+            try:
+                item_details = self.abs_client.get_item_details(abs_id)
+            except Exception as item_err:
+                logger.debug(f"Auto-Forge: failed to fetch item details for chapters ({abs_id}): {item_err}")
+            if item_details:
+                chapters = item_details.get("media", {}).get("chapters", []) or []
 
             processing_triggered = False
             ready = False
@@ -1065,6 +1502,7 @@ class ForgeService:
             completion_method = None
             api_ready_seen = False
             probe_download_path = None
+            transcript_probe = probe_storyteller_transcripts(title, chapters)
 
             epub_cache = self.ebook_parser.epub_cache_dir
             if not epub_cache.exists():
@@ -1080,17 +1518,20 @@ class ForgeService:
                     safe_title=safe_title,
                     epub_filename=epub_filename,
                     title=title,
+                    chapters=chapters,
                     course_dir=course_dir,
                     epub_cache=epub_cache,
                     found_uuid=found_uuid,
                     processing_triggered=processing_triggered,
                     poll_count=poll_count,
+                    existing_probe_download_path=probe_download_path,
                 )
                 found_uuid = poll_result["found_uuid"]
                 processing_triggered = poll_result["processing_triggered"]
                 readaloud_path = poll_result["readaloud_path"] or readaloud_path
                 probe_download_path = poll_result["probe_download_path"] or probe_download_path
                 api_ready_seen = api_ready_seen or poll_result["api_ready_seen"]
+                transcript_probe = poll_result["transcript_probe"]
                 completion_method = poll_result["completion_method"]
                 if completion_method:
                     break
@@ -1103,6 +1544,8 @@ class ForgeService:
                     timeout_reason.append("no_artifact_local")
                 if found_uuid and not api_ready_seen:
                     timeout_reason.append("api_not_ready")
+                if transcript_probe and not transcript_probe.get("ready"):
+                    timeout_reason.append(f"transcripts_{transcript_probe.get('reason')}")
                 reason_str = ",".join(timeout_reason) if timeout_reason else "unknown"
 
                 logger.warning(
@@ -1129,17 +1572,20 @@ class ForgeService:
                         safe_title=safe_title,
                         epub_filename=epub_filename,
                         title=title,
+                        chapters=chapters,
                         course_dir=course_dir,
                         epub_cache=epub_cache,
                         found_uuid=found_uuid,
                         processing_triggered=processing_triggered,
                         poll_count=poll_count,
+                        existing_probe_download_path=probe_download_path,
                     )
                     found_uuid = poll_result["found_uuid"]
                     processing_triggered = poll_result["processing_triggered"]
                     readaloud_path = poll_result["readaloud_path"] or readaloud_path
                     probe_download_path = poll_result["probe_download_path"] or probe_download_path
                     api_ready_seen = api_ready_seen or poll_result["api_ready_seen"]
+                    transcript_probe = poll_result["transcript_probe"]
                     completion_method = poll_result["completion_method"]
 
                 if not completion_method:
@@ -1149,7 +1595,9 @@ class ForgeService:
                     )
                     return
 
-            completion_msg = f"Auto-Forge: Completion detected via {completion_method}"
+            completion_msg = f"Auto-Forge: Completion confirmed via {completion_method}"
+            if transcript_probe.get("reason") == "validated":
+                completion_msg += " + validated_transcripts"
             if readaloud_path:
                 completion_msg += f" ({readaloud_path})"
             logger.info(completion_msg)
@@ -1173,13 +1621,15 @@ class ForgeService:
                     if not st_client.download_book(found_uuid, target_path):
                         raise Exception("API download returned False")
                 except Exception as api_err:
-                    if readaloud_path and readaloud_path.exists():
-                        logger.warning(f"Auto-Forge: API download failed ({api_err}). Using local file: {readaloud_path}")
+                    if completion_method == "api_download" and readaloud_path and readaloud_path.exists():
+                        logger.warning(
+                            "Auto-Forge: API download failed after confirmed readiness (%s). Using local file fallback: %s",
+                            api_err,
+                            readaloud_path,
+                        )
                         shutil.copy2(readaloud_path, target_path)
                     else:
                         raise Exception(f"Failed to download Storyteller artifact and no local fallback available: {api_err}")
-            elif readaloud_path and readaloud_path.exists():
-                shutil.copy2(readaloud_path, target_path)
             else:
                 raise Exception("Auto-Forge completion detected but no downloadable artifact source was available")
 
@@ -1198,8 +1648,6 @@ class ForgeService:
                  logger.info(f"⚡ Auto-Forge: Generated New Hash (Artifact): {new_hash}")
 
             # --- EXTRACT TEXT ---
-            item_details = self.abs_client.get_item_details(abs_id)
-            chapters = item_details.get('media', {}).get('chapters', []) if item_details else []
             text_source_path = target_path
             if original_filename:
                 original_candidates = []
@@ -1256,9 +1704,12 @@ class ForgeService:
                     transcript_source = "smil"
                 if not raw_transcript:
                     logger.info("Auto-Forge: SMIL unavailable/rejected. Falling back to Whisper transcription...")
-                    audio_files = self.abs_client.get_audio_files(abs_id)
+                    audio_files = self._get_whisper_audio_inputs(course_dir, abs_id, audio_source, audio_source_id)
                     if not audio_files:
-                        raise Exception("Auto-Forge: ABS returned no audio files for Whisper fallback.")
+                        source_name = "BookLore" if audio_source == "BookLore" and audio_source_id else "ABS"
+                        raise Exception(
+                            f"Auto-Forge: no audio files available for Whisper fallback (source={source_name})."
+                        )
                     raw_transcript = self.transcriber.process_audio(
                         abs_id, audio_files, full_book_text=book_text
                     )
@@ -1335,6 +1786,9 @@ class ForgeService:
                     )
             except Exception as cleanup_err:
                 logger.warning(f"Auto-Forge: Final cleanup failed: {cleanup_err}")
+
+            if cross_device and storyteller_paths:
+                self._cleanup_temp_staging_root(storyteller_paths["incoming_root"], cross_device)
 
             with self.lock:
                 self.active_tasks.discard(title)

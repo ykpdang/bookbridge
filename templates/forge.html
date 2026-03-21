@@ -774,7 +774,7 @@
 
         function searchAudio(q) {
             const container = document.getElementById('audioResults');
-            container.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p style="color: rgba(255,255,255,0.5)">Searching ABS...</p></div>';
+            container.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p style="color: rgba(255,255,255,0.5)">Searching audio sources...</p></div>';
 
             fetch(`/api/forge/search_audio?q=${encodeURIComponent(q)}`)
                 .then(r => r.json())
@@ -796,13 +796,18 @@
                         const coverHtml = item.cover_url
                             ? `<div class="card-cover"><img src="${item.cover_url}" alt="" onerror="this.parentElement.innerHTML='🎧'"></div>`
                             : `<div class="card-cover">🎧</div>`;
+                        const badgeClass = ((item.audio_source || 'ABS').toLowerCase() === 'booklore') ? 'booklore' : 'abs';
 
                         card.innerHTML = `
                             ${coverHtml}
                             <div class="card-info">
                                 <div class="card-title">${escapeHtml(item.title)}</div>
                                 <div class="card-author">${escapeHtml(item.author || '')}</div>
-                                <div class="card-meta">${item.num_files} file${item.num_files !== 1 ? 's' : ''} · ${item.file_size_mb} MB</div>
+                                <div class="card-meta">
+                                    <span class="source-badge ${badgeClass}">${escapeHtml(item.audio_source || 'ABS')}</span>
+                                    · ${item.num_files} file${item.num_files !== 1 ? 's' : ''}
+                                    · ${item.file_size_mb} MB
+                                </div>
                             </div>
                         `;
                         container.appendChild(card);
@@ -926,6 +931,8 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     abs_id: selectedAudio.id,
+                    audio_source: selectedAudio.audio_source || 'ABS',
+                    audio_source_id: selectedAudio.audio_source_id || selectedAudio.id,
                     text_item: selectedText,
                     forge_stage_mode: stageMode
                 })

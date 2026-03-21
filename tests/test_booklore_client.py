@@ -194,6 +194,42 @@ def test_save_to_db_on_fetch(mock_db):
              assert saved_book.filename == "newbook.epub"
 
 
+def test_get_book_by_id_returns_cached_hydrated_detail(booklore_client):
+    cached = make_detail("cached-1", title="Cached Book", filename="cached-book.epub")
+    booklore_client._book_id_cache = {"cached-1": cached}
+
+    with patch.object(booklore_client, "_fetch_and_cache_detail") as mock_fetch:
+        result = booklore_client.get_book_by_id("cached-1")
+
+    assert result == cached
+    mock_fetch.assert_not_called()
+
+
+def test_get_book_by_id_refreshes_missing_or_unhydrated_detail(booklore_client):
+    lightweight = {
+        "id": "cached-2",
+        "title": "Thin Entry",
+        "fileName": "thin-entry.epub",
+        "_needs_detail": True,
+    }
+    refreshed = make_detail("cached-2", title="Hydrated Book", filename="hydrated-book.epub")
+    booklore_client._book_id_cache = {"cached-2": lightweight}
+
+    with patch.object(booklore_client, "_fetch_and_cache_detail", return_value=refreshed) as mock_fetch:
+        result = booklore_client.get_book_by_id("cached-2")
+
+    assert result == refreshed
+    mock_fetch.assert_called_once_with("cached-2", force_refresh=True)
+
+
+def test_get_book_by_id_returns_none_for_unknown_id(booklore_client):
+    with patch.object(booklore_client, "_fetch_and_cache_detail", return_value=None) as mock_fetch:
+        result = booklore_client.get_book_by_id("missing-id")
+
+    assert result is None
+    mock_fetch.assert_called_once_with("missing-id", force_refresh=True)
+
+
 def test_get_fresh_token_retries_duplicate_refresh_token_conflict(booklore_client):
     conflict_response = MagicMock()
     conflict_response.status_code = 400

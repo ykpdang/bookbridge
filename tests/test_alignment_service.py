@@ -1,7 +1,14 @@
 import pytest
 import json
+import os
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock
-from src.services.alignment_service import AlignmentService
+from src.services.alignment_service import (
+    AlignmentService,
+    _resolve_storyteller_title_dir,
+    probe_storyteller_transcripts,
+)
 from src.utils.polisher import Polisher
 from src.db.models import BookAlignment
 
@@ -88,3 +95,138 @@ def test_get_time_for_text(service, mock_db):
     # Test Interpolation (50 chars -> 5.0s)
     ts = service.get_time_for_text("test_id", "query", char_offset_hint=50)
     assert ts == 5.0
+
+
+def test_probe_storyteller_transcripts_returns_ready_when_assets_not_configured():
+    with pytest.MonkeyPatch.context() as mp:
+        mp.delenv("STORYTELLER_ASSETS_DIR", raising=False)
+        result = probe_storyteller_transcripts("Auto Book", [])
+
+    assert result["ready"] is True
+    assert result["reason"] == "assets_not_configured"
+
+
+def test_probe_storyteller_transcripts_returns_not_ready_when_transcriptions_dir_missing():
+    with tempfile.TemporaryDirectory() as tmp:
+        assets_root = Path(tmp)
+        (assets_root / "assets" / "Auto Book").mkdir(parents=True, exist_ok=True)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("STORYTELLER_ASSETS_DIR", str(assets_root))
+            result = probe_storyteller_transcripts("Auto Book", [{"start": 0.0, "end": 1.0}])
+
+    assert result["ready"] is False
+    assert result["reason"] == "transcriptions_dir_missing"
+
+
+def test_probe_storyteller_transcripts_returns_not_ready_when_chapter_files_incomplete():
+    with tempfile.TemporaryDirectory() as tmp:
+        assets_root = Path(tmp)
+        transcriptions_dir = assets_root / "assets" / "Auto Book" / "transcriptions"
+        transcriptions_dir.mkdir(parents=True, exist_ok=True)
+        (transcriptions_dir / "00000-00001.json").write_text(
+            json.dumps({"transcript": "hello", "wordTimeline": []}),
+            encoding="utf-8",
+        )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("STORYTELLER_ASSETS_DIR", str(assets_root))
+            result = probe_storyteller_transcripts(
+                "Auto Book",
+                [{"start": 0.0, "end": 1.0}, {"start": 1.0, "end": 2.0}],
+            )
+
+    assert result["ready"] is False
+    assert result["reason"] == "chapter_set_incomplete"
+
+
+def test_probe_storyteller_transcripts_returns_ready_when_validated():
+    with tempfile.TemporaryDirectory() as tmp:
+        assets_root = Path(tmp)
+        transcriptions_dir = assets_root / "assets" / "Auto Book" / "transcriptions"
+        transcriptions_dir.mkdir(parents=True, exist_ok=True)
+        for idx in range(2):
+            (transcriptions_dir / f"00000-{idx + 1:05d}.json").write_text(
+                json.dumps({"transcript": "hello", "wordTimeline": [{"endTime": 1.0}]}),
+                encoding="utf-8",
+            )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("STORYTELLER_ASSETS_DIR", str(assets_root))
+            result = probe_storyteller_transcripts(
+                "Auto Book",
+                [{"start": 0.0, "end": 1.0}, {"start": 1.0, "end": 2.0}],
+            )
+
+    assert result["ready"] is True
+    assert result["reason"] == "validated"
+
+
+def test_resolve_storyteller_title_dir_prefers_suffixed_dir_with_transcriptions_over_bare_dir_without_transcriptions():
+    with tempfile.TemporaryDirectory() as tmp:
+        assets_root = Path(tmp)
+        bare_dir = assets_root / "assets" / "Trad Wife"
+        suffixed_dir = assets_root / "assets" / "Trad Wife [5j7RKcRZ]"
+        bare_dir.mkdir(parents=True, exist_ok=True)
+        transcriptions_dir = suffixed_dir / "transcriptions"
+        transcriptions_dir.mkdir(parents=True, exist_ok=True)
+        (transcriptions_dir / "00001-00001.json").write_text(
+            json.dumps({"transcript": "hello", "wordTimeline": []}),
+            encoding="utf-8",
+        )
+
+        result = _resolve_storyteller_title_dir(assets_root, "Trad Wife")
+
+    assert result == suffixed_dir
+
+
+def test_probe_storyteller_transcripts_uses_suffixed_storyteller_assets_dir():
+    with tempfile.TemporaryDirectory() as tmp:
+        assets_root = Path(tmp)
+        (assets_root / "assets" / "Trad Wife").mkdir(parents=True, exist_ok=True)
+        transcriptions_dir = assets_root / "assets" / "Trad Wife [5j7RKcRZ]" / "transcriptions"
+        transcriptions_dir.mkdir(parents=True, exist_ok=True)
+        for idx in range(2):
+            (transcriptions_dir / f"00001-{idx + 1:05d}.json").write_text(
+                json.dumps({"transcript": "hello", "wordTimeline": [{"endTime": 1.0}]}),
+                encoding="utf-8",
+            )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("STORYTELLER_ASSETS_DIR", str(assets_root))
+            result = probe_storyteller_transcripts(
+                "Trad Wife",
+                [{"start": 0.0, "end": 1.0}, {"start": 1.0, "end": 2.0}],
+            )
+
+    assert result["ready"] is True
+    assert result["transcriptions_dir"] == transcriptions_dir
+
+
+def test_resolve_storyteller_title_dir_matches_title_with_bracket_suffix_when_only_suffixed_dir_exists():
+    with tempfile.TemporaryDirectory() as tmp:
+        assets_root = Path(tmp)
+        suffixed_dir = assets_root / "assets" / "Trad Wife [5j7RKcRZ]"
+        suffixed_dir.mkdir(parents=True, exist_ok=True)
+
+        result = _resolve_storyteller_title_dir(assets_root, "Trad Wife")
+
+    assert result == suffixed_dir
+
+
+def test_resolve_storyteller_title_dir_returns_none_when_multiple_transcript_ready_suffix_variants_exist():
+    with tempfile.TemporaryDirectory() as tmp:
+        assets_root = Path(tmp)
+        first_dir = assets_root / "assets" / "Trad Wife [5j7RKcRZ]"
+        second_dir = assets_root / "assets" / "Trad Wife [ABCD1234]"
+        for folder in (first_dir, second_dir):
+            transcriptions_dir = folder / "transcriptions"
+            transcriptions_dir.mkdir(parents=True, exist_ok=True)
+            (transcriptions_dir / "00001-00001.json").write_text(
+                json.dumps({"transcript": "hello", "wordTimeline": []}),
+                encoding="utf-8",
+            )
+
+        result = _resolve_storyteller_title_dir(assets_root, "Trad Wife")
+
+    assert result is None

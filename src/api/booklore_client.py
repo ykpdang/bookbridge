@@ -1099,6 +1099,43 @@ class BookloreClient:
                 return self._book_id_cache.get(book_id)
         return None
 
+    def _get_cached_book_by_id(self, book_id):
+        target_id = str(book_id)
+        with self._cache_lock:
+            direct = self._book_id_cache.get(book_id)
+            if isinstance(direct, dict):
+                return direct
+
+            for cache_key, book_info in self._book_id_cache.items():
+                if not isinstance(book_info, dict):
+                    continue
+                cache_book_id = book_info.get("id")
+                if str(cache_key) == target_id or str(cache_book_id) == target_id:
+                    return book_info
+        return None
+
+    @staticmethod
+    def _has_hydrated_file_metadata(book):
+        if not isinstance(book, dict):
+            return False
+
+        if isinstance(book.get("primaryFile"), dict):
+            return True
+
+        if any(isinstance(book.get(key), list) for key in ("bookFiles", "alternativeFormats", "supplementaryFiles")):
+            return True
+
+        return bool(book.get("filePath"))
+
+    def get_book_by_id(self, book_id, allow_refresh=True):
+        """Return a hydrated BookLore book detail by ID."""
+        cached = self._get_cached_book_by_id(book_id)
+        if cached and self._has_hydrated_file_metadata(cached):
+            return cached
+        if not allow_refresh:
+            return cached
+        return self._fetch_and_cache_detail(book_id, force_refresh=True)
+
     def _normalize_string(self, s):
         """Remove non-alphanumeric characters and lowercase."""
         import re
