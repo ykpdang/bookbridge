@@ -240,6 +240,63 @@ class StorytellerAPIClient:
         pct, ts, href, fragment, _chapter_progress = self.get_position_details_rich(book_uuid)
         return pct, ts, href, fragment
 
+    def get_readium_positions(self, book_uuid: str) -> list:
+        """Return Readium positions array for a book, or [] on failure."""
+        response = self._make_request("GET", f"/api/v2/books/{book_uuid}/read/~readium/positions.json")
+        if not response or response.status_code != 200:
+            return []
+        try:
+            data = response.json()
+        except Exception:
+            return []
+
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            positions = data.get("positions")
+            if isinstance(positions, list):
+                return positions
+        return []
+
+    def resolve_exact_position(self, book_uuid: str, href: str, chapter_progress: float) -> Optional[int]:
+        """Resolve the nearest Readium position index for a locator href + progression."""
+        try:
+            target_progress = float(chapter_progress)
+        except (TypeError, ValueError):
+            return None
+
+        target_href = unquote(href)
+        matches = []
+        for entry in self.get_readium_positions(book_uuid):
+            if not isinstance(entry, dict):
+                continue
+
+            entry_href = entry.get("href")
+            if not isinstance(entry_href, str):
+                continue
+            if unquote(entry_href) != target_href:
+                continue
+
+            locations = entry.get("locations")
+            if not isinstance(locations, dict):
+                continue
+
+            progression = locations.get("progression")
+            position = locations.get("position")
+            try:
+                progression = float(progression)
+                position = int(position)
+            except (TypeError, ValueError):
+                continue
+
+            matches.append((abs(progression - target_progress), position))
+
+        if not matches:
+            return None
+
+        matches.sort(key=lambda item: (item[0], item[1]))
+        return matches[0][1]
+
     def get_all_positions_bulk(self) -> dict:
         """Fetch all book positions in one pass. Returns {title_lower: {pct, ts, href, frag, chapter_progress, uuid}}"""
         if not self._book_cache:
@@ -328,8 +385,6 @@ class StorytellerAPIClient:
                 locator["locations"]["fragments"] = fragments
             if rich_locator.chapter_progress is not None:
                 locator["locations"]["progression"] = rich_locator.chapter_progress
-            if rich_locator.match_index is not None:
-                locator["locations"]["position"] = rich_locator.match_index
             if rich_locator.cfi:
                 locator["locations"]["cfi"] = rich_locator.cfi
 
@@ -379,12 +434,25 @@ class StorytellerAPIClient:
         if not rich_locator or logger.isEnabledFor(logging.DEBUG):
             previous_payload = self.get_position_details_payload(book_uuid)
 
+        exact_position = None
+        if rich_locator and rich_locator.href and rich_locator.chapter_progress is not None:
+            try:
+                exact_position = self.resolve_exact_position(
+                    book_uuid, rich_locator.href, rich_locator.chapter_progress
+                )
+            except Exception:
+                exact_position = None
+
         payload = self._build_position_payload(
             book_uuid=book_uuid,
             percentage=percentage,
             rich_locator=rich_locator,
             previous_payload=previous_payload,
         )
+
+        if exact_position is not None:
+            payload["locator"]["locations"]["position"] = exact_position
+
         new_ts = payload["timestamp"]
         self._log_locator_diff(book_uuid, previous_payload, payload)
 
