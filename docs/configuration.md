@@ -27,7 +27,7 @@ ports:
 
 #### Audiobookshelf
 
-Audiobookshelf remains the default audiobook source when a mapping is not explicitly using Booklore audio.
+Audiobookshelf remains the default audiobook source when a mapping is not explicitly using Grimmory audio.
 
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |
@@ -76,28 +76,28 @@ Storyteller notes:
 - Storyteller timing data stays the preferred alignment source whenever valid transcript assets are available.
 - **Settings -> Storyteller Backfill** rechecks existing Storyteller-linked books and rebuilds their alignment data without rerunning Whisper.
 
-#### Booklore
+#### Grimmory
 
-Booklore now supports both ebook sync and Booklore audiobook-backed mappings.
+Grimmory now supports both ebook sync and Grimmory audiobook-backed mappings.
 
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |
-| Enable | `BOOKLORE_ENABLED` | `false` | Turns on Booklore support. |
-| Server URL | `BOOKLORE_SERVER` | empty | Booklore base URL. |
-| Username | `BOOKLORE_USER` | empty | Booklore username. |
-| Password | `BOOKLORE_PASSWORD` | empty | Booklore password. |
+| Enable | `BOOKLORE_ENABLED` | `false` | Turns on Grimmory support. |
+| Server URL | `BOOKLORE_SERVER` | empty | Grimmory base URL. |
+| Username | `BOOKLORE_USER` | empty | Grimmory username. |
+| Password | `BOOKLORE_PASSWORD` | empty | Grimmory password. |
 | Shelf Name | `BOOKLORE_SHELF_NAME` | `Kobo` | Shelf used for matched ebooks. |
 | Library ID | `BOOKLORE_LIBRARY_ID` | empty | Optional library restriction. |
-| Poll Mode | `BOOKLORE_POLL_MODE` | `global` | `global` uses the main sync cycle. `custom` polls Booklore separately. |
+| Poll Mode | `BOOKLORE_POLL_MODE` | `global` | `global` uses the main sync cycle. `custom` polls Grimmory separately. |
 | Poll Interval | `BOOKLORE_POLL_SECONDS` | `300` | Used when Poll Mode is `custom`. |
 
-Booklore notes:
+Grimmory notes:
 
-- Match, Batch Match, Suggestions, and Forge can now use **Booklore audiobooks** as the audio source.
-- The dashboard shows **BL Audio** progress when a mapping is driven by Booklore audio.
-- **Settings -> Refresh Booklore Cache** forces a fresh cache rebuild after imports, removals, or large metadata changes.
+- Match, Batch Match, Suggestions, and Forge can now use **Grimmory audiobooks** as the audio source.
+- The dashboard shows **BL Audio** progress when a mapping is driven by Grimmory audio.
+- **Settings -> Refresh Grimmory Cache** forces a fresh cache rebuild after imports, removals, or large metadata changes.
 
-Advanced Booklore cache tuning:
+Advanced Grimmory cache tuning:
 
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |
@@ -150,7 +150,7 @@ Suggestions notes:
 
 - A normal scan reuses cached results so repeat scans are faster.
 - **Full Refresh** rescans the whole unmatched library from scratch.
-- Suggestions can queue ABS-backed links, Booklore-audio links, ebook-only links, and Storyteller-only links.
+- Suggestions can queue ABS-backed links, Grimmory-audio links, ebook-only links, and Storyteller-only links.
 
 ### Transcription Settings
 

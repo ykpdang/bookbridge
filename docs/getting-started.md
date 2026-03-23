@@ -13,7 +13,7 @@ Before you begin, you should have:
 - Docker and Docker Compose
 - A working Audiobookshelf server
 - An ebook folder on the Docker host
-- Optional: KOSync, Booklore, Storyteller, or Hardcover if you want those integrations
+- Optional: KOSync, Grimmory, Storyteller, or Hardcover if you want those integrations
 
 ---
 
@@ -39,7 +39,7 @@ If you want searches scoped to one ABS library:
 If you plan to use them, also keep these handy:
 
 - KOSync URL, username, and password
-- Booklore URL, username, and password
+- Grimmory URL, username, and password
 - Storyteller URL, username, and password
 
 ---
@@ -69,7 +69,7 @@ services:
       - TZ=America/New_York
       - LOG_LEVEL=INFO
       # - KOSYNC_PORT=5758  # Optional: enable split-port mode
-      # Configure ABS, KOSync, Booklore, Storyteller, and other services in the Web UI.
+      # Configure ABS, KOSync, Grimmory, Storyteller, and other services in the Web UI.
     volumes:
       - ./data:/data
       - /path/to/ebooks:/books
@@ -90,7 +90,7 @@ If you want to expose only the KOSync endpoint to the internet:
 !!! tip "Optional Integrations"
     It is usually easiest to start with the minimal compose file above and finish configuration in the Web UI.
 
-    If you enable Booklore, the bridge can use it for both ebook matching and Booklore audiobook sources.
+    If you enable Grimmory, the bridge can use it for both ebook matching and Grimmory audiobook sources.
 
     Forge uploads directly to Storyteller over the API, so a Storyteller library mount is not required for normal Forge imports.
 
@@ -119,7 +119,7 @@ docker compose logs -f
 2. Enter your **Audiobookshelf Server URL**, **API Token**, and **Library ID**.
 3. Add any optional services you want to use:
    - KOSync
-   - Booklore
+   - Grimmory
    - Storyteller
    - Hardcover
 4. If you mounted Storyteller assets, set **Storyteller Assets Path** to `/storyteller`.
@@ -142,7 +142,7 @@ You can start in either of these ways:
 ### Add Book
 
 1. Open **Add Book**.
-2. Pick an ABS audiobook, a Booklore audiobook, or leave audio on **None / Skip** for an ebook-only link.
+2. Pick an ABS audiobook, a Grimmory audiobook, or leave audio on **None / Skip** for an ebook-only link.
 3. Optionally pick a Storyteller title.
 4. Pick the standard ebook.
 5. Click **Create Mapping**.

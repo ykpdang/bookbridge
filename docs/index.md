@@ -15,7 +15,7 @@
 
 ## What is it?
 
-**ABS-KoSync Enhanced** is a self-hosted sync engine for audiobooks and ebooks. It keeps your reading and listening position aligned across multiple apps, whether the source is Audiobookshelf, Booklore, KOReader, or Storyteller.
+**ABS-KoSync Enhanced** is a self-hosted sync engine for audiobooks and ebooks. It keeps your reading and listening position aligned across multiple apps, whether the source is Audiobookshelf, Grimmory, KOReader, or Storyteller.
 
 ### Five-Way Synchronization
 
@@ -24,7 +24,7 @@
 | **Audiobookshelf** | Audiobooks + optional ebooks | Full read/write sync |
 | **KOReader / KOSync** | Ebooks | Full read/write sync |
 | **Storyteller** | Read-along reader | Full read/write sync |
-| **Booklore** | Ebooks + audiobooks | Full read/write sync |
+| **Grimmory** | Ebooks + audiobooks | Full read/write sync |
 | **Hardcover.app** | Reading tracker | Write-only tracking |
 
 ---
@@ -33,8 +33,8 @@
 
 ### Core Sync Engine
 
-- **Five-way sync** across Audiobookshelf, KOReader, Storyteller, Booklore, and Hardcover.
-- **Flexible source support**: use Audiobookshelf or Booklore as the audio source, or create ebook-only links when no audiobook is needed.
+- **Five-way sync** across Audiobookshelf, KOReader, Storyteller, Grimmory, and Hardcover.
+- **Flexible source support**: use Audiobookshelf or Grimmory as the audio source, or create ebook-only links when no audiobook is needed.
 - **Split-port security** so the KOSync endpoint can be exposed separately from the dashboard.
 - **Smart conflict handling** with anti-regression guardrails and a deadband to avoid tiny cross-format bounce-backs.
 - **Rich locators** using timestamps, href/fragment data, XPath, and EPUB CFI where available.
@@ -44,7 +44,7 @@
 ### Management Web UI
 
 - **Dashboard** for live sync status, direct service links, and source badges.
-- **Add Book** for ABS, Booklore, Storyteller, or ebook-only matching flows.
+- **Add Book** for ABS, Grimmory, Storyteller, or ebook-only matching flows.
 - **Batch Match** for queue-based review and bulk linking.
 - **Library Suggestions** for background scanning, review, and queue building.
 - **Forge** for Storyteller read-along preparation.
@@ -54,8 +54,8 @@
 
 - **Background daemon** with configurable polling.
 - **Instant sync** from ABS playback events and KOReader pushes when enabled.
-- **Per-client polling** for Storyteller and Booklore.
-- **Booklore cache refresh** and Storyteller backfill maintenance tools.
+- **Per-client polling** for Storyteller and Grimmory.
+- **Grimmory cache refresh** and Storyteller backfill maintenance tools.
 
 ---
 
@@ -88,5 +88,5 @@ graph TD
     L --> A
 ```
 
-!!! note "Storyteller and Booklore"
-    Storyteller transcript assets improve locator quality, and Booklore can now act as either an ebook target or the audiobook source for a mapping.
+!!! note "Storyteller and Grimmory"
+    Storyteller transcript assets improve locator quality, and Grimmory can now act as either an ebook target or the audiobook source for a mapping.

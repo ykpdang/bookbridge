@@ -22,8 +22,8 @@ For the full history of changes, please refer to the **[GitHub Releases](https:/
 ### Added
 
 - Added a dedicated **Library Suggestions** workspace with background scans, cached repeat scans, and a **Full Refresh** option.
-- Added **Booklore audiobook** support across Match, Batch Match, Suggestions, Forge, and the dashboard.
-- Added more flexible linking flows, including ebook-only links, Storyteller-only links, and a **Refresh Booklore Cache** action in Settings.
+- Added **Grimmory audiobook** support across Match, Batch Match, Suggestions, Forge, and the dashboard.
+- Added more flexible linking flows, including ebook-only links, Storyteller-only links, and a **Refresh Grimmory Cache** action in Settings.
 
 ### Changed
 
@@ -34,7 +34,7 @@ For the full history of changes, please refer to the **[GitHub Releases](https:/
 
 - Fixed cross-format drift cases that could cause bounce-backs or bad resets.
 - Fixed ebook-only links getting stuck in processing.
-- Fixed edge cases where Storyteller-only links or stale Booklore data could break matching or syncing.
+- Fixed edge cases where Storyteller-only links or stale Grimmory data could break matching or syncing.
 
 ---
 
@@ -45,7 +45,7 @@ For the full history of changes, please refer to the **[GitHub Releases](https:/
 - **Tri-Link Architecture**: Maintain a three-way link between ABS audiobook, KOReader ebook, and Storyteller entries.
 - **Auto-Forge Pipeline**: Automated downloading, staging, and upload to Storyteller for processing. Triggered from the Matcher — automatically creates the sync mapping after Storyteller finishes.
 - **Hardcover.app Audiobook Support**: Link specific editions and sync listening progress (in seconds).
-- **Booklore & CWA (OPDS) Integration**: Fetch ebooks from Booklore and OPDS sources.
+- **Grimmory & CWA (OPDS) Integration**: Fetch ebooks from Grimmory and OPDS sources.
 - **Split-Port Security Mode**: Run sync and admin UI on separate ports.
 - **New Transcription Providers**: Support for Whisper.cpp Server, Deepgram API, and CUDA GPU acceleration.
 - **Progress Suggestions**: Smart auto-discovery and suggestions for potential matches.

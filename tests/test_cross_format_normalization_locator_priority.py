@@ -36,6 +36,14 @@ def _manager_with_mocks():
     manager = SyncManager.__new__(SyncManager)
     manager.ebook_parser = MagicMock()
     manager.alignment_service = MagicMock()
+    manager.booklore_client = MagicMock()
+    manager.booklore_client.find_book_by_filename.return_value = None
+    manager.books_dir = None
+    manager.epub_cache_dir = Path("/tmp/epub_cache")
+    manager._sync_cycle_local_epub_cache = {}
+    manager._sync_cycle_ebook_cache = {}
+    # Make _get_local_epub return a dummy path so normalization can proceed
+    manager._get_local_epub = lambda filename: Path(f"/tmp/{filename}")
     manager.sync_clients = {
         "ABS": _StubClient(),
         "KoSync": _StubClient(),
@@ -517,6 +525,8 @@ def test_deadband_allows_switch_when_delta_exceeds_threshold():
 def test_alignment_locator_roundtrip_regenerates_cfi_when_unstable():
     manager = SyncManager.__new__(SyncManager)
     manager.ebook_parser = MagicMock()
+    manager._get_local_epub = lambda filename: Path(f"/tmp/{filename}")
+    manager._sync_cycle_local_epub_cache = {}
     manager.ebook_parser.locator_roundtrip_tolerance = 2
     manager.ebook_parser.resolve_xpath_to_index.return_value = 250
     manager.ebook_parser.get_sentence_level_ko_xpath.return_value = "/body/DocFragment[1]/body/p[1]/text().0"
@@ -549,6 +559,8 @@ def test_alignment_locator_roundtrip_regenerates_cfi_when_unstable():
 def test_roundtrip_prefers_sentence_xpath_before_percent_only():
     manager = SyncManager.__new__(SyncManager)
     manager.ebook_parser = MagicMock()
+    manager._get_local_epub = lambda filename: Path(f"/tmp/{filename}")
+    manager._sync_cycle_local_epub_cache = {}
     manager.ebook_parser.locator_roundtrip_tolerance = 2
     manager.ebook_parser.resolve_xpath_to_index.side_effect = [130, 101]
     manager.ebook_parser.get_sentence_level_ko_xpath.return_value = "/body/DocFragment[1]/body/p[10]/text().0"
@@ -578,6 +590,8 @@ def test_roundtrip_prefers_sentence_xpath_before_percent_only():
 def test_repeated_time_to_locator_roundtrip_stays_within_tolerance():
     manager = SyncManager.__new__(SyncManager)
     manager.ebook_parser = MagicMock()
+    manager._get_local_epub = lambda filename: Path(f"/tmp/{filename}")
+    manager._sync_cycle_local_epub_cache = {}
     manager.ebook_parser.locator_roundtrip_tolerance = 2
     manager.ebook_parser.resolve_xpath_to_index.return_value = 101
     manager.ebook_parser.resolve_cfi_to_index.return_value = 99

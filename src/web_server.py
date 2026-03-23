@@ -326,7 +326,7 @@ ABS_LIBRARY_ID = os.environ.get("ABS_LIBRARY_ID")
 # ABS Collection name for auto-adding matched books
 ABS_COLLECTION_NAME = os.environ.get("ABS_COLLECTION_NAME", "Synced with KOReader")
 
-# Booklore shelf name for auto-adding matched books
+# Grimmory shelf name for auto-adding matched books
 BOOKLORE_SHELF_NAME = os.environ.get("BOOKLORE_SHELF_NAME", "Kobo")
 
 
@@ -465,20 +465,20 @@ def find_ebook_file(filename):
 
 def get_kosync_id_for_ebook(ebook_filename, booklore_id=None, original_filename=None):
     """Get KOSync document ID for an ebook.
-    Tries Booklore API first (if configured and booklore_id provided),
+    Tries Grimmory API first (if configured and booklore_id provided),
     falls back to filesystem if needed.
     """
-    # Try Booklore API first
+    # Try Grimmory API first
     if booklore_id and container.booklore_client().is_configured():
         try:
             content = container.booklore_client().download_book(booklore_id)
             if content:
                 kosync_id = container.ebook_parser().get_kosync_id_from_bytes(ebook_filename, content)
                 if kosync_id:
-                    logger.debug(f"🔍 Computed KOSync ID from Booklore download: '{kosync_id}'")
+                    logger.debug(f"🔍 Computed KOSync ID from Grimmory download: '{kosync_id}'")
                     return kosync_id
         except Exception as e:
-            logger.warning(f"⚠️ Failed to get KOSync ID from Booklore, falling back to filesystem: {e}")
+            logger.warning(f"⚠️ Failed to get KOSync ID from Grimmory, falling back to filesystem: {e}")
 
     # Fall back to filesystem
     ebook_path = find_ebook_file(ebook_filename)
@@ -579,12 +579,12 @@ def get_kosync_id_for_ebook(ebook_filename, booklore_id=None, original_filename=
     if not container.booklore_client().is_configured() and not EBOOK_DIR.exists():
         logger.warning(
             f"⚠️ Cannot compute KOSync ID for '{ebook_filename}': "
-            "Neither Booklore integration nor /books volume is configured. "
-            "Enable Booklore (BOOKLORE_SERVER, BOOKLORE_USER, BOOKLORE_PASSWORD) "
+            "Neither Grimmory integration nor /books volume is configured. "
+            "Enable Grimmory (BOOKLORE_SERVER, BOOKLORE_USER, BOOKLORE_PASSWORD) "
             "or mount the ebooks directory to /books"
         )
     elif not booklore_id and not ebook_path:
-        logger.warning(f"⚠️ Cannot compute KOSync ID for '{ebook_filename}': File not found in Booklore, filesystem, or remote sources")
+        logger.warning(f"⚠️ Cannot compute KOSync ID for '{ebook_filename}': File not found in Grimmory, filesystem, or remote sources")
 
     return None
 
@@ -846,7 +846,7 @@ def _upsert_storyteller_mapping(
         try:
             container.booklore_client().add_to_shelf(shelf_filename, BOOKLORE_SHELF_NAME)
         except Exception as bl_err:
-            logger.warning(f"Failed to add Booklore shelf entry for '{shelf_filename}': {bl_err}")
+            logger.warning(f"Failed to add Grimmory shelf entry for '{shelf_filename}': {bl_err}")
 
     if getattr(saved_book, "sync_mode", "audiobook") == "ebook_only":
         logger.info("Skipping ABS collection side effects for ebook-only mapping '%s'", saved_book.abs_id)
@@ -859,7 +859,7 @@ def _upsert_storyteller_mapping(
 
 
 class EbookResult:
-    """Wrapper to provide consistent interface for ebooks from Booklore, CWA, ABS, or filesystem."""
+    """Wrapper to provide consistent interface for ebooks from Grimmory, CWA, ABS, or filesystem."""
 
     def __init__(self, name, title=None, subtitle=None, authors=None, booklore_id=None, path=None, source=None, source_id=None):
         self.name = name
@@ -960,14 +960,14 @@ def get_suggestion_audiobooks():
 
 
 def get_searchable_ebooks(search_term):
-    """Get ebooks from Booklore API, filesystem, ABS, and CWA.
+    """Get ebooks from Grimmory API, filesystem, ABS, and CWA.
     Returns list of EbookResult objects for consistent interface."""
 
     results = []
     found_filenames = set()
     found_stems = set()  # To dedupe by title stem
 
-    # 1. Booklore
+    # 1. Grimmory
     if container.booklore_client().is_configured():
         try:
             if search_term:
@@ -988,10 +988,10 @@ def get_searchable_ebooks(search_term):
                             subtitle=b.get('subtitle'),
                             authors=b.get('authors'),
                             booklore_id=b.get('id'),
-                            source='Booklore'
+                            source='Grimmory'
                         ))
         except Exception as e:
-            logger.warning(f"⚠️ Booklore search failed: {e}")
+            logger.warning(f"⚠️ Grimmory search failed: {e}")
 
     # 2. ABS ebook libraries
     if search_term:
@@ -1066,8 +1066,8 @@ def get_searchable_ebooks(search_term):
     # Check if we have no sources at all
     if not results and not EBOOK_DIR.exists() and not container.booklore_client().is_configured():
         logger.warning(
-            "⚠️ No ebooks available: Neither Booklore integration nor /books volume is configured. "
-            "Enable Booklore (BOOKLORE_SERVER, BOOKLORE_USER, BOOKLORE_PASSWORD) "
+            "⚠️ No ebooks available: Neither Grimmory integration nor /books volume is configured. "
+            "Enable Grimmory (BOOKLORE_SERVER, BOOKLORE_USER, BOOKLORE_PASSWORD) "
             "or mount the ebooks directory to /books"
         )
 
@@ -1096,6 +1096,7 @@ def _normalize_text_source_type(raw_source):
         return ""
     source_map = {
         "booklore": "Booklore",
+        "grimmory": "Booklore",
         "abs": "ABS",
         "cwa": "CWA",
         "local file": "Local File",
@@ -1185,7 +1186,7 @@ def _create_or_update_booklore_audio_mapping(
         kosync_doc_id = _compute_storyteller_trilink_kosync_id(
             original_ebook_filename,
             resolved_ebook_filename,
-            "BookLore audiobook match",
+            "Grimmory audiobook match",
         )
     else:
         kosync_doc_id = get_kosync_id_for_ebook(resolved_ebook_filename, booklore_ebook_id)
@@ -1249,7 +1250,7 @@ def _create_or_update_booklore_audio_mapping(
         try:
             container.booklore_client().add_to_shelf(shelf_filename, BOOKLORE_SHELF_NAME)
         except Exception as bl_err:
-            logger.warning(f"Failed to add Booklore shelf entry for '{shelf_filename}': {bl_err}")
+            logger.warning(f"Failed to add Grimmory shelf entry for '{shelf_filename}': {bl_err}")
 
     database_service.dismiss_suggestion(saved_book.abs_id)
     if isinstance(saved_book.kosync_doc_id, str) and saved_book.kosync_doc_id.strip():
@@ -1387,7 +1388,7 @@ def settings():
             for key in booklore_setting_keys
         }
         if any(old_booklore_settings[key] != new_booklore_settings[key] for key in booklore_setting_keys):
-            logger.info("Booklore settings changed; clearing Booklore cache before restart")
+            logger.info("Grimmory settings changed; clearing Grimmory cache before restart")
             database_service.clear_all_booklore_books()
             client = container.booklore_client()
             with client._cache_lock:
@@ -1712,7 +1713,7 @@ def index():
                 mapping['abs_url'] = f"{manager.abs_client.base_url}/item/{book.abs_id}"
                 mapping['audio_url'] = mapping['abs_url']
 
-        # Booklore deep link (if configured and book found)
+        # Grimmory deep link (if configured and book found)
         if manager.booklore_client.is_configured():
             bl_book = manager.booklore_client.find_book_by_filename(book.ebook_filename, allow_refresh=False)
             # [FIX] Fallback to original filename if storyteller artifact doesn't match
@@ -1811,7 +1812,7 @@ def forge():
 
 
 def forge_search_audio():
-    """API: Search ABS and BookLore audiobooks for Forge (returns JSON)."""
+    """API: Search ABS and Grimmory audiobooks for Forge (returns JSON)."""
     query = request.args.get('q', '').strip()
     if not query:
         return jsonify([])
@@ -1849,14 +1850,14 @@ def forge_search_audio():
                         "id": bridge_key,
                         "audio_source": "BookLore",
                         "audio_source_id": book_id,
-                        "title": book.get("title") or book.get("fileName") or f"BookLore {book_id}",
+                        "title": book.get("title") or book.get("fileName") or f"Grimmory {book_id}",
                         "author": _coerce_author_display(book.get("authors")),
                         "file_size_mb": round(total_size_bytes / (1024 * 1024), 2) if total_size_bytes else 0,
                         "num_files": num_files,
                         "cover_url": f"/api/booklore/audiobook-cover/{book_id}",
                     })
             except Exception as e:
-                logger.warning(f"⚠️ Forge audio BookLore search failed: {e}")
+                logger.warning(f"⚠️ Forge audio Grimmory search failed: {e}")
 
         all_audiobooks = get_audiobooks_conditionally()
 
@@ -1903,7 +1904,7 @@ def forge_search_audio():
 
 
 def forge_search_text():
-    """API: Unified text source search for Forge - ABS ebooks, Booklore, CWA, local files."""
+    """API: Unified text source search for Forge - ABS ebooks, Grimmory, CWA, local files."""
     query = request.args.get('q', '').strip()
     if not query:
         return jsonify([])
@@ -1912,7 +1913,7 @@ def forge_search_text():
     found_ids = set()  # Dedupe
     query_lower = query.lower()
 
-    # 1. Booklore
+    # 1. Grimmory
     if container.booklore_client().is_configured():
         try:
             books = container.booklore_client().search_books(query)
@@ -1927,12 +1928,12 @@ def forge_search_text():
                                 "id": key,
                                 "title": b.get('title', fname),
                                 "author": b.get('authors', ''),
-                                "source": "Booklore",
+                                "source": "Grimmory",
                                 "filename": fname,
                                 "booklore_id": b.get('id'),
                             })
         except Exception as e:
-            logger.warning(f"⚠️ Forge: Booklore search failed: {e}")
+            logger.warning(f"⚠️ Forge: Grimmory search failed: {e}")
 
     # 2. ABS Ebooks
     try:
@@ -2043,7 +2044,7 @@ def forge_process():
                     metadata.get("title")
                     or book_detail.get("title")
                     or book_detail.get("fileName")
-                    or f"BookLore {audio_source_id}"
+                    or f"Grimmory {audio_source_id}"
                 )
                 author = (
                     _coerce_author_display(book_detail.get("authors"))
@@ -2115,7 +2116,7 @@ def match():
         selected_ab = next((ab for ab in audiobooks if ab['id'] == abs_id), None) if abs_id else None
 
         if request.form.get('action') == 'forge_match' and audio_source not in ('ABS', 'BookLore'):
-            return "Forge match requires an ABS or BookLore audiobook", 400
+            return "Forge match requires an ABS or Grimmory audiobook", 400
 
         if request.form.get('action') == 'forge_match' and audio_source == 'ABS' and not selected_ab:
             return "Audiobook not found", 404
@@ -2164,7 +2165,7 @@ def match():
             logger.info("Match: ebook-only mapping ready for '%s'", sanitize_log_data(saved_book.abs_id))
             return redirect(url_for('index'))
 
-        # [NEW ACTION] Forge & Match (supports both ABS and BookLore audiobooks)
+        # [NEW ACTION] Forge & Match (supports both ABS and Grimmory audiobooks)
         if request.form.get('action') == 'forge_match':
             original_filename = request.form.get('ebook_filename')
             if not original_filename:
@@ -2284,11 +2285,11 @@ def match():
                 if book:
                     booklore_id = book.get('id')
 
-            # Compute KOSync ID (Booklore API first, filesystem fallback)
+            # Compute KOSync ID (Grimmory API first, filesystem fallback)
             kosync_doc_id = get_kosync_id_for_ebook(ebook_filename, booklore_id)
-            
+
         if not kosync_doc_id:
-            logger.warning(f"⚠️ Cannot compute KOSync ID for '{sanitize_log_data(ebook_filename)}': File not found in Booklore or filesystem")
+            logger.warning(f"⚠️ Cannot compute KOSync ID for '{sanitize_log_data(ebook_filename)}': File not found in Grimmory or filesystem")
             return "Could not compute KOSync ID for ebook", 404
 
         # Hash Preservation: If the book already has a kosync_doc_id set,
@@ -2467,7 +2468,7 @@ def batch_match():
                     'bridge_key': _build_bridge_key('BookLore', audio_source_id),
                     'audio_source': 'BookLore',
                     'audio_source_id': audio_source_id,
-                    'audio_title': audio_title or f"BookLore {audio_source_id}",
+                    'audio_title': audio_title or f"Grimmory {audio_source_id}",
                     'audio_duration': audio_duration,
                     'audio_cover_url': audio_cover_url,
                     'audio_provider_book_id': audio_provider_book_id,
@@ -2524,7 +2525,7 @@ def batch_match():
                         )
                         if err_msg:
                             logger.warning(
-                                "Batch Forge skipped BookLore audiobook '%s': %s",
+                                "Batch Forge skipped Grimmory audiobook '%s': %s",
                                 sanitize_log_data(item.get('audio_title') or item.get('audio_source_id')),
                                 err_msg,
                             )
@@ -2692,7 +2693,7 @@ def batch_match():
                     forge_id = _build_bridge_key('BookLore', audio_source_id)
                     if not forge_id:
                         logger.warning(
-                            "Batch Forge skipped '%s': missing BookLore source id",
+                            "Batch Forge skipped '%s': missing Grimmory source id",
                             sanitize_log_data(item.get('audio_title') or item.get('abs_title') or item.get('abs_id')),
                         )
                         continue
@@ -2794,7 +2795,7 @@ def batch_match():
                     )
                     if err_msg:
                         logger.warning(
-                            "⚠️ Batch Match skipped BookLore audiobook '%s': %s",
+                            "⚠️ Batch Match skipped Grimmory audiobook '%s': %s",
                             sanitize_log_data(item.get('audio_title') or item.get('audio_source_id')),
                             err_msg,
                         )
@@ -2840,7 +2841,7 @@ def batch_match():
                         if book:
                             booklore_id = book.get('id')
 
-                    # Compute KOSync ID (Booklore API first, filesystem fallback)
+                    # Compute KOSync ID (Grimmory API first, filesystem fallback)
                     kosync_doc_id = get_kosync_id_for_ebook(ebook_filename, booklore_id)
 
                 if not kosync_doc_id:
@@ -3342,7 +3343,7 @@ def suggestions_page():
                     'bridge_key': bridge_key or _build_bridge_key('BookLore', audio_source_id),
                     'audio_source': 'BookLore',
                     'audio_source_id': audio_source_id,
-                    'audio_title': audio_title or f"BookLore {audio_source_id}",
+                    'audio_title': audio_title or f"Grimmory {audio_source_id}",
                     'audio_duration': audio_duration,
                     'audio_cover_url': audio_cover_url,
                     'audio_provider_book_id': audio_provider_book_id,
@@ -3398,7 +3399,7 @@ def suggestions_page():
                     )
                     if err_msg:
                         logger.warning(
-                            "Suggestions skipped BookLore audiobook '%s': %s",
+                            "Suggestions skipped Grimmory audiobook '%s': %s",
                             sanitize_log_data(item.get('audio_title') or item.get('audio_source_id')),
                             err_msg,
                         )
@@ -3808,7 +3809,7 @@ def cleanup_mapping_resources(book):
             shelf_filename = book.original_ebook_filename or book.ebook_filename
             container.booklore_client().remove_from_shelf(shelf_filename, shelf_name)
         except Exception as e:
-            logger.warning(f"⚠️ Failed to remove from Booklore shelf: {e}")
+            logger.warning(f"⚠️ Failed to remove from Grimmory shelf: {e}")
 
 
 def delete_mapping(abs_id):
@@ -4506,19 +4507,19 @@ def proxy_cover(abs_id):
 logger = logging.getLogger(__name__)
 
 def get_booklore_libraries():
-    """Return available Booklore libraries."""
+    """Return available Grimmory libraries."""
     if not container.booklore_client().is_configured():
-        return jsonify({"error": "Booklore not configured"}), 400
+        return jsonify({"error": "Grimmory not configured"}), 400
 
     libraries = container.booklore_client().get_libraries()
     return jsonify(libraries)
 
 
 def proxy_booklore_audiobook_cover(book_id):
-    """Stream a BookLore audiobook cover through the backend."""
+    """Stream a Grimmory audiobook cover through the backend."""
     client = container.booklore_client()
     if not client.is_configured():
-        return "Booklore not configured", 400
+        return "Grimmory not configured", 400
 
     try:
         content, content_type = client.get_audiobook_cover_bytes(book_id)
@@ -4528,26 +4529,26 @@ def proxy_booklore_audiobook_cover(book_id):
 
         return Response(content, content_type=content_type or "image/jpeg")
     except Exception as e:
-        logger.error(f"❌ Error proxying BookLore audiobook cover for '{book_id}': {e}")
+        logger.error(f"❌ Error proxying Grimmory audiobook cover for '{book_id}': {e}")
         return "Error loading cover", 500
 
 
 def api_booklore_refresh():
-    """Clear Booklore cache and trigger a full refresh."""
+    """Clear Grimmory cache and trigger a full refresh."""
     client = container.booklore_client()
     if not client.is_configured():
-        return jsonify({"success": False, "error": "Booklore not configured"}), 400
+        return jsonify({"success": False, "error": "Grimmory not configured"}), 400
 
     try:
         refreshed = client.clear_and_refresh()
     except Exception as e:
-        logger.error(f"❌ Booklore cache refresh failed: {e}")
+        logger.error(f"❌ Grimmory cache refresh failed: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
     if not refreshed:
-        return jsonify({"success": False, "error": "Booklore refresh failed"}), 500
+        return jsonify({"success": False, "error": "Grimmory refresh failed"}), 500
 
-    return jsonify({"success": True, "message": "Booklore cache refreshed successfully"})
+    return jsonify({"success": True, "message": "Grimmory cache refreshed successfully"})
 
 
 def _test_conn_error(e: Exception) -> str:
@@ -4698,7 +4699,7 @@ def _test_storyteller(enabled: bool, url: str, user: str, pwd: str) -> dict:
 
 def _test_booklore(enabled: bool, url: str, user: str, pwd: str) -> dict:
     if not enabled:
-        return {"ok": False, "message": "Booklore is disabled"}
+        return {"ok": False, "message": "Grimmory is disabled"}
     if not url or not user or not pwd:
         return {"ok": False, "message": "Missing URL, username, or password"}
     r = requests.post(
@@ -4909,13 +4910,13 @@ if __name__ == '__main__':
     books_volume_exists = container.books_dir().exists()
 
     if booklore_configured:
-        logger.info(f"✅ Booklore integration enabled - ebooks sourced from API")
+        logger.info(f"✅ Grimmory integration enabled - ebooks sourced from API")
     elif books_volume_exists:
         logger.info(f"✅ Ebooks directory mounted at {container.books_dir()}")
     else:
         logger.info(
-            "⚠️  NO EBOOK SOURCE CONFIGURED: Neither Booklore integration nor /books volume is available. "
-            "New book matches will fail. Enable Booklore (BOOKLORE_SERVER, BOOKLORE_USER, BOOKLORE_PASSWORD) "
+            "⚠️  NO EBOOK SOURCE CONFIGURED: Neither Grimmory integration nor /books volume is available. "
+            "New book matches will fail. Enable Grimmory (BOOKLORE_SERVER, BOOKLORE_USER, BOOKLORE_PASSWORD) "
             "or mount the ebooks directory to /books."
         )
 

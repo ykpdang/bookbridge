@@ -513,17 +513,17 @@ class ForgeService:
         return (idx, idx)
 
     def _stage_booklore_local_file(self, src_path: Path, dest_path: Path, stage_mode: str) -> str:
-        result = self._stage_local_file(src_path, dest_path, stage_mode, "BookLore audio")
+        result = self._stage_local_file(src_path, dest_path, stage_mode, "Grimmory audio")
         if result == HARDLINK_STAGE_MODE:
-            logger.info("BookLore audio: staged local file via hardlink '%s' -> '%s'", src_path.name, dest_path.name)
+            logger.info("Grimmory audio: staged local file via hardlink '%s' -> '%s'", src_path.name, dest_path.name)
         elif result == "copy":
-            logger.info("BookLore audio: staged local file via copy '%s' -> '%s'", src_path.name, dest_path.name)
+            logger.info("Grimmory audio: staged local file via copy '%s' -> '%s'", src_path.name, dest_path.name)
         else:
-            logger.info("BookLore audio: staged local file already present '%s'", dest_path.name)
+            logger.info("Grimmory audio: staged local file already present '%s'", dest_path.name)
         return result
 
     def _copy_booklore_audio_files(self, book_id: str, dest_folder: Path, stage_mode: str = DEFAULT_STAGE_MODE) -> bool:
-        """Stage audiobook tracks from BookLore into dest_folder."""
+        """Stage audiobook tracks from Grimmory into dest_folder."""
         def infer_ext(track: dict, info: dict) -> str:
             allowed = {"mp3", "m4a", "m4b", "flac", "ogg", "opus", "aac", "wav"}
             raw_ext = str(track.get("extension") or track.get("ext") or "").lower().strip().lstrip(".")
@@ -547,10 +547,10 @@ class ForgeService:
             normalized_stage_mode = self._normalize_stage_mode(stage_mode)
             info = self.booklore_client.get_audiobook_info(book_id)
             if not info:
-                logger.warning(f"No audiobook info found for Booklore book '{book_id}'")
+                logger.warning(f"No audiobook info found for Grimmory book '{book_id}'")
                 return False
 
-            logger.debug(f"Booklore audiobook info keys for '{book_id}': {list(info.keys())}")
+            logger.debug(f"Grimmory audiobook info keys for '{book_id}': {list(info.keys())}")
             tracks = info.get("tracks") or []
             track_mode = "tracks"
             if not tracks:
@@ -570,12 +570,12 @@ class ForgeService:
                     track_mode = "chapter_markers_single_stream"
             if not tracks:
                 logger.warning(
-                    f"No audio tracks found for Booklore book '{book_id}' "
+                    f"No audio tracks found for Grimmory book '{book_id}' "
                     f"(info keys: {list(info.keys())})"
                 )
                 return False
             logger.info(
-                f"Booklore audio mode for '{book_id}': {track_mode} ({len(tracks)} stream item(s))"
+                f"Grimmory audio mode for '{book_id}': {track_mode} ({len(tracks)} stream item(s))"
             )
 
             dest_folder.mkdir(parents=True, exist_ok=True)
@@ -594,7 +594,7 @@ class ForgeService:
                     local_path = Path(local_file["local_path"])
                     ext = local_path.suffix.lstrip(".").lower() or infer_ext({}, info)
                     dest_path = dest_folder / f"track_000.{ext}"
-                    logger.info("BookLore audio: using single-stream local file '%s'", local_path.name)
+                    logger.info("Grimmory audio: using single-stream local file '%s'", local_path.name)
                     self._stage_booklore_local_file(local_path, dest_path, normalized_stage_mode)
                     return True
 
@@ -630,7 +630,7 @@ class ForgeService:
                         matched_files.append((track, local_file))
 
                     if matched_files and len(matched_files) == len(tracks):
-                        logger.info("BookLore audio: using filename-based local track mapping")
+                        logger.info("Grimmory audio: using filename-based local track mapping")
                         for idx, (track, local_file) in enumerate(matched_files):
                             local_path = Path(local_file["local_path"])
                             ext = local_path.suffix.lstrip(".").lower() or infer_ext(track, info)
@@ -639,7 +639,7 @@ class ForgeService:
                         return True
 
                 if len(local_files) == len(tracks):
-                    logger.info("BookLore audio: using positional track mapping")
+                    logger.info("Grimmory audio: using positional track mapping")
                     ordered_tracks = [track for _, track in sorted(
                         enumerate(tracks), key=lambda item: self._track_sort_key(item[0], item[1])
                     )]
@@ -657,7 +657,7 @@ class ForgeService:
                     return True
 
                 logger.info(
-                    "BookLore audio: local resolution incomplete, falling back to download "
+                    "Grimmory audio: local resolution incomplete, falling back to download "
                     "(resolved=%s expected=%s)",
                     len(local_files),
                     len(tracks),
@@ -670,12 +670,12 @@ class ForgeService:
                 dest_path = dest_folder / f"track_{idx:03d}.{ext}"
 
                 if track_mode == "chapter_markers_single_stream":
-                    # For single M4B files with only chapter markers, the Booklore
+                    # For single M4B files with only chapter markers, the Grimmory
                     # /track/{index}/stream endpoint uses the M4B's container stream
                     # index, where stream 0 is often the cover art (mjpeg), not the
                     # audio. Download the whole file instead.
                     logger.info(
-                        f"Booklore audio (single-file): downloading whole file -> '{dest_path.name}'"
+                        f"Grimmory audio (single-file): downloading whole file -> '{dest_path.name}'"
                     )
                     if self.booklore_client.download_book_to_path(
                         book_id, dest_path,
@@ -684,30 +684,30 @@ class ForgeService:
                         downloaded += 1
                     else:
                         logger.error(
-                            f"Failed to download Booklore whole-file audio for book '{book_id}'"
+                            f"Failed to download Grimmory whole-file audio for book '{book_id}'"
                         )
                 else:
                     download_index = track.get("index") if isinstance(track.get("index"), int) else idx
                     logger.info(
-                        f"Booklore audio: downloading stream index {download_index} -> '{dest_path.name}'"
+                        f"Grimmory audio: downloading stream index {download_index} -> '{dest_path.name}'"
                     )
                     if self.booklore_client.download_audiobook_track(book_id, download_index, dest_path):
                         downloaded += 1
                     else:
                         logger.error(
-                            f"Failed to download Booklore track index {download_index} for book '{book_id}'"
+                            f"Failed to download Grimmory track index {download_index} for book '{book_id}'"
                         )
 
             if downloaded == len(tracks):
-                logger.info(f"Booklore audio: downloaded all {downloaded} tracks for book '{book_id}'")
+                logger.info(f"Grimmory audio: downloaded all {downloaded} tracks for book '{book_id}'")
                 return True
             else:
                 logger.error(
-                    f"Booklore audio: expected {len(tracks)} tracks, downloaded {downloaded} — Aborting"
+                    f"Grimmory audio: expected {len(tracks)} tracks, downloaded {downloaded} — Aborting"
                 )
                 return False
         except Exception as e:
-            logger.error(f"Failed to copy Booklore audio for book '{book_id}': {e}", exc_info=True)
+            logger.error(f"Failed to copy Grimmory audio for book '{book_id}': {e}", exc_info=True)
             return False
 
     @staticmethod
@@ -752,7 +752,7 @@ class ForgeService:
                     return []
                 cached_audio = self._collect_audio_files(cache_root)
             if cached_audio:
-                logger.info("Auto-Forge: Whisper fallback using BookLore audio source")
+                logger.info("Auto-Forge: Whisper fallback using Grimmory audio source")
                 return self._build_local_audio_inputs(cached_audio)
             return []
 
@@ -847,9 +847,9 @@ class ForgeService:
                     if content:
                         epub_path.write_bytes(content)
                         text_success = True
-                        logger.info(f"⚡ Forge: Booklore epub downloaded")
+                        logger.info(f"⚡ Forge: Grimmory epub downloaded")
                     else:
-                        logger.error(f"❌ Forge: Booklore download failed for '{booklore_id}'")
+                        logger.error(f"❌ Forge: Grimmory download failed for '{booklore_id}'")
             elif source == 'ABS':
                 abs_item_id = text_item.get('abs_id')
                 if abs_item_id:
@@ -1044,7 +1044,7 @@ class ForgeService:
             # Copy Audio
             if audio_source == 'BookLore' and audio_source_id:
                 if not self._copy_booklore_audio_files(audio_source_id, temp_dir, stage_mode=stage_mode):
-                    raise Exception("Failed to copy Booklore audio files")
+                    raise Exception("Failed to copy Grimmory audio files")
             else:
                 if not self._copy_audio_files(abs_id, temp_dir, stage_mode=stage_mode):
                     raise Exception("Failed to copy audio files")

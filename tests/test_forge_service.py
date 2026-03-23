@@ -212,7 +212,7 @@ class TestForgeService(unittest.TestCase):
                 source,
                 dest_folder / "track_000.m4b",
                 "hardlink",
-                "BookLore audio",
+                "Grimmory audio",
             )
             self.mock_booklore.download_book_to_path.assert_not_called()
             self.mock_booklore.download_audiobook_track.assert_not_called()
@@ -248,7 +248,7 @@ class TestForgeService(unittest.TestCase):
                 source,
                 dest_folder / "track_000.m4b",
                 "hardlink",
-                "BookLore audio",
+                "Grimmory audio",
             )
             self.mock_booklore.download_audiobook_track.assert_not_called()
 
@@ -283,7 +283,7 @@ class TestForgeService(unittest.TestCase):
                 source,
                 dest_folder / "track_000.m4b",
                 "hardlink",
-                "BookLore audio",
+                "Grimmory audio",
             )
             self.mock_booklore.download_audiobook_track.assert_not_called()
 
