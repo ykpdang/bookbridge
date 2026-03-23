@@ -586,7 +586,7 @@
             margin-top: 6px;
         }
 
-        .source-badge.booklore {
+        .source-badge.grimmory {
             background: rgba(76, 175, 80, 0.2);
             color: #81c784;
         }
@@ -825,7 +825,8 @@
                                 </div>
                                 <div class="audiobook-info">
                                     <div class="audiobook-title">{{ ab.title }}</div>
-                                    <span class="source-badge {{ ab.source.lower().replace(' ', '') }}">{{ ab.source }}</span>
+                                    {% set ab_src = 'Grimmory' if ab.source == 'BookLore' else ab.source %}
+                                    <span class="source-badge {{ ab_src.lower().replace(' ', '') }}">{{ ab_src }}</span>
                                 </div>
                             </label>
                             {% endfor %}

@@ -619,7 +619,7 @@ class DatabaseService:
             return doc
 
     def get_kosync_doc_by_booklore_id(self, booklore_id: str) -> Optional[KosyncDocument]:
-        """Find a KOSync document by its Booklore ID."""
+        """Find a KOSync document by its Grimmory ID."""
         with self.get_session() as session:
             doc = session.query(KosyncDocument).filter(
                 KosyncDocument.booklore_id == str(booklore_id)
@@ -752,7 +752,7 @@ class DatabaseService:
 
     # BookloreBook operations
     def get_booklore_book(self, filename: str) -> Optional[BookloreBook]:
-        """Get a cached Booklore book by filename."""
+        """Get a cached Grimmory book by filename."""
         with self.get_session() as session:
             book = session.query(BookloreBook).filter(BookloreBook.filename == filename).first()
             if book:
@@ -760,7 +760,7 @@ class DatabaseService:
             return book
 
     def get_all_booklore_books(self) -> List[BookloreBook]:
-        """Get all cached Booklore books."""
+        """Get all cached Grimmory books."""
         with self.get_session() as session:
             books = session.query(BookloreBook).all()
             for book in books:
@@ -768,7 +768,7 @@ class DatabaseService:
             return books
 
     def save_booklore_book(self, booklore_book: BookloreBook) -> BookloreBook:
-        """Save or update a Booklore book."""
+        """Save or update a Grimmory book."""
         with self.get_session() as session:
             existing = session.query(BookloreBook).filter(
                 BookloreBook.filename == booklore_book.filename
@@ -790,7 +790,7 @@ class DatabaseService:
                 return booklore_book
 
     def delete_booklore_book(self, filename: str) -> bool:
-        """Delete a Booklore book from the cache table."""
+        """Delete a Grimmory book from the cache table."""
         try:
             from src.db.models import BookloreBook
             # Use safe session context manager
@@ -800,12 +800,12 @@ class DatabaseService:
                 session.query(BookloreBook).filter(BookloreBook.filename == filename).delete(synchronize_session=False)
                 return True
         except Exception as e:
-            logger.error(f"❌ Failed to delete Booklore book '{filename}': {e}")
+            logger.error(f"❌ Failed to delete Grimmory book '{filename}': {e}")
             return False
 
 
     def clear_all_booklore_books(self) -> bool:
-        """Delete all cached Booklore books."""
+        """Delete all cached Grimmory books."""
         session = self.db_manager.get_session()
         try:
             session.query(BookloreBook).delete(synchronize_session=False)
@@ -813,7 +813,7 @@ class DatabaseService:
             return True
         except Exception as e:
             session.rollback()
-            logger.error(f"âŒ Failed to clear Booklore cache table: {e}")
+            logger.error(f"âŒ Failed to clear Grimmory cache table: {e}")
             return False
         finally:
             session.close()
@@ -946,7 +946,7 @@ class DatabaseMigrator:
                 )
                 self.db_service.save_state(state)
 
-            # Handle Booklore data
+            # Handle Grimmory data
             if 'booklore_pct' in data:
                 state = State(
                     abs_id=abs_id,

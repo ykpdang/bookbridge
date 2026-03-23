@@ -630,17 +630,17 @@ def _try_find_epub_by_hash(doc_hash: str) -> Optional[str]:
                     logger.debug(f"Error checking file {epub_path.name}: {e}")
             logger.info(f"🔍 Filesystem search finished. Checked {count} files. No match found")
 
-        # Fallback to Booklore
+        # Fallback to Grimmory
         if _container.booklore_client().is_configured():
-            logger.info("🔎 Starting Booklore API search...")
+            logger.info("🔎 Starting Grimmory API search...")
 
             try:
                 # Query BookloreBook cache in DB first
                 books = _database_service.get_all_booklore_books()
-                scan_source = "Booklore DB cache"
+                scan_source = "Grimmory DB cache"
                 if not books:
                     books = _container.booklore_client().get_all_books() or []
-                    scan_source = "Booklore in-memory cache"
+                    scan_source = "Grimmory in-memory cache"
 
                 logger.info(f"Scanning {len(books)} books from {scan_source}...")
 
@@ -675,16 +675,16 @@ def _try_find_epub_by_hash(doc_hash: str) -> Optional[str]:
                                 book_title = hydrated.get('title')
 
                     if not book_id or not filename:
-                        logger.debug("Skipping Booklore candidate without both id and filename")
+                        logger.debug("Skipping Grimmory candidate without both id and filename")
                         continue
                     if not hasattr(book, 'raw_metadata_dict'):
                         book = SimpleNamespace(filename=filename, title=book_title)
 
-                    # Check if we have a KosyncDocument for this Booklore ID
+                    # Check if we have a KosyncDocument for this Grimmory ID
                     cached_doc = _database_service.get_kosync_doc_by_booklore_id(book_id)
                     if cached_doc:
                         if cached_doc.document_hash == doc_hash:
-                            logger.info(f"📚 Matched EPUB via Booklore ID in DB: {book.filename}")
+                            logger.info(f"📚 Matched EPUB via Grimmory ID in DB: {book.filename}")
                             return filename
 
                     try:
@@ -699,7 +699,7 @@ def _try_find_epub_by_hash(doc_hash: str) -> Optional[str]:
                                 cache_path = cache_dir / safe_title
                                 with open(cache_path, 'wb') as f:
                                     f.write(book_content)
-                                logger.info(f"📥 Persisted Booklore book to cache: {safe_title}")
+                                logger.info(f"📥 Persisted Grimmory book to cache: {safe_title}")
 
                                 # Save/Update KosyncDocument in DB
                                 if cached_doc:
@@ -711,15 +711,15 @@ def _try_find_epub_by_hash(doc_hash: str) -> Optional[str]:
                                     _upsert_kosync_metadata(computed_hash, safe_title, 'booklore',
                                                             booklore_id=book_id)
 
-                                logger.info(f"📚 Matched EPUB via Booklore download: {safe_title}")
+                                logger.info(f"📚 Matched EPUB via Grimmory download: {safe_title}")
                                 return safe_title
                     except Exception as e:
-                        logger.warning(f"⚠️ Failed to check Booklore book '{book.title}': {e}")
+                        logger.warning(f"⚠️ Failed to check Grimmory book '{book.title}': {e}")
 
-                logger.info(f"🔍 Booklore search finished. Checked {len(books)} books. No match found")
+                logger.info(f"🔍 Grimmory search finished. Checked {len(books)} books. No match found")
 
             except Exception as e:
-                logger.debug(f"Error querying Booklore for EPUB matching: {e}")
+                logger.debug(f"Error querying Grimmory for EPUB matching: {e}")
 
     except Exception as e:
         logger.error(f"❌ Error in EPUB auto-discovery: {e}")

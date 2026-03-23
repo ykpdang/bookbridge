@@ -664,13 +664,13 @@
                 </div>
             </div>
 
-            <!-- Booklore (Optional) -->
+            <!-- Grimmory (Optional) -->
             <div class="settings-section">
                 {% set booklore_configured = get_val('BOOKLORE_SERVER') != '' %}
                 {% set booklore_enabled = get_bool('BOOKLORE_ENABLED') or (booklore_configured and
                 get_val('BOOKLORE_ENABLED') == '') %}
                 <div class="section-header">
-                    <h3>Booklore</h3>
+                    <h3>Grimmory</h3>
                     <button class="btn btn-sm" type="button" onclick="testConnection('booklore', this)">🔗 Test</button>
                     <div class="toggle-switch-wrapper">
                         <span class="toggle-label">Enable</span>
@@ -700,7 +700,7 @@
                         <input type="text" name="BOOKLORE_SHELF_NAME" value="{{ get_val('BOOKLORE_SHELF_NAME') }}">
                     </div>
                     <div class="form-group full-width">
-                        <label>Booklore Library ID (Optional)</label>
+                        <label>Grimmory Library ID (Optional)</label>
                         <div style="display: flex; gap: 10px;">
                             <input type="text" name="BOOKLORE_LIBRARY_ID" value="{{ get_val('BOOKLORE_LIBRARY_ID') }}"
                                 placeholder="e.g. 1" style="flex: 1;">
@@ -951,7 +951,7 @@
 
                         {% if get_bool('BOOKLORE_ENABLED') %}
                         <div class="form-group" style="align-items: center;">
-                            <label>Booklore Poll Mode</label>
+                            <label>Grimmory Poll Mode</label>
                             <select name="BOOKLORE_POLL_MODE" id="booklore_poll_mode"
                                     onchange="togglePollSeconds('booklore_poll_seconds_row', this.value)">
                                 <option value="global" {% if get_val('BOOKLORE_POLL_MODE', 'global') == 'global' %}selected{% endif %}>Global</option>
@@ -960,10 +960,10 @@
                         </div>
                         <div class="form-group" id="booklore_poll_seconds_row"
                              {% if get_val('BOOKLORE_POLL_MODE') != 'custom' %}style="opacity: 0.45; pointer-events: none;"{% endif %}>
-                            <label>Booklore Poll Interval (seconds)</label>
+                            <label>Grimmory Poll Interval (seconds)</label>
                             <input type="number" name="BOOKLORE_POLL_SECONDS" min="10"
                                    value="{{ get_val('BOOKLORE_POLL_SECONDS', '300') }}">
-                            <div class="help-text">Recommended: 300s for Booklore.</div>
+                            <div class="help-text">Recommended: 300s for Grimmory.</div>
                         </div>
                         {% endif %}
 
@@ -1080,13 +1080,13 @@
                     </div>
 
                     <div class="form-group full-width">
-                        <label>Booklore Cache</label>
+                        <label>Grimmory Cache</label>
                         <div class="cleanup-group">
                             <button type="button" id="booklore_refresh_btn" class="btn btn-primary" onclick="refreshBookloreCache(this)">
-                                Refresh Booklore Cache
+                                Refresh Grimmory Cache
                             </button>
                             <p class="help-text flex-1 m-0">
-                                Rebuilds Booklore cache immediately, including stale metadata refresh.
+                                Rebuilds Grimmory cache immediately, including stale metadata refresh.
                                 <span id="booklore_refresh_status"></span>
                             </p>
                         </div>
@@ -1463,7 +1463,7 @@
                     statusEl.style.color = '#81c784';
                 }
             } catch (err) {
-                console.error('Error refreshing Booklore cache:', err);
+                console.error('Error refreshing Grimmory cache:', err);
                 if (statusEl) {
                     statusEl.textContent = ` Refresh failed: ${err}`;
                     statusEl.style.color = '#e57373';

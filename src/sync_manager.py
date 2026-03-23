@@ -121,7 +121,7 @@ class SyncManager:
         return result
 
     def _get_non_story_ebook_filename(self, book: Book | None) -> str | None:
-        """Preferred EPUB for KoSync/Booklore/ABS ebook operations."""
+        """Preferred EPUB for KoSync/Grimmory/ABS ebook operations."""
         if not book:
             return None
         original = getattr(book, "original_ebook_filename", None)
@@ -167,7 +167,7 @@ class SyncManager:
     def _get_locator_target_epub(self, book: Book | None, leader_name: str | None) -> str | None:
         """
         Locator generation target EPUB used for cross-client updates.
-        Prefer non-Storyteller EPUB so KoSync/Booklore/ABS locators stay stable,
+        Prefer non-Storyteller EPUB so KoSync/Grimmory/ABS locators stay stable,
         but fall back to Storyteller artifact when that's all we have.
         """
         return self._get_non_story_ebook_filename(book) or self._get_storyteller_ebook_filename(book)
@@ -294,7 +294,7 @@ class SyncManager:
             regenerated_error = None
 
             # Prefer a fresh CFI derived from the canonical target offset instead of
-            # dropping to percent-only BookLore writes.
+            # dropping to percent-only Grimmory writes.
             try:
                 regenerated_locator = self.ebook_parser.get_locator_from_char_offset(target_epub, int(target_offset))
                 candidate_cfi = getattr(regenerated_locator, "cfi", None)
@@ -304,7 +304,7 @@ class SyncManager:
                     if regenerated_offset is not None:
                         regenerated_error = abs(int(regenerated_offset) - int(target_offset))
             except Exception as regen_err:
-                logger.debug(f"'{book.abs_id}' Failed to regenerate CFI for BookLore fallback: {regen_err}")
+                logger.debug(f"'{book.abs_id}' Failed to regenerate CFI for Grimmory fallback: {regen_err}")
 
             if regenerated_cfi:
                 safe_locator.cfi = regenerated_cfi
@@ -652,7 +652,7 @@ class SyncManager:
 
     def _resolve_local_epub_uncached(self, ebook_filename):
         """
-        Get local path to EPUB file, downloading from Booklore if necessary.
+        Get local path to EPUB file, downloading from Grimmory if necessary.
         """
         # First, try to find on filesystem
         books_search_dir = self.books_dir or Path("/books")
@@ -669,12 +669,12 @@ class SyncManager:
             logger.info(f"🔍 Found EPUB in cache: '{cached_path}'")
             return cached_path
 
-        # Try to download from Booklore API
+        # Try to download from Grimmory API
         # Note: We use hasattr to prevent crashes if BookloreClient wasn't updated with these methods yet
         if hasattr(self.booklore_client, 'is_configured') and self.booklore_client.is_configured():
             book = self.booklore_client.find_book_by_filename(ebook_filename)
             if book:
-                logger.info(f"⚡ Downloading EPUB from Booklore: {sanitize_log_data(ebook_filename)}")
+                logger.info(f"⚡ Downloading EPUB from Grimmory: {sanitize_log_data(ebook_filename)}")
                 if hasattr(self.booklore_client, 'download_book'):
                     content = self.booklore_client.download_book(book['id'])
                     if content:
@@ -683,11 +683,11 @@ class SyncManager:
                         logger.info(f"✅ Downloaded EPUB to cache: '{cached_path}'")
                         return cached_path
                     else:
-                        logger.error(f"❌ Failed to download EPUB content from Booklore")
+                        logger.error(f"❌ Failed to download EPUB content from Grimmory")
             else:
-                logger.error(f"❌ EPUB not found in Booklore: {sanitize_log_data(ebook_filename)}")
+                logger.error(f"❌ EPUB not found in Grimmory: {sanitize_log_data(ebook_filename)}")
             if not filesystem_matches:
-                logger.error(f"❌ EPUB not found on filesystem and Booklore not configured")
+                logger.error(f"❌ EPUB not found on filesystem and Grimmory not configured")
 
         return None
 
@@ -964,11 +964,11 @@ class SyncManager:
             
             found_filenames = set()
             
-            # 2a. Search Booklore
+            # 2a. Search Grimmory
             if self.booklore_client and self.booklore_client.is_configured():
                 try:
                     bl_results = self.booklore_client.search_books(search_title)
-                    logger.debug(f"Booklore returned {len(bl_results)} results for '{search_title}'")
+                    logger.debug(f"Grimmory returned {len(bl_results)} results for '{search_title}'")
                     for b in bl_results:
                          # Filter for EPUBs
                          fname = b.get('fileName', '')
@@ -983,7 +983,7 @@ class SyncManager:
                                  "confidence": "high" if search_title.lower() in b.get('title', '').lower() else "medium"
                              })
                 except Exception as e:
-                    logger.warning(f"⚠️ Booklore search failed during suggestion: {e}")
+                    logger.warning(f"⚠️ Grimmory search failed during suggestion: {e}")
 
             # 2b. Search Local Filesystem
             if self.books_dir and self.books_dir.exists():
@@ -1219,10 +1219,10 @@ class SyncManager:
             
             epub_path = None
             if self.library_service and item_details:
-                # Try Priority Chain (ABS Direct -> Booklore -> CWA -> ABS Search)
+                # Try Priority Chain (ABS Direct -> Grimmory -> CWA -> ABS Search)
                 epub_path = self.library_service.acquire_ebook(item_details)
 
-            # Fallback to legacy logic (Local Filesystem / Cache / Booklore Classic)
+            # Fallback to legacy logic (Local Filesystem / Cache / Grimmory Classic)
             if not epub_path:
                 epub_path = self._get_local_epub(ebook_filename)
                 
@@ -1484,7 +1484,7 @@ class SyncManager:
         
         This prevents:
         - API noise on short books (0.3s changes don't count)
-        - API noise on long books (BookLore's 20s rounding errors filtered)
+        - API noise on long books (Grimmory's 20s rounding errors filtered)
         - Missing real progress on all books (30s+ changes do count)
         """
         delta_pct = config[client_name].delta
@@ -1744,7 +1744,7 @@ class SyncManager:
             if hasattr(storyteller_client.storyteller_client, 'clear_cache'):
                 storyteller_client.storyteller_client.clear_cache()
                 
-        # Refresh Library Metadata (Booklore) — throttle to once per 15 minutes
+        # Refresh Library Metadata (Grimmory) — throttle to once per 15 minutes
         if self.library_service and (time.time() - self._last_library_sync > 900):
             self.library_service.sync_library_books()
             self._last_library_sync = time.time()
@@ -1856,7 +1856,7 @@ class SyncManager:
                         # Do not continue here, let the consolidated check handle it
 
                 # Check for Character Delta Threshold (Fix 2B)
-                # Loop through ebook clients (KoSync, Storyteller, BookLore, ABS_Ebook)
+                # Loop through ebook clients (KoSync, Storyteller, Grimmory, ABS_Ebook)
                 # If state.delta > 0 and book has epub, get total chars via extract_text_and_map
                 # Calculate char_delta = int(state.delta * total_chars)
                 # If char_delta >= self.delta_chars_thresh, log it and set significant_diff = True

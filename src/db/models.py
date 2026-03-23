@@ -315,7 +315,7 @@ class BookAlignment(Base):
 
 class BookloreBook(Base):
     """
-    Model for caching Booklore search results, replacing local JSON cache.
+    Model for caching Grimmory search results, replacing local JSON cache.
     """
     __tablename__ = 'booklore_books'
 

@@ -22,8 +22,8 @@
 
 ## ✨ Key Features
 
-- **Five-Way Sync**: Syncs Audiobookshelf, KOReader, Storyteller, Booklore, and Hardcover.
-- **Flexible Match Flows**: Link ABS or Booklore audiobooks, or create ebook-only links when you only want text sync.
+- **Five-Way Sync**: Syncs Audiobookshelf, KOReader, Storyteller, Grimmory, and Hardcover.
+- **Flexible Match Flows**: Link ABS or Grimmory audiobooks, or create ebook-only links when you only want text sync.
 - **Smart Alignment Sources**: Uses Storyteller forced-alignment transcripts when available, then SMIL, then Whisper fallback.
 - **Web UI**: Full management dashboard for tracking syncs and matching books.
 - **Library Suggestions Page**: Scan your library for likely audiobook + ebook pairs, review them, and queue matches in bulk.
@@ -48,7 +48,7 @@ services:
       - TZ=America/New_York
       - LOG_LEVEL=INFO
       # - KOSYNC_PORT=5758  # Optional: enable split-port mode
-      # Configure ABS, KOSync, Booklore, Storyteller, and other services in the Web UI.
+      # Configure ABS, KOSync, Grimmory, Storyteller, and other services in the Web UI.
     volumes:
       - ./data:/data
       - /path/to/ebooks:/books

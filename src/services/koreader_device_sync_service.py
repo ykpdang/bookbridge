@@ -228,7 +228,7 @@ class KOReaderDeviceSyncService:
             return cache_path.exists() and cache_path.stat().st_size > 0
         except Exception as e:
             logger.warning(
-                "KOReader device-sync Booklore download failed for '%s': %s",
+                "KOReader device-sync Grimmory download failed for '%s': %s",
                 sanitize_log_data(source_filename),
                 e,
             )

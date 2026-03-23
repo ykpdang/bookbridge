@@ -18,7 +18,7 @@ You will want:
 Optional for later:
 
 - KOSync credentials
-- Booklore credentials
+- Grimmory credentials
 - Storyteller credentials
 
 ### Find your ABS API token
@@ -62,7 +62,7 @@ services:
       - TZ=America/New_York
       - LOG_LEVEL=INFO
       # - KOSYNC_PORT=5758  # Optional: enable split-port mode
-      # Configure ABS, KOSync, Booklore, Storyteller, and other services in the Web UI.
+      # Configure ABS, KOSync, Grimmory, Storyteller, and other services in the Web UI.
     volumes:
       - ./data:/data
       - /path/to/ebooks:/books
@@ -106,7 +106,7 @@ Add your:
 Then add any optional services you want:
 
 - **KOSync** for KOReader sync
-- **Booklore** for ebook sync and Booklore audiobook matching
+- **Grimmory** for ebook sync and Grimmory audiobook matching
 - **Storyteller** for read-along links and transcript ingest
 
 If you mounted Storyteller assets, set **Storyteller Assets Path** to `/storyteller` and not `/storyteller/assets`.
@@ -130,7 +130,7 @@ You now have two easy options:
 ### Manual path: Add Book
 
 1. Open **Add Book**.
-2. Pick an ABS audiobook, a Booklore audiobook, or leave audio on **None / Skip** for an ebook-only link.
+2. Pick an ABS audiobook, a Grimmory audiobook, or leave audio on **None / Skip** for an ebook-only link.
 3. Optionally pick a Storyteller title.
 4. Pick the standard ebook.
 5. Click **Create Mapping**.
@@ -143,7 +143,7 @@ You should now be able to sync between:
 
 - Audiobookshelf
 - KOReader / KOSync
-- Booklore
+- Grimmory
 - Storyteller
 - Hardcover, if enabled
 
@@ -167,10 +167,10 @@ Look for path, permission, or connection errors.
 - Run `docker compose ps`.
 - Try `http://YOUR_SERVER_IP:8080` from another device on your LAN.
 
-### New Booklore matches are missing
+### New Grimmory matches are missing
 
 - Open **Settings**.
-- Click **Refresh Booklore Cache**.
+- Click **Refresh Grimmory Cache**.
 - Run **Full Refresh** from the Suggestions page if you changed a lot of books.
 
 ---

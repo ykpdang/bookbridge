@@ -10,8 +10,8 @@ It shows:
 
 - **Active Syncs** for every tracked mapping
 - **Unified Progress** across all connected clients
-- **Source badges** so you can tell whether the audio side is coming from Audiobookshelf or Booklore
-- **Direct links** into supported services, including Booklore audio when a mapping uses it
+- **Source badges** so you can tell whether the audio side is coming from Audiobookshelf or Grimmory
+- **Direct links** into supported services, including Grimmory audio when a mapping uses it
 - Quick access to **Add Book**, **Batch Match**, **Suggestions**, **Forge**, **Settings**, and **Logs**
 
 If a book is significantly out of sync, the card is highlighted so you can spot it quickly.
@@ -26,7 +26,7 @@ Each mapping runs in one of two modes.
 
 This is the normal mode when a mapping has an audiobook source.
 
-- The audio source can be **Audiobookshelf** or **Booklore**.
+- The audio source can be **Audiobookshelf** or **Grimmory**.
 - The text side can include a standard ebook, a Storyteller artifact, or both.
 - The bridge prefers Storyteller transcript timing when available, then falls back to SMIL, then Whisper.
 
@@ -40,7 +40,7 @@ This mode tracks reading progress without attaching an audiobook source.
 - You can still link a standard ebook, a Storyteller title, or both.
 - Ebook-only links skip audiobook preparation work, so they activate faster.
 
-Use this when you only want reading sync between KOReader, Booklore, Storyteller, and optional ABS ebook progress.
+Use this when you only want reading sync between KOReader, Grimmory, Storyteller, and optional ABS ebook progress.
 
 ---
 
@@ -55,12 +55,12 @@ The bridge still runs a normal background sync every 5 minutes by default, but i
 
 ### Per-client polling
 
-Storyteller and Booklore can also use their own polling intervals:
+Storyteller and Grimmory can also use their own polling intervals:
 
 - **Global** uses the normal background cycle.
 - **Custom** lets that client be checked on its own schedule.
 
-This is useful when you often read directly in Storyteller or Booklore and want the bridge to notice sooner.
+This is useful when you often read directly in Storyteller or Grimmory and want the bridge to notice sooner.
 
 ---
 
@@ -73,7 +73,7 @@ This is useful when you often read directly in Storyteller or Booklore and want 
 You can choose:
 
 - An **Audiobookshelf audiobook**
-- A **Booklore audiobook**
+- A **Grimmory audiobook**
 - **None / Skip** for an ebook-only link
 
 The source badge on each card tells you where the audiobook came from.
@@ -90,7 +90,7 @@ If Storyteller is configured, you can also link a Storyteller title.
 The bridge can pull ebook choices from:
 
 1. Audiobookshelf ebook files
-2. Booklore
+2. Grimmory
 3. CWA
 4. Local `/books` files
 
@@ -109,7 +109,7 @@ If you skip audio, **Create Mapping** makes an ebook-only link instead.
 
 Use it when you want to review multiple links and process them together.
 
-- Queue entries can use **Audiobookshelf** or **Booklore** as the audio source.
+- Queue entries can use **Audiobookshelf** or **Grimmory** as the audio source.
 - You can attach a standard ebook, a Storyteller title, or both.
 - Queue items created from **Suggestions** land here too.
 
@@ -140,7 +140,7 @@ The **Suggestions** page is a review workspace for likely matches that are not l
 Suggestions can create:
 
 - Standard ABS-backed links
-- Booklore-audio links
+- Grimmory-audio links
 - Ebook-only links
 - Storyteller-only links when that is enough for the workflow you want
 
@@ -152,8 +152,8 @@ Suggestions can create:
 
 ### What Forge stages
 
-- Audio from **Audiobookshelf** or **Booklore**
-- Text from **Booklore**, **CWA**, **local files**, or **Audiobookshelf**
+- Audio from **Audiobookshelf** or **Grimmory**
+- Text from **Grimmory**, **CWA**, **local files**, or **Audiobookshelf**
 
 ### Two ways to use it
 
@@ -184,11 +184,11 @@ This is useful after importing old Storyteller assets or fixing your Storyteller
 
 ---
 
-## Booklore Audio
+## Grimmory Audio
 
-Booklore is no longer only an ebook target.
+Grimmory is no longer only an ebook target.
 
-You can now use **Booklore audiobooks** in:
+You can now use **Grimmory audiobooks** in:
 
 - **Add Book**
 - **Batch Match**
@@ -196,7 +196,7 @@ You can now use **Booklore audiobooks** in:
 - **Forge**
 - The main **Dashboard**
 
-If Booklore imports change and results look stale, open **Settings** and run **Refresh Booklore Cache**.
+If Grimmory imports change and results look stale, open **Settings** and run **Refresh Grimmory Cache**.
 
 ---
 
@@ -230,4 +230,4 @@ If **Regenerate Missing Data on Reset** is enabled, the bridge can also rebuild 
 
 ### Logs
 
-Open **Logs** to inspect live application logs for matching, syncing, Storyteller ingest, Booklore refreshes, and background jobs.
+Open **Logs** to inspect live application logs for matching, syncing, Storyteller ingest, Grimmory refreshes, and background jobs.

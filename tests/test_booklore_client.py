@@ -630,7 +630,11 @@ def test_refresh_book_cache_skips_bulk_detail_fetch_for_large_library(booklore_c
         make_list_book(f"book-{idx}", title=f"Large Book {idx}")
         for idx in range(BULK_DETAIL_FETCH_LIMIT + 1)
     ]
-    booklore_client._make_request = MagicMock(side_effect=paginated_responses(books))
+    # The flat /api/v1/books endpoint returns the entire library in a single response,
+    # so we provide one response containing all books (not paginated).
+    booklore_client._make_request = MagicMock(
+        return_value=MockResponse({"content": books})
+    )
     booklore_client._get_fresh_token = MagicMock(return_value="token")
     booklore_client._fetch_book_detail = MagicMock()
 
@@ -1036,7 +1040,7 @@ def test_refresh_book_cache_falls_back_when_server_side_library_filter_is_ignore
     first_endpoint = client._make_request.call_args_list[0][0][1]
     second_endpoint = client._make_request.call_args_list[1][0][1]
     assert first_endpoint == "/api/v1/libraries/target-lib/book"
-    assert second_endpoint == "/api/v1/books?page=0&size=200"
+    assert second_endpoint == "/api/v1/books"
     assert client._server_side_filter_supported is False
     assert list(client._book_cache.keys()) == ["target-book.epub"]
 
