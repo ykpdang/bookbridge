@@ -35,12 +35,12 @@ ALL_SETTINGS = [
     'TELEGRAM_ENABLED', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'TELEGRAM_LOG_LEVEL',
     
     # Shelfmark
-    'SHELFMARK_URL',
+    'SHELFMARK_URL', 'SHELFMARK_ENABLED',
     
     # Sync Behavior
     'SYNC_PERIOD_MINS', 'SYNC_DELTA_ABS_SECONDS', 'SYNC_DELTA_KOSYNC_PERCENT',
     'SYNC_DELTA_BETWEEN_CLIENTS_PERCENT', 'SYNC_DELTA_KOSYNC_WORDS',
-    'XPATH_FALLBACK_TO_PREVIOUS_SEGMENT', 'SYNC_ABS_EBOOK',
+    'XPATH_FALLBACK_TO_PREVIOUS_SEGMENT', 'SYNC_ABS_EBOOK', 'REPROCESS_ON_CLEAR_IF_NO_ALIGNMENT',
     'FUZZY_MATCH_THRESHOLD', 'SUGGESTIONS_ENABLED',
     'INSTANT_SYNC_ENABLED',
     'STORYTELLER_POLL_MODE', 'STORYTELLER_POLL_SECONDS',
@@ -52,7 +52,8 @@ ALL_SETTINGS = [
     'EBOOK_CACHE_SIZE',
     'JOB_MAX_RETRIES', 'JOB_RETRY_DELAY_MINS', 'WHISPER_MODEL',
     'WHISPER_DEVICE', 'WHISPER_COMPUTE_TYPE',
-    'TRANSCRIPTION_PROVIDER', 'DEEPGRAM_API_KEY', 'DEEPGRAM_MODEL', 'WHISPER_CPP_URL'
+    'TRANSCRIPTION_PROVIDER', 'DEEPGRAM_API_KEY', 'DEEPGRAM_MODEL', 'WHISPER_CPP_URL',
+    'SMIL_VALIDATION_THRESHOLD',
 ]
 
 # Default values
@@ -87,6 +88,7 @@ DEFAULT_CONFIG = {
     'KOSYNC_HASH_METHOD': 'content',
     'TELEGRAM_LOG_LEVEL': 'ERROR',
     'SHELFMARK_URL': '',
+    'SHELFMARK_ENABLED': 'false',
     'KOSYNC_ENABLED': 'false',
     'STORYTELLER_ENABLED': 'false',
     'BOOKLORE_ENABLED': 'false',
@@ -101,6 +103,7 @@ DEFAULT_CONFIG = {
     'SUGGESTIONS_ENABLED': 'false',
     'KOSYNC_USE_PERCENTAGE_FROM_SERVER': 'false',
     'SYNC_ABS_EBOOK': 'false',
+    'REPROCESS_ON_CLEAR_IF_NO_ALIGNMENT': 'true',
     'XPATH_FALLBACK_TO_PREVIOUS_SEGMENT': 'false',
     'ABS_ONLY_SEARCH_IN_ABS_LIBRARY_ID': 'false',
     'ABS_SOCKET_ENABLED': 'true',
@@ -110,6 +113,7 @@ DEFAULT_CONFIG = {
     'STORYTELLER_POLL_SECONDS': '45',
     'BOOKLORE_POLL_MODE': 'global',
     'BOOKLORE_POLL_SECONDS': '300',
+    'SMIL_VALIDATION_THRESHOLD': '60',
 }
 
 class ConfigLoader:
@@ -167,13 +171,8 @@ class ConfigLoader:
                 # Apply validation or type conversion if needed (mostly string for env vars)
                 val_str = str(value) if value is not None else ""
                 
-                # Preserve existing non-empty env vars when DB value is blank.
-                if val_str != "":
-                    os.environ[key] = val_str
-                else:
-                    existing_env = os.environ.get(key, "")
-                    if not existing_env:
-                        os.environ[key] = ""
+                # DB values always win — if the user cleared a field, honor it
+                os.environ[key] = val_str
                 
                 # Mask secrets in logs
                 log_val = "******" if any(s in key for s in ['KEY', 'PASSWORD', 'TOKEN']) else val_str
