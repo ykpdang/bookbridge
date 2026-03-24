@@ -2159,42 +2159,53 @@ class SyncManager:
             else current_time - 60
         )
 
-        # Path 1: Ebook reading session (fires for any leader)
-        ebook_grimmory_id = self._resolve_grimmory_ebook_id(book)
-        if ebook_grimmory_id:
-            book_type = None
-            ebook_filename = getattr(book, 'ebook_filename', '') or ''
-            if ebook_filename.lower().endswith('.epub'):
-                book_type = "EPUB"
-            elif ebook_filename.lower().endswith('.pdf'):
-                book_type = "PDF"
+        primary_audio_client = self._get_primary_audio_client_name(book)
+        is_audio_leader = (leader == primary_audio_client)
 
-            cfi = leader_state.current.get('cfi')
-            self.booklore_client.create_reading_session(
-                book_id=ebook_grimmory_id,
-                start_time=start_time,
-                end_time=current_time,
-                start_progress=prev_pct,
-                end_progress=leader_pct,
-                book_type=book_type,
-                end_location=cfi,
-            )
+        if is_audio_leader:
+            # Path 1: Audio Session (Strict Isolation - No Ebook Double Dip)
+            audio_grimmory_id = None
+            if getattr(book, 'audio_source', None) == "BookLore":
+                audio_grimmory_id = getattr(book, 'audio_provider_book_id', None) or getattr(book, 'audio_source_id', None)
 
-        # Path 2: Audiobook session (only when BookLoreAudio leads)
-        if leader == "BookLoreAudio" and getattr(book, 'audio_source', None) == "BookLore":
-            audio_grimmory_id = (
-                getattr(book, 'audio_provider_book_id', None)
-                or getattr(book, 'audio_source_id', None)
-            )
-            if audio_grimmory_id:
+            # If using ABS audio, fallback to logging the audiobook session against the linked Grimmory ebook ID
+            grimmory_id = audio_grimmory_id
+            if not grimmory_id:
+                grimmory_id = self._resolve_grimmory_ebook_id(book)
+
+            if grimmory_id:
                 try:
                     self.booklore_client.create_reading_session(
-                        book_id=int(audio_grimmory_id),
+                        book_id=int(grimmory_id),
                         start_time=start_time,
                         end_time=current_time,
                         start_progress=prev_pct,
                         end_progress=leader_pct,
                         book_type="AUDIOBOOK",
+                    )
+                except (TypeError, ValueError):
+                    pass
+        else:
+            # Path 2: Ebook Session (Strict Isolation - Only if reading)
+            ebook_grimmory_id = self._resolve_grimmory_ebook_id(book)
+            if ebook_grimmory_id:
+                book_type = None
+                ebook_filename = getattr(book, 'ebook_filename', '') or ''
+                if ebook_filename.lower().endswith('.epub'):
+                    book_type = "EPUB"
+                elif ebook_filename.lower().endswith('.pdf'):
+                    book_type = "PDF"
+
+                cfi = leader_state.current.get('cfi')
+                try:
+                    self.booklore_client.create_reading_session(
+                        book_id=int(ebook_grimmory_id),
+                        start_time=start_time,
+                        end_time=current_time,
+                        start_progress=prev_pct,
+                        end_progress=leader_pct,
+                        book_type=book_type,
+                        end_location=cfi,
                     )
                 except (TypeError, ValueError):
                     pass
