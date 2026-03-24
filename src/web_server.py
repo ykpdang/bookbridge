@@ -18,7 +18,7 @@ from urllib.parse import urljoin
 import requests
 import schedule
 from dependency_injector import providers
-from flask import Flask, render_template, render_template_string, request, redirect, url_for, jsonify, session, send_from_directory
+from flask import Flask, render_template, render_template_string, request, redirect, url_for, jsonify, session, send_from_directory, make_response
 
 from src.utils.config_loader import ConfigLoader
 from src.utils.logging_utils import memory_log_handler, LOG_PATH
@@ -1323,6 +1323,7 @@ def settings():
             'ABS_ONLY_SEARCH_IN_ABS_LIBRARY_ID',
             'REPROCESS_ON_CLEAR_IF_NO_ALIGNMENT',
             'INSTANT_SYNC_ENABLED',
+            'SHELFMARK_ENABLED',
         ]
 
         # Current settings in DB
@@ -1414,9 +1415,11 @@ def settings():
     message = session.pop('message', None)
     is_error = session.pop('is_error', False)
 
-    return render_template('settings.html',
+    response = make_response(render_template('settings.html',
                          message=message,
-                         is_error=is_error)
+                         is_error=is_error))
+    response.headers['Cache-Control'] = 'no-store, max-age=0'
+    return response
 
 def get_abs_author(ab):
 
