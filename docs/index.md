@@ -48,7 +48,7 @@
 - **Batch Match** for queue-based review and bulk linking.
 - **Library Suggestions** for background scanning, review, and queue building.
 - **Forge** for Storyteller read-along preparation.
-- **Dynamic Settings** with automatic restart after saving.
+- **Dynamic Settings** with live connection tests and automatic restart after saving.
 
 ### Automation and Reliability
 

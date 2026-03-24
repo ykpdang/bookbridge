@@ -6,7 +6,7 @@
 
 ## Web UI Settings
 
-The **Settings** page is the easiest way to manage the bridge. Saving settings restarts the app automatically and sends you back to the dashboard when it is ready.
+The **Settings** page is the easiest way to manage the bridge. Each service section includes a **Test** button so you can check a service before saving. Saving settings restarts the app automatically and brings you back to the dashboard when it is ready.
 
 ### Split-Port Security (Optional)
 
@@ -88,6 +88,7 @@ Grimmory now supports both ebook sync and Grimmory audiobook-backed mappings.
 | Password | `BOOKLORE_PASSWORD` | empty | Grimmory password. |
 | Shelf Name | `BOOKLORE_SHELF_NAME` | `Kobo` | Shelf used for matched ebooks. |
 | Library ID | `BOOKLORE_LIBRARY_ID` | empty | Optional library restriction. |
+| Record Reading Sessions | `GRIMMORY_READING_SESSIONS` | `true` | Sends reading or listening session updates back to Grimmory. |
 | Poll Mode | `BOOKLORE_POLL_MODE` | `global` | `global` uses the main sync cycle. `custom` polls Grimmory separately. |
 | Poll Interval | `BOOKLORE_POLL_SECONDS` | `300` | Used when Poll Mode is `custom`. |
 
@@ -95,6 +96,7 @@ Grimmory notes:
 
 - Match, Batch Match, Suggestions, and Forge can now use **Grimmory audiobooks** as the audio source.
 - The dashboard shows **BL Audio** progress when a mapping is driven by Grimmory audio.
+- When **Record Reading Sessions** is enabled, Grimmory gets session updates as you make progress.
 - **Settings -> Refresh Grimmory Cache** forces a fresh cache rebuild after imports, removals, or large metadata changes.
 
 Advanced Grimmory cache tuning:

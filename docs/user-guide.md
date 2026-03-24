@@ -51,7 +51,7 @@ The bridge still runs a normal background sync every 5 minutes by default, but i
 ### Instant triggers
 
 1. **Audiobookshelf playback**: when playback changes in Audiobookshelf, the bridge can sync shortly after the activity settles.
-2. **KOReader push**: if you use the built-in KOSync bridge, KOReader can push progress directly to the bridge.
+2. **KOReader push**: if you use KOSync, KOReader can send progress straight to the bridge.
 
 ### Per-client polling
 
@@ -61,6 +61,16 @@ Storyteller and Grimmory can also use their own polling intervals:
 - **Custom** lets that client be checked on its own schedule.
 
 This is useful when you often read directly in Storyteller or Grimmory and want the bridge to notice sooner.
+
+---
+
+## Settings
+
+The **Settings** page is where you connect your services and adjust how the bridge behaves.
+
+- Each service section has a **Test** button so you can check a service before saving.
+- **Save Settings** applies your changes and restarts the app.
+- When the restart finishes, you are sent back to the dashboard.
 
 ---
 
@@ -196,13 +206,15 @@ You can now use **Grimmory audiobooks** in:
 - **Forge**
 - The main **Dashboard**
 
+If **Record Reading Sessions** is enabled in Settings, Grimmory also receives session updates as you make progress.
+
 If Grimmory imports change and results look stale, open **Settings** and run **Refresh Grimmory Cache**.
 
 ---
 
 ## Auto-Discovery
 
-If KOReader devices sync directly to the built-in KOSync bridge, the system can discover new reading activity automatically.
+If KOReader syncs through KOSync, the bridge can discover new reading activity automatically.
 
 ### What happens
 

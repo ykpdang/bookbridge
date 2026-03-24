@@ -109,9 +109,11 @@ Then add any optional services you want:
 - **Grimmory** for ebook sync and Grimmory audiobook matching
 - **Storyteller** for read-along links and transcript ingest
 
+Use the **Test** button on any service section if you want to check a service before saving.
+
 If you mounted Storyteller assets, set **Storyteller Assets Path** to `/storyteller` and not `/storyteller/assets`.
 
-Save settings and wait for the app to restart.
+Save settings and wait a moment for the app to come back.
 
 ---
 

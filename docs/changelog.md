@@ -6,14 +6,27 @@ For the full history of changes, please refer to the **[GitHub Releases](https:/
 
 ## [Unreleased]
 
+---
+
+## [6.3.4] - 2026-03-24
+
+### Added
+
+- Added an intentional **ABS disabled** mode for ebook-only or maintenance-focused deployments.
+
 ### Changed
 
 - Forge now uploads EPUB and audio inputs directly to Storyteller through the REST/TUS API instead of depending on a watched library hand-off.
 - Added documentation for `STORYTELLER_UPLOAD_CHUNK_SIZE` so direct-upload chunk size can be tuned when needed.
+- Grimmory compatibility and session handling were expanded so newer Grimmory installs behave more reliably as both ebook and audiobook sources.
+- Settings now test the values currently in the form and show a restart page after saving.
 
 ### Fixed
 
 - Fixed Storyteller direct-upload metadata formatting so Forge no longer fails with `400 Invalid upload-metadata` on Storyteller `web-v2.9.3`.
+- Fixed Storyteller direct-upload metadata and readiness issues that could break Forge imports.
+- Fixed Grimmory progress, cache, and download edge cases that could break matching or syncing.
+- Fixed several sync stability issues around finished-book suggestions, KOReader locators, and replayed instant-sync events.
 
 ---
 

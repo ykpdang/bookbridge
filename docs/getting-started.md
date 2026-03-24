@@ -122,8 +122,9 @@ docker compose logs -f
    - Grimmory
    - Storyteller
    - Hardcover
-4. If you mounted Storyteller assets, set **Storyteller Assets Path** to `/storyteller`.
-5. Click **Save Settings** and wait for the app to restart.
+4. Use the **Test** button on any service section if you want to check a service before saving.
+5. If you mounted Storyteller assets, set **Storyteller Assets Path** to `/storyteller`.
+6. Click **Save Settings** and wait for the app to come back.
 
 ---
 
