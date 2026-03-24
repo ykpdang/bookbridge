@@ -23,6 +23,7 @@ from flask import Flask, render_template, render_template_string, request, redir
 from src.utils.config_loader import ConfigLoader
 from src.utils.logging_utils import memory_log_handler, LOG_PATH
 from src.utils.logging_utils import sanitize_log_data
+from src.api.api_clients import ABS_DISABLED_SENTINEL, is_abs_disabled_value
 from src.api.kosync_server import kosync_sync_bp, kosync_admin_bp, init_kosync_server
 from src.api.hardcover_routes import hardcover_bp, init_hardcover_routes
 from src.version import APP_VERSION, get_update_status
@@ -360,6 +361,24 @@ def get_audiobooks_conditionally():
         # Fetch all audiobooks from all libraries
         return container.abs_client().get_all_audiobooks()
 
+
+def _normalize_abs_form_value(key: str, raw_value) -> str:
+    clean_value = str(raw_value or "").strip()
+    if not clean_value:
+        return ""
+    if key in {"ABS_SERVER", "ABS_KEY"} and is_abs_disabled_value(clean_value):
+        return ABS_DISABLED_SENTINEL
+    if key == "ABS_SERVER" and not clean_value.lower().startswith(("http://", "https://")):
+        return f"http://{clean_value}"
+    return clean_value
+
+
+def _display_abs_server() -> str:
+    abs_server = os.environ.get("ABS_SERVER", "")
+    if is_abs_disabled_value(abs_server):
+        return ""
+    return abs_server
+
 # ---------------- CONTEXT PROCESSORS ----------------
 def inject_global_vars():
     def get_val(key, default_val=None):
@@ -407,7 +426,7 @@ def inject_global_vars():
 
     return dict(
         shelfmark_url=os.environ.get("SHELFMARK_URL", ""),
-        abs_server=os.environ.get("ABS_SERVER", ""),
+        abs_server=_display_abs_server(),
         booklore_server=os.environ.get("BOOKLORE_SERVER", ""),
         get_val=get_val,
         get_bool=get_bool
@@ -1349,8 +1368,8 @@ def settings():
             else:
                 raw_value = current_settings.get(key, '')
 
-            clean_value = (raw_value or '').strip()
-            if key in url_keys and clean_value:
+            clean_value = _normalize_abs_form_value(key, raw_value)
+            if key in url_keys and clean_value and key != "ABS_SERVER":
                 lower_val = clean_value.lower()
                 if not (lower_val.startswith("http://") or lower_val.startswith("https://")):
                     clean_value = f"http://{clean_value}"
@@ -1370,10 +1389,10 @@ def settings():
         for key, value in request.form.items():
             if key in bool_keys: continue
 
-            clean_value = value.strip()
+            clean_value = _normalize_abs_form_value(key, value)
 
             # Sanitize URLs
-            if key in url_keys and clean_value:
+            if key in url_keys and clean_value and key != "ABS_SERVER":
                 lower_val = clean_value.lower()
                 if not (lower_val.startswith("http://") or lower_val.startswith("https://")):
                     clean_value = f"http://{clean_value}"
@@ -4603,6 +4622,13 @@ def _normalize_test_url(value: str) -> str:
     return url
 
 
+def _normalize_abs_test_url(value: str) -> str:
+    url = _coerce_test_str(value)
+    if is_abs_disabled_value(url):
+        return ABS_DISABLED_SENTINEL
+    return _normalize_test_url(url)
+
+
 def _build_test_url(base_url: str, path: str) -> str:
     return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
@@ -4612,7 +4638,7 @@ def test_connection(service: str):
     payload = request.get_json(silent=True) or {}
     testers = {
         'abs': lambda data: _test_abs(
-            _normalize_test_url(data.get('ABS_SERVER')),
+            _normalize_abs_test_url(data.get('ABS_SERVER')),
             _coerce_test_str(data.get('ABS_KEY')),
         ),
         'kosync': lambda data: _test_kosync(
@@ -4658,6 +4684,8 @@ def test_connection(service: str):
 
 
 def _test_abs(url: str, token: str) -> dict:
+    if is_abs_disabled_value(url) or is_abs_disabled_value(token):
+        return {"ok": False, "message": "Audiobookshelf is intentionally disabled"}
     if not url or not token:
         return {"ok": False, "message": "Missing server URL or API token"}
     r = requests.get(f"{url}/api/me", headers={"Authorization": f"Bearer {token}"}, timeout=10)

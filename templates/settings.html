@@ -502,7 +502,7 @@
 
             <div class="settings-section section-highlight">
                 <div class="section-header">
-                    <h3 class="text-primary">Audiobookshelf (Required)</h3>
+                    <h3 class="text-primary">Audiobookshelf</h3>
                     <button class="btn btn-sm" type="button" onclick="testConnection('abs', this)">🔗 Test</button>
                 </div>
                 <div class="section-body">
@@ -515,17 +515,19 @@
 
                     <div class="form-group full-width">
                         <label>Server URL</label>
-                        <input type="text" name="ABS_SERVER" value="{{ get_val('ABS_SERVER') }}" required>
+                        <input type="text" name="ABS_SERVER" value="{{ get_val('ABS_SERVER') }}">
+                        <div class="help-text">Enter <code>disabled</code> to skip Audiobookshelf</div>
                     </div>
                     <div class="form-group full-width">
                         <label>API Token</label>
-                        <input type="password" name="ABS_KEY" value="{{ get_val('ABS_KEY') }}" required>
+                        <input type="password" name="ABS_KEY" value="{{ get_val('ABS_KEY') }}">
+                        <div class="help-text">Enter <code>disabled</code> to skip Audiobookshelf</div>
                     </div>
 
                     <!-- Wrapper for Library ID -->
                     <div id="abs_library_id_group" class="form-group">
                         <label>Library ID</label>
-                        <input type="text" name="ABS_LIBRARY_ID" value="{{ get_val('ABS_LIBRARY_ID') }}" required>
+                        <input type="text" name="ABS_LIBRARY_ID" value="{{ get_val('ABS_LIBRARY_ID') }}">
                     </div>
 
                     <div class="form-group">
@@ -1546,9 +1548,17 @@
         function initDynamicForms() {
             // 1. ABS Library ID Toggle
             const absCheckbox = document.getElementById('abs_only_lib');
+            const absServerInput = document.querySelector('input[name="ABS_SERVER"]');
+            const absKeyInput = document.querySelector('input[name="ABS_KEY"]');
             if (absCheckbox) {
                 absCheckbox.addEventListener('change', toggleAbsLibraryId);
                 toggleAbsLibraryId(); // Initial state
+            }
+            if (absServerInput) {
+                absServerInput.addEventListener('input', toggleAbsLibraryId);
+            }
+            if (absKeyInput) {
+                absKeyInput.addEventListener('input', toggleAbsLibraryId);
             }
 
             // 2. Transcription Provider Toggle
@@ -1573,9 +1583,14 @@
             const checkbox = document.getElementById('abs_only_lib');
             const group = document.getElementById('abs_library_id_group');
             const input = document.querySelector('input[name="ABS_LIBRARY_ID"]');
+            const absServer = document.querySelector('input[name="ABS_SERVER"]');
+            const absKey = document.querySelector('input[name="ABS_KEY"]');
+            const absDisabled = [absServer, absKey].some((field) =>
+                field && (field.value || '').trim().toLowerCase() === 'disabled'
+            );
 
             if (checkbox && group && input) {
-                if (checkbox.checked) {
+                if (checkbox.checked && !absDisabled) {
                     group.classList.remove('hidden');
                     input.setAttribute('required', 'required');
                 } else {
