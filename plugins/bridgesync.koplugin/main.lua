@@ -401,6 +401,24 @@ function BridgeSync:_scheduleSync(delay_seconds, silent)
     end)
 end
 
+function BridgeSync:_maybeUploadPendingSessions(reason)
+    if #self.pending_sessions == 0 then
+        return false
+    end
+    if not NetworkMgr:isConnected() then
+        if reason then
+            self:logInfo("Pending sessions still queued after", reason, "- waiting for WiFi")
+        end
+        return false
+    end
+
+    if reason then
+        self:logInfo("Uploading pending sessions after", reason)
+    end
+    self:_uploadSessions()
+    return true
+end
+
 function BridgeSync:onResume()
     if not self.is_enabled then
         return false
@@ -412,8 +430,8 @@ function BridgeSync:onResume()
     end
 
     -- Upload any queued sessions
-    if #self.pending_sessions > 0 and NetworkMgr:isConnected() then
-        self:_uploadSessions()
+    if #self.pending_sessions > 0 then
+        self:_maybeUploadPendingSessions("resume")
     end
 
     if self.manual_only then
@@ -434,6 +452,11 @@ function BridgeSync:onNetworkConnected()
     if not self.is_enabled then
         return false
     end
+
+    if #self.pending_sessions > 0 then
+        self:_maybeUploadPendingSessions("network reconnect")
+    end
+
     if self.manual_only then
         return false
     end
