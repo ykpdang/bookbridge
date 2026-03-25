@@ -73,6 +73,22 @@ class TestSettingsComprehensive(unittest.TestCase):
             if key in os.environ:
                 del os.environ[key]
 
+    def _render_settings_template_source(self):
+        import src.web_server
+        template_source = (Path(__file__).parent.parent / 'templates' / 'settings.html').read_text(encoding='utf-8')
+        original_render = src.web_server.render_template
+
+        def render_from_source(_template_name, **context):
+            return src.web_server.render_template_string(template_source, **context)
+
+        src.web_server.render_template = render_from_source
+        try:
+            response = self.client.get('/settings')
+            self.assertEqual(response.status_code, 200)
+            return response.get_data(as_text=True)
+        finally:
+            src.web_server.render_template = original_render
+
     @patch('src.web_server.restart_server')
     def test_all_bool_toggles(self, mock_restart):
         """Verify EVERY boolean setting can be toggled ON and OFF."""
@@ -125,6 +141,29 @@ class TestSettingsComprehensive(unittest.TestCase):
         
         for key, val in test_data.items():
             self.mock_container.mock_database_service.set_setting.assert_any_call(key, val)
+
+    def test_settings_get_renders_custom_whisper_model_as_text_value(self):
+        with patch.dict(os.environ, {'WHISPER_MODEL': 'custom-q5_k_m'}, clear=False):
+            html = self._render_settings_template_source()
+
+        self.assertIn('name="WHISPER_MODEL"', html)
+        self.assertIn('list="whisper-model-suggestions"', html)
+        self.assertIn('value="custom-q5_k_m"', html)
+        self.assertIn('<datalist id="whisper-model-suggestions">', html)
+        self.assertIn('<option value="tiny"></option>', html)
+        self.assertIn('<option value="large-v3"></option>', html)
+
+    @patch('src.web_server.restart_server')
+    def test_custom_whisper_model_is_saved_without_being_forced_to_builtin(self, mock_restart):
+        response = self.client.post('/settings', data={
+            'SYNC_PERIOD_MINS': '5',
+            'WHISPER_MODEL': 'custom-q5_k_m'
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'Restarting the application', response.data)
+        self.mock_container.mock_database_service.set_setting.assert_any_call('WHISPER_MODEL', 'custom-q5_k_m')
+        self.assertEqual(os.environ.get('WHISPER_MODEL'), 'custom-q5_k_m')
 
 if __name__ == '__main__':
     unittest.main()
