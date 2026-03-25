@@ -6,16 +6,16 @@ For the full history of changes, please refer to the **[GitHub Releases](https:/
 
 ## [Unreleased]
 
----
-
-## [6.3.4] - 2026-03-24
-
 ### Added
 
+- Added an optional **Bridge Sync** KOReader plugin for pulling bridge-managed books into a device folder.
+- Added **Find IDs** helpers for Audiobookshelf and Grimmory library ID settings, with dropdown pickers after lookup.
+- Dashboard cards now show recent session stats when that data exists.
 - Added an intentional **ABS disabled** mode for ebook-only or maintenance-focused deployments.
 
 ### Changed
 
+- The **Whisper Model** setting now accepts custom values instead of only a fixed preset list.
 - Forge now uploads EPUB and audio inputs directly to Storyteller through the REST/TUS API instead of depending on a watched library hand-off.
 - Added documentation for `STORYTELLER_UPLOAD_CHUNK_SIZE` so direct-upload chunk size can be tuned when needed.
 - Grimmory compatibility and session handling were expanded so newer Grimmory installs behave more reliably as both ebook and audiobook sources.
@@ -23,6 +23,7 @@ For the full history of changes, please refer to the **[GitHub Releases](https:/
 
 ### Fixed
 
+- Fixed Grimmory session writes so reading and listening sessions stay in the format Grimmory expects.
 - Fixed Storyteller direct-upload metadata formatting so Forge no longer fails with `400 Invalid upload-metadata` on Storyteller `web-v2.9.3`.
 - Fixed Storyteller direct-upload metadata and readiness issues that could break Forge imports.
 - Fixed Grimmory progress, cache, and download edge cases that could break matching or syncing.

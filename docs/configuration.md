@@ -38,6 +38,10 @@ Audiobookshelf remains the default audiobook source when a mapping is not explic
 | Progress Offset | `ABS_PROGRESS_OFFSET_SECONDS` | `0` | Rewinds progress written back to ABS by this many seconds. |
 | Limit Search to Configured Library | `ABS_ONLY_SEARCH_IN_ABS_LIBRARY_ID` | `false` | In the UI this is a checkbox. Direct env usage can also be set to a library ID string. |
 
+Audiobookshelf notes:
+
+- Use **Find IDs** next to **Library ID** in Settings to load your available ABS libraries and fill the field from a dropdown.
+
 #### KOSync / KOReader
 
 Use this when you want KOReader devices to sync directly with the bridge.
@@ -98,6 +102,7 @@ Grimmory notes:
 - The dashboard shows **BL Audio** progress when a mapping is driven by Grimmory audio.
 - When **Record Reading Sessions** is enabled, Grimmory gets session updates as you make progress.
 - **Settings -> Refresh Grimmory Cache** forces a fresh cache rebuild after imports, removals, or large metadata changes.
+- Use **Find IDs** next to **Library ID** in Settings to load your available Grimmory libraries and fill the field from a dropdown.
 
 Advanced Grimmory cache tuning:
 
@@ -162,13 +167,17 @@ Suggestions notes:
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |
 | Provider | `TRANSCRIPTION_PROVIDER` | `local` | `local`, `deepgram`, or `whispercpp`. |
-| Whisper Model | `WHISPER_MODEL` | `tiny` | Local Whisper model size. |
+| Whisper Model | `WHISPER_MODEL` | `tiny` | Local Whisper model size or a custom Whisper.cpp model name. |
 | Whisper Device | `WHISPER_DEVICE` | `auto` | `auto`, `cpu`, or `cuda`. |
 | Whisper Compute Type | `WHISPER_COMPUTE_TYPE` | `auto` | Precision mode for local Whisper. |
 | Whisper.cpp URL | `WHISPER_CPP_URL` | empty | URL to your Whisper.cpp HTTP endpoint. |
 | Deepgram API Key | `DEEPGRAM_API_KEY` | empty | Deepgram API key. |
 | Deepgram Model | `DEEPGRAM_MODEL` | `nova-2` | Deepgram model tier. |
 | SMIL Validation Threshold | `SMIL_VALIDATION_THRESHOLD` | `60` | Minimum token match percentage for accepting SMIL timing data. |
+
+Transcription notes:
+
+- The **Whisper Model** field in Settings is a text box with common suggestions. You can use a normal preset like `tiny` or enter a custom model name directly.
 
 ### Sync Tuning
 

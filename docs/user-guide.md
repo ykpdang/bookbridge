@@ -10,6 +10,7 @@ It shows:
 
 - **Active Syncs** for every tracked mapping
 - **Unified Progress** across all connected clients
+- **Recent session stats** when session data is available for that mapping
 - **Source badges** so you can tell whether the audio side is coming from Audiobookshelf or Grimmory
 - **Direct links** into supported services, including Grimmory audio when a mapping uses it
 - Quick access to **Add Book**, **Batch Match**, **Suggestions**, **Forge**, **Settings**, and **Logs**
@@ -69,8 +70,11 @@ This is useful when you often read directly in Storyteller or Grimmory and want 
 The **Settings** page is where you connect your services and adjust how the bridge behaves.
 
 - Each service section has a **Test** button so you can check a service before saving.
+- Audiobookshelf and Grimmory library ID fields include **Find IDs** helpers so you can pick from a dropdown instead of pasting blindly.
 - **Save Settings** applies your changes and restarts the app.
 - When the restart finishes, you are sent back to the dashboard.
+
+If you use Whisper.cpp with a custom model name, you can type that model directly into the **Whisper Model** field.
 
 ---
 

@@ -6,16 +6,16 @@ All notable changes to ABS-KoSync Enhanced will be documented in this file.
 
 ## [Unreleased]
 
----
-
-## [6.3.4] - 2026-03-24
-
 ### Added
 
+- Added an optional **Bridge Sync** KOReader plugin for pulling bridge-managed books onto a device-managed folder.
+- Added **Find IDs** helpers for Audiobookshelf and Grimmory library ID fields in Settings, including quick pick dropdowns.
+- Dashboard cards now show recent session stats when session tracking data is available.
 - Added an **Audiobookshelf disabled mode** by treating `disabled` as an intentional off switch for ABS URL or token settings.
 
 ### Changed
 
+- The **Whisper Model** field in Settings now accepts custom values instead of only the built-in preset list.
 - Storyteller Forge now uploads staged EPUB and audio files directly to Storyteller over the REST/TUS API instead of relying on watched-library folder hand-offs.
 - Storyteller direct-upload settings now expose `STORYTELLER_UPLOAD_CHUNK_SIZE` for tuning TUS PATCH chunk size when needed.
 - Grimmory compatibility was broadened across search, cache refresh, downloads, and progress/session handling so newer Grimmory installs work more reliably as both ebook and audiobook sources.
@@ -23,6 +23,7 @@ All notable changes to ABS-KoSync Enhanced will be documented in this file.
 
 ### Fixed
 
+- Fixed Grimmory session writes so reading and listening sessions stay in the strict format Grimmory expects.
 - Fixed Storyteller TUS `Upload-Metadata` formatting for direct Forge uploads. Metadata pairs are now serialized without post-comma whitespace, which restores compatibility with Storyteller `web-v2.9.3` and prevents `400 Invalid upload-metadata` failures during Auto-Forge and manual Forge.
 - Fixed Storyteller direct-upload and post-import issues, including `Upload-Metadata` formatting, import readiness timing, duplicate Forge triggers, and several incorrect locator/progress writes.
 - Fixed Grimmory progress writes, single-file audiobook Forge downloads, cache hydration edge cases, and truncated downloads that could break matching or syncing.
