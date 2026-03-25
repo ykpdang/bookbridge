@@ -1179,14 +1179,16 @@
                     <div id="group_whisper_model" class="dynamic-group full-width" style="display:contents;">
                         <div class="form-group">
                             <label>Whisper Model</label>
-                            <select name="WHISPER_MODEL">
+                            <input type="text" name="WHISPER_MODEL" list="whisper-model-suggestions"
+                                value="{{ get_val('WHISPER_MODEL') }}" placeholder="tiny" autocomplete="off">
+                            <datalist id="whisper-model-suggestions">
                                 {% for model in ['tiny', 'base', 'small', 'medium', 'large-v2', 'large-v3'] %}
-                                <option value="{{ model }}" {% if get_val('WHISPER_MODEL')==model %}selected{% endif %}>
-                                    {{ model }}</option>
+                                <option value="{{ model }}"></option>
                                 {% endfor %}
-                            </select>
-                            <div class="help-text">Model size for Local Whisper and Whisper.cpp Server. Larger =
-                                better accuracy but slower.
+                            </datalist>
+                            <div class="help-text">Model name for Local Whisper and Whisper.cpp Server. Pick a common
+                                model from the suggestions or enter a custom whisper.cpp model name. Larger = better
+                                accuracy but slower.
                             </div>
                         </div>
                     </div>
