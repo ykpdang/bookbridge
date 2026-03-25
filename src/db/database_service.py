@@ -152,6 +152,21 @@ class DatabaseService:
         with self.get_session() as session:
             settings = session.query(Setting).all()
             return {s.key: s.value for s in settings}
+
+    def get_json_setting(self, key: str, default=None):
+        """Get a JSON setting value, returning default on missing or invalid JSON."""
+        raw = self.get_setting(key)
+        if raw in (None, ""):
+            return default
+        try:
+            return json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            logger.warning("Invalid JSON setting for '%s'", key)
+            return default
+
+    def set_json_setting(self, key: str, value) -> Setting:
+        """Persist a JSON-serializable setting value."""
+        return self.set_setting(key, json.dumps(value))
             
     def delete_setting(self, key: str) -> bool:
         """Delete a setting by key."""
@@ -897,6 +912,48 @@ class DatabaseService:
                     'last_session_time': row.last_session_time,
                 }
             return result
+
+    def delete_recent_estimated_kosync_session(
+        self,
+        abs_id: str,
+        start_time: float,
+        end_time: float,
+        start_progress: float = None,
+        end_progress: float = None,
+        time_window_seconds: int = 600,
+        progress_tolerance: float = 0.02,
+    ) -> bool:
+        """Delete the closest overlapping estimated KoSync session for a book."""
+        with self.get_session() as session:
+            candidates = session.query(ReadingSession).filter(
+                ReadingSession.abs_id == abs_id,
+                ReadingSession.leader_client.like('KoSync:%'),
+                ReadingSession.start_time >= (start_time - time_window_seconds),
+                ReadingSession.start_time <= (start_time + time_window_seconds),
+                ReadingSession.end_time >= (end_time - time_window_seconds),
+                ReadingSession.end_time <= (end_time + time_window_seconds),
+            ).all()
+
+            best = None
+            best_score = None
+            for candidate in candidates:
+                if start_progress is not None and candidate.start_progress is not None:
+                    if abs(float(candidate.start_progress) - float(start_progress)) > progress_tolerance:
+                        continue
+                if end_progress is not None and candidate.end_progress is not None:
+                    if abs(float(candidate.end_progress) - float(end_progress)) > progress_tolerance:
+                        continue
+
+                score = abs(float(candidate.start_time) - float(start_time)) + abs(float(candidate.end_time) - float(end_time))
+                if best is None or score < best_score:
+                    best = candidate
+                    best_score = score
+
+            if not best:
+                return False
+
+            session.delete(best)
+            return True
 
     def clear_all_booklore_books(self) -> bool:
         """Delete all cached Grimmory books."""
