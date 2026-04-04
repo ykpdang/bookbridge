@@ -1,5 +1,6 @@
 import pytest
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -117,6 +118,32 @@ def test_probe_storyteller_transcripts_returns_not_ready_when_transcriptions_dir
 
     assert result["ready"] is False
     assert result["reason"] == "transcriptions_dir_missing"
+
+
+def test_probe_storyteller_transcripts_logs_search_root_and_available_dirs_on_title_dir_missing(caplog):
+    with tempfile.TemporaryDirectory() as tmp:
+        assets_root = Path(tmp)
+        assets_dir = assets_root / "assets"
+        (assets_dir / "Dune").mkdir(parents=True, exist_ok=True)
+        (assets_dir / "Foundation [ABC123]").mkdir(parents=True, exist_ok=True)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("STORYTELLER_ASSETS_DIR", str(assets_root))
+            with caplog.at_level(logging.INFO):
+                result = probe_storyteller_transcripts(
+                    "The Fellowship of the Ring",
+                    [{"start": 0.0, "end": 1.0}],
+                    storyteller_title="The Fellowship of the Ring [XYZ789]",
+                )
+
+    assert result["ready"] is False
+    assert result["reason"] == "title_dir_missing"
+    assert str(assets_dir) in caplog.text
+    assert "exists=True" in caplog.text
+    assert "is_dir=True" in caplog.text
+    assert "Dune" in caplog.text
+    assert "Foundation [ABC123]" in caplog.text
+    assert "The Fellowship of the Ring" in caplog.text
 
 
 def test_probe_storyteller_transcripts_returns_not_ready_when_chapter_files_incomplete():

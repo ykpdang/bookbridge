@@ -40,7 +40,7 @@ class TestForgeService(unittest.TestCase):
         
         # Suppress logging during tests
         self.logger_patch = patch('src.services.forge_service.logger')
-        self.logger_patch.start()
+        self.mock_logger = self.logger_patch.start()
 
     def tearDown(self):
         patch.stopall()
@@ -423,6 +423,64 @@ class TestForgeService(unittest.TestCase):
             self.mock_storyteller.upload_epub.assert_called_once()
             self.mock_storyteller.upload_audio_file.assert_called_once()
 
+    def test_manual_forge_accepts_grimmory_text_source_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            def _copy_audio(_abs_id, dest_path, stage_mode="cleanup"):
+                dest = Path(dest_path)
+                dest.mkdir(parents=True, exist_ok=True)
+                (dest / "audio.mp3").write_bytes(b"audio")
+                return True
+
+            self.mock_booklore.download_book.return_value = b"ebook"
+            self.mock_storyteller.upload_epub.return_value = True
+            self.mock_storyteller.upload_audio_file.return_value = True
+            self.mock_storyteller.get_book_details.return_value = None
+
+            with patch.object(self.service, "_copy_audio_files", side_effect=_copy_audio), patch(
+                "src.services.forge_service.time.sleep", return_value=None
+            ):
+                self.service._forge_background_task(
+                    abs_id="abs-1",
+                    text_item={"source": "Grimmory", "booklore_id": "42"},
+                    title="Auto Book",
+                    author="Author",
+                )
+
+            self.mock_booklore.download_book.assert_called_once_with("42")
+            logged_errors = " ".join(
+                str(call.args[0]) for call in self.mock_logger.error.call_args_list if call.args
+            )
+            self.assertNotIn("Unknown text source", logged_errors)
+
+    def test_manual_forge_still_accepts_booklore_text_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            def _copy_audio(_abs_id, dest_path, stage_mode="cleanup"):
+                dest = Path(dest_path)
+                dest.mkdir(parents=True, exist_ok=True)
+                (dest / "audio.mp3").write_bytes(b"audio")
+                return True
+
+            self.mock_booklore.download_book.return_value = b"ebook"
+            self.mock_storyteller.upload_epub.return_value = True
+            self.mock_storyteller.upload_audio_file.return_value = True
+            self.mock_storyteller.get_book_details.return_value = None
+
+            with patch.object(self.service, "_copy_audio_files", side_effect=_copy_audio), patch(
+                "src.services.forge_service.time.sleep", return_value=None
+            ):
+                self.service._forge_background_task(
+                    abs_id="abs-1",
+                    text_item={"source": "Booklore", "booklore_id": "77"},
+                    title="Auto Book",
+                    author="Author",
+                )
+
+            self.mock_booklore.download_book.assert_called_once_with("77")
+
     def _write_storyteller_manifest(self, base_dir: Path) -> str:
         manifest_dir = base_dir / "storyteller_manifest"
         manifest_dir.mkdir(parents=True, exist_ok=True)
@@ -589,6 +647,17 @@ class TestForgeService(unittest.TestCase):
 
         self.mock_cwa.get_book_by_id.assert_called_once_with("123")
         self.mock_cwa.download_ebook.assert_any_call("http://example.test/book.epub", ANY)
+
+    def test_auto_forge_accepts_grimmory_text_source_alias(self):
+        self.mock_booklore.download_book.return_value = b"source"
+
+        self._run_auto_forge_pipeline(
+            text_item={"source": "Grimmory", "booklore_id": "123"},
+            ingest_manifest=None,
+            storyteller_alignment_ok=False,
+        )
+
+        self.mock_booklore.download_book.assert_called_once_with("123")
 
     def test_auto_forge_uses_storyteller_uuid_collection_path(self):
         """Auto-forge should add Storyteller books to collection by UUID when available."""

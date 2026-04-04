@@ -73,6 +73,21 @@ class ForgeService:
             return DEFAULT_STAGE_MODE
         return normalized
 
+    @staticmethod
+    def _normalize_text_source(source: str) -> str:
+        normalized = str(source or "").strip()
+        if not normalized:
+            return ""
+
+        source_map = {
+            "grimmory": "Booklore",
+            "booklore": "Booklore",
+            "abs": "ABS",
+            "cwa": "CWA",
+            "local file": "Local File",
+        }
+        return source_map.get(normalized.lower(), normalized)
+
     def _should_cleanup_staged_sources(self, stage_mode: str) -> bool:
         return self._normalize_stage_mode(stage_mode) == DEFAULT_STAGE_MODE
 
@@ -838,7 +853,7 @@ class ForgeService:
 
             # Step 2: Acquire text source (epub)
             epub_path = temp_dir / f"{safe_title}.epub"
-            source = text_item.get('source', '')
+            source = self._normalize_text_source(text_item.get('source', ''))
             text_success = False
 
             if source == 'Local File':
@@ -1060,7 +1075,7 @@ class ForgeService:
 
             # Copy Text
             epub_path = temp_dir / f"{safe_title}.epub"
-            source = text_item.get('source')
+            source = self._normalize_text_source(text_item.get('source'))
             if source == 'Local File':
                 self._stage_local_file(text_item.get('path'), epub_path, stage_mode, "Auto-Forge")
             elif source == 'Booklore':

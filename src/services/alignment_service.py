@@ -845,12 +845,40 @@ def probe_storyteller_transcripts(
 
     chapter_list = chapters if isinstance(chapters, list) else []
     assets_root = Path(assets_dir_raw)
+    assets_search_root = assets_root / "assets"
     title_dir = _resolve_storyteller_title_dir(
         assets_root,
         abs_title or "",
         storyteller_title=storyteller_title,
     )
     if not title_dir:
+        search_root_exists = assets_search_root.exists()
+        search_root_is_dir = assets_search_root.is_dir()
+        available_dirs = []
+        if search_root_exists and search_root_is_dir:
+            try:
+                available_dirs = sorted(
+                    child.name for child in assets_search_root.iterdir() if child.is_dir()
+                )
+            except Exception as list_err:
+                logger.debug(
+                    "Storyteller transcript probe could not list assets root '%s': %s",
+                    assets_search_root,
+                    list_err,
+                )
+
+        sample_dirs = available_dirs[:5]
+        logger.info(
+            "Storyteller transcript probe title_dir_missing: search_root='%s' exists=%s is_dir=%s "
+            "abs_title='%s' storyteller_title='%s' available_dirs=%s total_dirs=%d",
+            assets_search_root,
+            search_root_exists,
+            search_root_is_dir,
+            _sanitize_log_data(abs_title),
+            _sanitize_log_data(storyteller_title or ""),
+            sample_dirs,
+            len(available_dirs),
+        )
         result["reason"] = "title_dir_missing"
         return result
 

@@ -4,6 +4,13 @@
 
 All notable changes to ABS-KoSync Enhanced will be documented in this file.
 
+## [6.4.1] - 2026-04-04
+
+### Fixed
+
+- Fixed a manual Forge regression where Grimmory EPUB selections could be sent with the display label `Grimmory` instead of the internal `Booklore` source key, causing `Unknown text source: 'Grimmory'` failures.
+- Improved Storyteller transcript-ingest diagnostics so title-directory misses now log the resolved `STORYTELLER_ASSETS_DIR/assets` search root, candidate titles, and a short sample of available asset directories before falling back to SMIL or Whisper.
+
 ## [6.4.0] - 2026-04-04
 
 ### Added
