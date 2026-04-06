@@ -146,13 +146,15 @@ def test_probe_storyteller_transcripts_logs_search_root_and_available_dirs_on_ti
     assert "The Fellowship of the Ring" in caplog.text
 
 
-def test_probe_storyteller_transcripts_returns_not_ready_when_chapter_files_incomplete():
+def test_probe_storyteller_transcripts_accepts_count_mismatch_with_audio_aligned():
+    # 1 valid file with 2 ABS chapters — validation now accepts the found count
+    # and flags audio_aligned=True so ingest derives timing from file contents.
     with tempfile.TemporaryDirectory() as tmp:
         assets_root = Path(tmp)
         transcriptions_dir = assets_root / "assets" / "Auto Book" / "transcriptions"
         transcriptions_dir.mkdir(parents=True, exist_ok=True)
         (transcriptions_dir / "00000-00001.json").write_text(
-            json.dumps({"transcript": "hello", "wordTimeline": []}),
+            json.dumps({"transcript": "hello", "wordTimeline": [{"endTime": 5.0}]}),
             encoding="utf-8",
         )
 
@@ -163,8 +165,9 @@ def test_probe_storyteller_transcripts_returns_not_ready_when_chapter_files_inco
                 [{"start": 0.0, "end": 1.0}, {"start": 1.0, "end": 2.0}],
             )
 
-    assert result["ready"] is False
-    assert result["reason"] == "chapter_set_incomplete"
+    assert result["ready"] is True
+    assert result["reason"] == "validated"
+    assert result["audio_aligned"] is True
 
 
 def test_probe_storyteller_transcripts_returns_ready_when_validated():
