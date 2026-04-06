@@ -129,7 +129,9 @@ def test_storyteller_validation_accepts_chapter_first_one_based(tmp_path):
     assert destination_files == ["00000-00001.json", "00000-00002.json"]
 
 
-def test_storyteller_validation_rejects_count_mismatch(tmp_path):
+def test_storyteller_validation_accepts_count_mismatch(tmp_path):
+    # 3 valid files with expected_count=2 — the count check is removed;
+    # validation works with the actual file count.
     transcriptions_dir = tmp_path / "transcriptions_count_mismatch"
     transcriptions_dir.mkdir(parents=True, exist_ok=True)
     _write_wordtimeline_file(transcriptions_dir, "00001-00001.json")
@@ -137,9 +139,9 @@ def test_storyteller_validation_rejects_count_mismatch(tmp_path):
     _write_wordtimeline_file(transcriptions_dir, "00003-00001.json")
 
     is_valid, source_files, destination_files = _validate_storyteller_chapters(transcriptions_dir, 2)
-    assert is_valid is False
-    assert source_files == []
-    assert destination_files == []
+    assert is_valid is True
+    assert source_files == ["00001-00001.json", "00002-00001.json", "00003-00001.json"]
+    assert destination_files == ["00000-00001.json", "00000-00002.json", "00000-00003.json"]
 
 
 def test_storyteller_validation_rejects_non_wordtimeline_format(tmp_path):
