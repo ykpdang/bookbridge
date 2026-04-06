@@ -1051,6 +1051,10 @@
                 }
             });
             showMatchSubmitFeedback('');
+            const forgeActionInput = document.getElementById('input_forge_action');
+            if (forgeActionInput) {
+                forgeActionInput.remove();
+            }
             validateForm();
         }
 
@@ -1216,6 +1220,15 @@
                 );
                 openForgeStageModal((mode) => {
                     document.getElementById('input_forge_stage_mode').value = mode;
+                    let forgeActionInput = document.getElementById('input_forge_action');
+                    if (!forgeActionInput) {
+                        forgeActionInput = document.createElement('input');
+                        forgeActionInput.type = 'hidden';
+                        forgeActionInput.name = 'action';
+                        forgeActionInput.id = 'input_forge_action';
+                        mappingForm.appendChild(forgeActionInput);
+                    }
+                    forgeActionInput.value = 'forge_match';
                     allowForgeSubmit = true;
                     mappingForm.requestSubmit(forgeBtn);
                 });
