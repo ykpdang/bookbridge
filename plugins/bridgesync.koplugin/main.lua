@@ -602,17 +602,31 @@ function BridgeSync:_buildHashIndex()
         return index
     end
 
+    local hash_cache = self.state:readSetting("hash_cache") or {}
+    local new_cache = {}
+
     for entry in lfs.dir(self.download_dir) do
         if entry ~= "." and entry ~= ".." and not entry:match("%.part$") then
             local path = self.download_dir .. "/" .. entry
-            if lfs.attributes(path, "mode") == "file" then
-                local hash = self:_calculateBookHash(path)
-                if hash and not index[hash] then
-                    index[hash] = path
+            local attrs = lfs.attributes(path)
+            if attrs and attrs.mode == "file" then
+                local cache_key = path .. ":" .. tostring(attrs.modification) .. ":" .. tostring(attrs.size)
+                local hash = hash_cache[cache_key]
+                if not hash then
+                    hash = self:_calculateBookHash(path)
+                end
+                if hash then
+                    new_cache[cache_key] = hash
+                    if not index[hash] then
+                        index[hash] = path
+                    end
                 end
             end
         end
     end
+
+    self.state:saveSetting("hash_cache", new_cache)
+    self.state:flush()
     return index
 end
 
@@ -722,7 +736,13 @@ function BridgeSync:_runSync()
     local remote_books = manifest.books or {}
     local remote_by_abs = {}
     local items = self:_loadStateItems()
-    local hash_index = self:_buildHashIndex()
+    local hash_index = nil
+    local function getHashIndex()
+        if not hash_index then
+            hash_index = self:_buildHashIndex()
+        end
+        return hash_index
+    end
     local downloaded, skipped, renamed, deleted, deferred, errors = 0, 0, 0, 0, 0, 0
 
     for _, book in ipairs(remote_books) do
@@ -747,7 +767,7 @@ function BridgeSync:_runSync()
         end
 
         if not reused_path then
-            local indexed_path = hash_index[book.content_hash]
+            local indexed_path = getHashIndex()[book.content_hash]
             if indexed_path and self:_fileExists(indexed_path) then
                 local tracked_abs_id = self:_findTrackedAbsIdByPath(items, indexed_path)
                 if not tracked_abs_id or tracked_abs_id == book.abs_id then
@@ -775,7 +795,7 @@ function BridgeSync:_runSync()
                     content_hash = book.content_hash,
                     shelves = book.shelves,
                 }
-                hash_index[book.content_hash] = target_path
+                if hash_index then hash_index[book.content_hash] = target_path end
             end
         else
             local temp_path = target_path .. ".part"
@@ -813,7 +833,7 @@ function BridgeSync:_runSync()
                             content_hash = book.content_hash,
                             shelves = book.shelves,
                         }
-                        hash_index[book.content_hash] = target_path
+                        if hash_index then hash_index[book.content_hash] = target_path end
                     end
                 end
             end
