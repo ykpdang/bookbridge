@@ -245,6 +245,58 @@ function APIClient:_requestJSON(method, path, json_body, timeout_opts)
     return false, nil, "Request failed"
 end
 
+function APIClient:getPluginVersion()
+    local ok, code, body = self:_request("GET", "/koreader/device-sync/plugin/version", nil, nil, {
+        block_timeout = 20,
+        total_timeout = 45,
+        attempts = 2,
+    })
+    if not ok then
+        return false, body or ("HTTP " .. tostring(code))
+    end
+    local parsed, result = pcall(json.decode, body or "{}")
+    if not parsed or type(result) ~= "table" then
+        logger.warn("Bridge Sync API: Invalid plugin version JSON")
+        return false, "Invalid version response"
+    end
+    return true, result
+end
+
+function APIClient:downloadPluginZip(save_path)
+    local attempts = 3
+    for attempt = 1, attempts do
+        local handle, open_err = io.open(save_path, "wb")
+        if not handle then
+            return false, open_err or "Failed to open output file"
+        end
+
+        local ok, code, body = self:_request("GET", "/koreader/device-sync/plugin/download", socketutil.file_sink(handle), nil, {
+            block_timeout = 60,
+            total_timeout = 300,
+            attempts = 1,
+        })
+        if ok then
+            return true
+        end
+
+        os.remove(save_path)
+        if body ~= socketutil.TIMEOUT_CODE and
+           body ~= socketutil.SSL_HANDSHAKE_CODE and
+           body ~= socketutil.SINK_TIMEOUT_CODE
+        then
+            return false, body or ("HTTP " .. tostring(code))
+        end
+
+        if attempt < attempts then
+            self:_log("info", "Retrying plugin zip download", tostring(attempt + 1), "of", tostring(attempts))
+            socket.sleep(attempt)
+        else
+            return false, body or ("HTTP " .. tostring(code))
+        end
+    end
+    return false, "Download failed"
+end
+
 function APIClient:uploadSessions(sessions)
     local body = json.encode(sessions)
     return self:_requestJSON("POST", "/koreader/device-sync/sessions", body, {

@@ -1,10 +1,13 @@
 # KoSync Server - Extracted from web_server.py for clean code separation
 # Implements KOSync protocol compatible with kosync-dotnet
+import io
 import logging
 import mimetypes
 import os
+import re
 import threading
 import time
+import zipfile
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -30,6 +33,11 @@ _manager = None
 _hash_cache = None
 _ebook_dir = None
 _active_scans = set()
+
+# Plugin self-update: resolved from src/api/ -> project root -> plugins/
+_PLUGIN_DIR = Path(__file__).parent.parent.parent / "plugins" / "bridgesync.koplugin"
+_plugin_zip_cache: Optional[tuple] = None  # (zip_bytes: bytes, max_mtime: float)
+_plugin_zip_cache_lock = threading.Lock()
 
 # KoSync PUT debounce state
 _kosync_debounce: dict = {}  # {abs_id: {'last_event': float, 'title': str, 'synced': bool}}
@@ -1116,6 +1124,95 @@ def kosync_upload_sessions():
 
     logger.info(f"Session upload: accepted={accepted}, rejected={rejected}")
     return jsonify({"accepted": accepted, "rejected": rejected}), 200
+
+
+# ── Plugin self-update helpers ──
+
+def _parse_meta_lua_version(meta_path: Path) -> Optional[str]:
+    """Extract the version string from a Lua table file of the form: version = "x.y.z"."""
+    try:
+        content = meta_path.read_text(encoding="utf-8")
+        m = re.search(r'version\s*=\s*"([^"]+)"', content)
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    return None
+
+
+def _get_plugin_dir_max_mtime(plugin_dir: Path) -> float:
+    """Return the latest mtime across all files in plugin_dir (recursive)."""
+    max_mtime = 0.0
+    for path in plugin_dir.rglob("*"):
+        if path.is_file():
+            mtime = path.stat().st_mtime
+            if mtime > max_mtime:
+                max_mtime = mtime
+    return max_mtime
+
+
+def _build_plugin_zip(plugin_dir: Path) -> bytes:
+    """Build an in-memory zip of plugin_dir with bridgesync.koplugin/ as the top-level folder."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(plugin_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            parts = path.parts
+            if "__pycache__" in parts or ".git" in parts:
+                continue
+            if path.name.endswith(".pyc"):
+                continue
+            arcname = "bridgesync.koplugin/" + str(path.relative_to(plugin_dir))
+            zf.write(str(path), arcname)
+    return buf.getvalue()
+
+
+@kosync_sync_bp.route('/device-sync/plugin/version', methods=['GET'])
+@kosync_sync_bp.route('/koreader/device-sync/plugin/version', methods=['GET'])
+@kosync_auth_required
+def koreader_plugin_version():
+    """Return the current BridgeSync plugin version from _meta.lua."""
+    if not _PLUGIN_DIR.is_dir():
+        return jsonify({"error": "Plugin directory not found"}), 404
+
+    version = _parse_meta_lua_version(_PLUGIN_DIR / "_meta.lua")
+    if not version:
+        return jsonify({"error": "Could not determine plugin version"}), 404
+
+    return jsonify({"version": version, "name": "bridgesync"}), 200
+
+
+@kosync_sync_bp.route('/device-sync/plugin/download', methods=['GET'])
+@kosync_sync_bp.route('/koreader/device-sync/plugin/download', methods=['GET'])
+@kosync_auth_required
+def koreader_plugin_download():
+    """Serve the BridgeSync plugin as a zip archive; cached until any file's mtime changes."""
+    global _plugin_zip_cache
+
+    if not _PLUGIN_DIR.is_dir():
+        return jsonify({"error": "Plugin directory not found"}), 404
+
+    version = _parse_meta_lua_version(_PLUGIN_DIR / "_meta.lua")
+    if not version:
+        return jsonify({"error": "Could not determine plugin version"}), 404
+
+    current_mtime = _get_plugin_dir_max_mtime(_PLUGIN_DIR)
+
+    with _plugin_zip_cache_lock:
+        if _plugin_zip_cache is None or _plugin_zip_cache[1] < current_mtime:
+            logger.info("Plugin zip cache miss — rebuilding bridgesync plugin archive")
+            zip_bytes = _build_plugin_zip(_PLUGIN_DIR)
+            _plugin_zip_cache = (zip_bytes, current_mtime)
+        zip_bytes = _plugin_zip_cache[0]
+
+    filename = f"bridgesync-{version}.zip"
+    return send_file(
+        io.BytesIO(zip_bytes),
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=filename,
+    )
 
 
 # ---------------- Helper Functions ----------------
