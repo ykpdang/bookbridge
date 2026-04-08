@@ -26,7 +26,7 @@ from src.utils.config_loader import ConfigLoader
 from src.utils.logging_utils import memory_log_handler, LOG_PATH
 from src.utils.logging_utils import sanitize_log_data
 from src.api.api_clients import ABS_DISABLED_SENTINEL, is_abs_disabled_value
-from src.api.kosync_server import kosync_sync_bp, kosync_admin_bp, init_kosync_server
+from src.api.kosync_server import kosync_sync_bp, kosync_admin_bp, init_kosync_server, signal_manifest_rebuild
 from src.api.hardcover_routes import hardcover_bp, init_hardcover_routes
 from src.version import APP_VERSION, get_update_status
 from src.db.models import State
@@ -306,6 +306,7 @@ def setup_dependencies(app, test_container=None):
 
     # Register KoSync Blueprint and initialize with dependencies
     init_kosync_server(database_service, container, manager, EBOOK_DIR)
+    manager.register_post_cycle_callback(signal_manifest_rebuild)
     app.register_blueprint(kosync_sync_bp)
     app.register_blueprint(kosync_admin_bp)
 

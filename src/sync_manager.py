@@ -96,6 +96,7 @@ class SyncManager:
         self._suggestion_lock = threading.Lock()
         self._sync_cycle_ebook_cache: dict[str, tuple[str, int]] = {}
         self._sync_cycle_local_epub_cache: dict[str, Path | None] = {}
+        self._post_cycle_callbacks: list = []
 
         self._setup_sync_clients(sync_clients)
         self.startup_checks()
@@ -758,6 +759,10 @@ class SyncManager:
             return
         with self._pending_sync_lock:
             self._pending_sync_books.add(abs_id)
+
+    def register_post_cycle_callback(self, fn) -> None:
+        """Register a callable to be invoked after every sync cycle completes."""
+        self._post_cycle_callbacks.append(fn)
 
     def _dispatch_pending_syncs(self) -> None:
         with self._pending_sync_lock:
@@ -1795,6 +1800,11 @@ class SyncManager:
         finally:
             self._sync_lock.release()
             self._dispatch_pending_syncs()
+            for cb in self._post_cycle_callbacks:
+                try:
+                    cb()
+                except Exception as cb_err:
+                    logger.debug("Post-cycle callback error: %s", cb_err)
 
     def _sync_cycle_internal(self, target_abs_id=None):
         # Clear caches at start of cycle

@@ -39,6 +39,12 @@ _PLUGIN_DIR = Path(__file__).parent.parent.parent / "plugins" / "bridgesync.kopl
 _plugin_zip_cache: Optional[tuple] = None  # (zip_bytes: bytes, max_mtime: float)
 _plugin_zip_cache_lock = threading.Lock()
 
+# Manifest pre-cache: background thread rebuilds this; endpoint reads from it.
+_manifest_cache: Optional[dict] = None
+_manifest_cache_lock = threading.Lock()
+_manifest_rebuild_event = threading.Event()
+_manifest_prebuilder_started = False
+
 # KoSync PUT debounce state
 _kosync_debounce: dict = {}  # {abs_id: {'last_event': float, 'title': str, 'synced': bool}}
 _kosync_debounce_lock = threading.Lock()
@@ -52,6 +58,75 @@ _KOSYNC_DEVICE_SESSION_REGISTRY_KEY = "KOSYNC_DEVICE_SESSION_REGISTRY"
 _kosync_device_session_registry = None
 _kosync_device_session_registry_lock = threading.Lock()
 
+def signal_manifest_rebuild() -> None:
+    """Wake the manifest prebuilder thread so it rebuilds on the next cycle."""
+    _manifest_rebuild_event.set()
+
+
+def _build_shelf_mapping_for_cache() -> Optional[dict]:
+    """Fetch the Booklore shelf mapping — same logic as the manifest endpoint."""
+    collections_mode = os.environ.get("DEVICE_SYNC_COLLECTIONS", "off").lower()
+    if collections_mode == "off" or not _container:
+        return None
+    try:
+        bl = _container.booklore_client()
+        if not bl.is_configured():
+            return None
+        excluded_raw = os.environ.get("DEVICE_SYNC_EXCLUDED_SHELVES", "")
+        excludes = [s.strip() for s in excluded_raw.split(",") if s.strip()]
+        sync_shelf = os.environ.get("BOOKLORE_SHELF_NAME", "").strip()
+        if sync_shelf and sync_shelf not in excludes:
+            excludes.append(sync_shelf)
+        service = _get_koreader_device_sync_service()
+        if not service:
+            return None
+        target_book_ids = [
+            str(book.ebook_source_id)
+            for book in service.database_service.get_books_by_status("active")
+            if getattr(book, "ebook_source_id", None)
+        ]
+        return bl.get_book_shelf_mapping(
+            mode=collections_mode,
+            excludes=excludes,
+            target_book_ids=target_book_ids,
+        )
+    except Exception as e:
+        logger.warning("Manifest prebuilder: shelf mapping failed: %s", e)
+        return None
+
+
+def _manifest_prebuilder_loop() -> None:
+    """Daemon thread: rebuild manifest cache when signaled or every 60 seconds."""
+    global _manifest_cache
+    _REBUILD_INTERVAL = 60
+    logger.info("Manifest prebuilder thread started")
+    while True:
+        _manifest_rebuild_event.wait(timeout=_REBUILD_INTERVAL)
+        _manifest_rebuild_event.clear()
+        service = _get_koreader_device_sync_service()
+        if not service:
+            continue
+        try:
+            shelf_mapping = _build_shelf_mapping_for_cache()
+            manifest = service.build_manifest(shelf_mapping=shelf_mapping)
+            with _manifest_cache_lock:
+                _manifest_cache = manifest
+            logger.debug(
+                "Manifest cache rebuilt (%d books, revision=%.8s)",
+                len(manifest.get("books", [])),
+                manifest.get("revision", ""),
+            )
+        except Exception as e:
+            logger.error("Manifest prebuilder error: %s", e)
+
+
+def _start_manifest_prebuilder() -> None:
+    global _manifest_prebuilder_started
+    if not _manifest_prebuilder_started:
+        _manifest_prebuilder_started = True
+        threading.Thread(target=_manifest_prebuilder_loop, daemon=True).start()
+
+
 def init_kosync_server(database_service, container, manager, ebook_dir=None):
     """Initialize KoSync server with required dependencies."""
     global _database_service, _container, _manager, _ebook_dir, _kosync_device_session_registry
@@ -60,6 +135,7 @@ def init_kosync_server(database_service, container, manager, ebook_dir=None):
     _manager = manager
     _ebook_dir = ebook_dir
     _kosync_device_session_registry = None
+    _start_manifest_prebuilder()
 
 
 def _get_koreader_device_sync_service():
@@ -834,38 +910,33 @@ def kosync_put_progress():
 @kosync_sync_bp.route('/koreader/device-sync/manifest', methods=['GET'])
 @kosync_auth_required
 def koreader_device_sync_manifest():
-    """Return the optional KOReader managed-folder sync manifest."""
+    """Return the optional KOReader managed-folder sync manifest.
+
+    The response is always served from a pre-built cache maintained by
+    _manifest_prebuilder_loop(), so this endpoint returns in <200 ms.
+    On a cold start (cache not yet populated) it falls back to an inline
+    build and primes the cache so subsequent requests are instant.
+    """
+    global _manifest_cache
+    _start_manifest_prebuilder()
+
+    with _manifest_cache_lock:
+        cached = _manifest_cache
+
+    if cached is not None:
+        return jsonify(cached), 200
+
+    # Cold start: cache not yet populated — build inline and prime the cache.
     service = _get_koreader_device_sync_service()
     if not service:
         return jsonify({"error": "Device sync service unavailable"}), 503
 
-    shelf_mapping = None
-    collections_mode = os.environ.get("DEVICE_SYNC_COLLECTIONS", "off").lower()
-    if collections_mode != "off":
-        try:
-            bl = _container.booklore_client()
-            if bl.is_configured():
-                excluded_raw = os.environ.get("DEVICE_SYNC_EXCLUDED_SHELVES", "")
-                excludes = [s.strip() for s in excluded_raw.split(",") if s.strip()]
-                # Auto-exclude the Grimmory sync shelf (e.g. "Kobo") — every
-                # matched book is on it, so it would be a redundant collection.
-                sync_shelf = os.environ.get("BOOKLORE_SHELF_NAME", "").strip()
-                if sync_shelf and sync_shelf not in excludes:
-                    excludes.append(sync_shelf)
-                target_book_ids = []
-                for book in service.database_service.get_books_by_status("active"):
-                    source_id = getattr(book, "ebook_source_id", None)
-                    if source_id:
-                        target_book_ids.append(str(source_id))
-                shelf_mapping = bl.get_book_shelf_mapping(
-                    mode=collections_mode,
-                    excludes=excludes,
-                    target_book_ids=target_book_ids,
-                )
-        except Exception as e:
-            logger.warning("Device-sync manifest: shelf mapping failed: %s", e)
+    shelf_mapping = _build_shelf_mapping_for_cache()
+    manifest = service.build_manifest(shelf_mapping=shelf_mapping)
+    with _manifest_cache_lock:
+        _manifest_cache = manifest
 
-    return jsonify(service.build_manifest(shelf_mapping=shelf_mapping)), 200
+    return jsonify(manifest), 200
 
 
 @kosync_sync_bp.route('/device-sync/books/<path:abs_id>/download', methods=['GET'])
@@ -1173,6 +1244,7 @@ def _build_plugin_zip(plugin_dir: Path) -> bytes:
 @kosync_auth_required
 def koreader_plugin_version():
     """Return the current BridgeSync plugin version from _meta.lua."""
+    logger.debug("Plugin directory path: %s (exists: %s)", _PLUGIN_DIR, _PLUGIN_DIR.is_dir())
     if not _PLUGIN_DIR.is_dir():
         return jsonify({"error": "Plugin directory not found"}), 404
 

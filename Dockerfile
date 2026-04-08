@@ -41,6 +41,7 @@ COPY templates/ /app/templates/
 COPY static/ /app/static/
 COPY alembic/ /app/alembic/
 COPY alembic.ini /app/alembic.ini
+COPY plugins/ /app/plugins/
 
 COPY start.sh /app/start.sh
 RUN sed -i 's/\r$//' /app/start.sh && chmod +x /app/start.sh
