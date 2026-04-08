@@ -4,6 +4,25 @@ For the full history of changes, please refer to the **[GitHub Releases](https:/
 
 ---
 
+## [Unreleased]
+
+### What's New
+
+- **KOReader plugin can now update itself.** A new "Check for Plugin Update" option in the Bridge Sync plugin menu lets you check for and install updates directly from KOReader — no manual downloads needed.
+- **KOReader stats now shows all reading activity.** The stats page now includes every book KOReader has tracked, not just those linked in BookBridge. Unlinked books appear with an "Unlinked" marker.
+
+### What Changed
+
+- **Storyteller sync now works even when transcript file counts don't match ABS chapters.** Books that were previously rejected due to a mismatch now sync successfully using whatever transcript files are available.
+
+### Fixed
+
+- **Reading progress was being reset to the cover in Scrivener-style EPUBs.** EPUBs where paragraph text is wrapped in `<span>` elements (common in Scrivener exports) would silently lose progress on every sync. This is now fixed.
+- **Storyteller sync positioned incorrectly in books with fragment IDs.** Positions are now accurate for these books. (Thanks @Sirozha1337)
+- **Storyteller auth could fail when tokens expired mid-session.** Token lifetime is now managed correctly. (Thanks @Sirozha1337)
+
+---
+
 ## [6.4.0] - 2026-04-04
 
 ### Added

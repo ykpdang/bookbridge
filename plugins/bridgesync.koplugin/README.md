@@ -52,7 +52,8 @@ The settings menu stays open while you adjust configuration values so you can ma
 | Server URL     | Base URL of your bridge server (e.g. `http://192.168.1.10:8080`)   |
 | Username       | KOSync username configured in the bridge                           |
 | Configure Key  | KOSync key/password configured in the bridge                       |
-| Test Connection| Verifies the server URL and credentials are correct                |
+| Test Connection         | Verifies the server URL and credentials are correct                                                                                  |
+| Check for Plugin Update | Compares the installed plugin version to the version on the bridge server and offers to download and install an update if one is available |
 
 ### Sync Behavior
 
