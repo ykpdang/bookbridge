@@ -4,9 +4,15 @@
 
 All notable changes to ABS-KoSync Enhanced will be documented in this file.
 
-## [Unreleased]
+## [6.5.0] 2026-4-12
 
 ### What's New
+
+= **Add CWA reading progress sync via Kobo sync protocol**
+Enables bidirectional reading progress sync between the bridge and
+Calibre-Web Automated using CWA's Kobo sync endpoints. This allows
+stock Kobo e-readers (and KOReader via CWA) to participate in the
+sync loop alongside Audiobookshelf, Storyteller, and other clients.
 
 - **KOReader plugin can now update itself.** A new "Check for Plugin Update" option appears in the Bridge Sync plugin menu (after Test Connection). It checks whether a newer version of the plugin is available on your bridge server, and if so, offers to download and install it directly from KOReader — no more downloading a ZIP from GitHub and copying it manually.
 

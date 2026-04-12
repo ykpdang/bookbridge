@@ -4,22 +4,32 @@ For the full history of changes, please refer to the **[GitHub Releases](https:/
 
 ---
 
-## [Unreleased]
+## [6.5.0] 2026-4-12
 
 ### What's New
 
-- **KOReader plugin can now update itself.** A new "Check for Plugin Update" option in the Bridge Sync plugin menu lets you check for and install updates directly from KOReader — no manual downloads needed.
-- **KOReader stats now shows all reading activity.** The stats page now includes every book KOReader has tracked, not just those linked in BookBridge. Unlinked books appear with an "Unlinked" marker.
+= **Add CWA reading progress sync via Kobo sync protocol**
+Enables bidirectional reading progress sync between the bridge and
+Calibre-Web Automated using CWA's Kobo sync endpoints. This allows
+stock Kobo e-readers (and KOReader via CWA) to participate in the
+sync loop alongside Audiobookshelf, Storyteller, and other clients.
+(Thank @dfendr)
+
+- **KOReader plugin can now update itself.** A new "Check for Plugin Update" option appears in the Bridge Sync plugin menu (after Test Connection). It checks whether a newer version of the plugin is available on your bridge server, and if so, offers to download and install it directly from KOReader — no more downloading a ZIP from GitHub and copying it manually.
+
+- **KOReader stats now shows all your reading activity, not just linked books.** The stats page previously only listed books that were linked in BookBridge. It now shows every book KOReader has recorded, whether linked or not. Books that are not linked appear with an "Unlinked" marker so they are easy to tell apart.
 
 ### What Changed
 
-- **Storyteller sync now works even when transcript file counts don't match ABS chapters.** Books that were previously rejected due to a mismatch now sync successfully using whatever transcript files are available.
+- **Storyteller sync no longer rejects books when the transcript file count doesn't match.** If the number of Storyteller transcript files differs from the number of ABS chapters, the bridge previously rejected the book entirely. It now uses whatever transcript files are available and derives timing from them instead. This unblocks sync for books with partial Storyteller transcripts or different chunking than ABS expected.
 
 ### Fixed
 
-- **Reading progress was being reset to the cover in Scrivener-style EPUBs.** EPUBs where paragraph text is wrapped in `<span>` elements (common in Scrivener exports) would silently lose progress on every sync. This is now fixed.
-- **Storyteller sync positioned incorrectly in books with fragment IDs.** Positions are now accurate for these books. (Thanks @Sirozha1337)
-- **Storyteller auth could fail when tokens expired mid-session.** Token lifetime is now managed correctly. (Thanks @Sirozha1337)
+- **Progress was being silently reset to the cover in Scrivener-style EPUBs.** EPUBs produced by Scrivener — and other tools that wrap every paragraph's text in a `<span>` element — caused the bridge to generate a position reference KOReader could not resolve. KOReader would fall back to position 0 (the cover page) and write that back, erasing saved progress on every sync. The bridge now generates the correct reference for these EPUBs.
+
+- **Storyteller sync placed you at the wrong position in some books.** Fixed a case where Storyteller could not find the right location in books that use fragment IDs for navigation. Sync positions are now accurate for these books. (Thanks @Sirozha1337)
+
+- **Storyteller auth could fail mid-session when tokens expired.** Improved token lifetime management so the bridge no longer hits authentication errors during long Storyteller sync sessions. (Thanks @Sirozha1337)
 
 ---
 
