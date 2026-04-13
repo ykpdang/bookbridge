@@ -1313,6 +1313,38 @@ class EbookParser:
                     )
                     return global_offset
 
+            # Tier: LXML-based position fallback (last resort when text-matching fails).
+            # Mirrors the fallback in resolve_xpath(). Less precise than text-anchoring
+            # but still produces an "xpath"-sourced offset, which is high-confidence.
+            preceding_len = 0
+            found_target = False
+            SEPARATOR_LEN = 1
+            for node in tree.iter():
+                if node == target_node:
+                    found_target = True
+                    if node.text and target_offset > 0:
+                        raw_segment = node.text[: min(len(node.text), target_offset)]
+                        preceding_len += len(raw_segment.strip())
+                    elif target_offset > 0:
+                        preceding_len += target_offset
+                    break
+                if node.text and node.text.strip():
+                    preceding_len += len(node.text.strip()) + SEPARATOR_LEN
+                if node.tail and node.tail.strip():
+                    preceding_len += len(node.tail.strip()) + SEPARATOR_LEN
+
+            if found_target:
+                local_offset = preceding_len
+                if chapter_len > 0:
+                    local_offset = min(local_offset, chapter_len)
+                global_offset = min(full_len, chapter_base + local_offset)
+                logger.debug(
+                    "XPath->index tier=lxml_position_fallback local_offset=%s global_offset=%s",
+                    local_offset,
+                    global_offset,
+                )
+                return global_offset
+
             logger.debug("XPath->index BS4 fallback failed deterministically; returning None")
             return None
 

@@ -62,7 +62,9 @@ def test_resolve_xpath_to_index_normalized_unique_fallback(caplog):
     assert any("tier=exact_unique" in record.message for record in caplog.records)
 
 
-def test_resolve_xpath_to_index_ambiguous_returns_none(caplog):
+def test_resolve_xpath_to_index_ambiguous_uses_lxml_fallback(caplog):
+    # Text-matching tiers fail (both paragraphs have identical content), but the
+    # LXML position fallback resolves the structurally-unambiguous XPath element.
     caplog.set_level(logging.DEBUG)
     html_content = (
         "<html><body>"
@@ -74,8 +76,35 @@ def test_resolve_xpath_to_index_ambiguous_returns_none(caplog):
 
     index = parser.resolve_xpath_to_index("book.epub", "/body/DocFragment[1]/body/p[1]/span[2]/text().0")
 
-    assert index is None
-    assert any("returning None" in record.message for record in caplog.records)
+    assert index == 6
+    assert any("lxml_position_fallback" in record.message for record in caplog.records)
+
+
+def test_resolve_xpath_to_index_lxml_fallback_when_text_nonunique(caplog):
+    # Simulates the reported KoSync issue: KoReader sends an XPath for a paragraph
+    # whose text appears more than once in the chapter (e.g. a short first paragraph
+    # or a repeated phrase), causing all BS4 uniqueness tiers to fail.  The LXML
+    # position fallback must fire and return a valid in-range offset.
+    caplog.set_level(logging.DEBUG)
+    repeated = "Chapter begins here."
+    html_content = (
+        "<html><body>"
+        f"<p>{repeated}</p>"
+        "<p>Some other unique content in the middle of the chapter.</p>"
+        f"<p>{repeated}</p>"
+        "</body></html>"
+    )
+    parser = _parser_for_single_spine(html_content, start=50)
+
+    # Target p[1] — its text is non-unique, so BS4 tiers all fail.
+    index = parser.resolve_xpath_to_index("book.epub", "/body/DocFragment[1]/body/p[1]/text().0")
+
+    chapter_text_len = len(
+        __import__("bs4", fromlist=["BeautifulSoup"]).BeautifulSoup(html_content, "html.parser").get_text(separator=" ", strip=True)
+    )
+    assert index is not None
+    assert 50 <= index <= 50 + chapter_text_len
+    assert any("lxml_position_fallback" in record.message for record in caplog.records)
 
 
 def test_resolve_xpath_to_index_unresolved_xpath_returns_none():
