@@ -5441,6 +5441,11 @@ def test_connection(service: str):
             _coerce_test_bool(data.get('HARDCOVER_ENABLED')),
             _coerce_test_str(data.get('HARDCOVER_TOKEN')),
         ),
+        'storygraph': lambda data: _test_storygraph(
+            _coerce_test_bool(data.get('STORYGRAPH_ENABLED')),
+            _coerce_test_str(data.get('STORYGRAPH_SESSION_COOKIE')),
+            _coerce_test_str(data.get('STORYGRAPH_REMEMBER_USER_TOKEN')),
+        ),
         'telegram': lambda data: _test_telegram(
             _coerce_test_bool(data.get('TELEGRAM_ENABLED')),
             _coerce_test_str(data.get('TELEGRAM_BOT_TOKEN')),
@@ -5659,6 +5664,29 @@ def _test_hardcover(enabled: bool, token: str) -> dict:
     return {"ok": False, "message": f"API returned {r.status_code}"}
 
 
+def _test_storygraph(enabled: bool, session_cookie: str, remember_user_token: str) -> dict:
+    if not enabled:
+        return {"ok": False, "message": "StoryGraph is disabled"}
+    if not session_cookie or not remember_user_token:
+        return {"ok": False, "message": "Missing StoryGraph session cookies"}
+
+    cookie = f"_story_graph_session={session_cookie}; remember_user_token={remember_user_token}"
+    r = requests.get(
+        "https://app.thestorygraph.com/currently-reading",
+        headers={
+            "Cookie": cookie,
+            "User-Agent": "ABS-KoSync-Bridge/StoryGraph",
+        },
+        timeout=10,
+        allow_redirects=False,
+    )
+    if r.status_code in (200, 302):
+        return {"ok": True, "message": "StoryGraph session accepted"}
+    if r.status_code in (401, 403):
+        return {"ok": False, "message": "Invalid StoryGraph session cookies"}
+    return {"ok": False, "message": f"StoryGraph returned {r.status_code}"}
+
+
 def _test_telegram(enabled: bool, token: str) -> dict:
     if not enabled or not token:
         return {"ok": False, "message": "Telegram not configured or disabled"}
@@ -5874,5 +5902,4 @@ if __name__ == '__main__':
         logger.info(f"🚀 Split-Port Mode Active: Sync-only server on port {sync_port}")
 
     app.run(host='0.0.0.0', port=5757, debug=False)
-
 

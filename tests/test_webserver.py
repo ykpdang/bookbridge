@@ -1555,6 +1555,41 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
         self.assertEqual(data['message'], 'Storyteller is disabled')
         mock_post.assert_not_called()
 
+    @patch('src.web_server.requests.get')
+    def test_test_connection_storygraph_valid_cookies(self, mock_get):
+        mock_get.return_value = _http_response(200)
+
+        response = self.client.post(
+            '/api/test-connection/storygraph',
+            json={
+                'STORYGRAPH_ENABLED': True,
+                'STORYGRAPH_SESSION_COOKIE': 'session-cookie',
+                'STORYGRAPH_REMEMBER_USER_TOKEN': 'remember-token',
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['message'], 'StoryGraph session accepted')
+
+    @patch('src.web_server.requests.get')
+    def test_test_connection_storygraph_disabled(self, mock_get):
+        response = self.client.post(
+            '/api/test-connection/storygraph',
+            json={
+                'STORYGRAPH_ENABLED': False,
+                'STORYGRAPH_SESSION_COOKIE': 'session-cookie',
+                'STORYGRAPH_REMEMBER_USER_TOKEN': 'remember-token',
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['message'], 'StoryGraph is disabled')
+        mock_get.assert_not_called()
+
     def test_clear_stale_suggestions_api(self):
         """Test the clear-stale-suggestions API endpoint."""
         # Setup mock return value
