@@ -240,7 +240,8 @@ class Container(containers.DeclarativeContainer):
     storygraph_sync_client = providers.Singleton(
         StorygraphSyncClient,
         storygraph_client,
-        ebook_parser
+        ebook_parser,
+        abs_client
     )
 
     abs_audio_source_adapter = providers.Singleton(
