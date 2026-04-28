@@ -11,10 +11,11 @@ logger = logging.getLogger(__name__)
 class StorygraphSyncClient(SyncClient):
     """Follower-only StoryGraph sync client (either-or mode)."""
 
-    def __init__(self, storygraph_client: StorygraphClient, ebook_parser, abs_client=None):
+    def __init__(self, storygraph_client: StorygraphClient, ebook_parser, abs_client=None, database_service=None):
         super().__init__(ebook_parser)
         self.storygraph_client = storygraph_client
         self.abs_client = abs_client
+        self.database_service = database_service
         self._book_id_cache: dict[str, str] = {}
 
     def is_configured(self) -> bool:
@@ -65,6 +66,13 @@ class StorygraphSyncClient(SyncClient):
         cached = self._book_id_cache.get(book.abs_id)
         if cached:
             return cached
+
+        if self.database_service:
+            details = self.database_service.get_storygraph_details(book.abs_id)
+            if details and details.storygraph_book_id:
+                book_id = str(details.storygraph_book_id)
+                self._book_id_cache[book.abs_id] = book_id
+                return book_id
 
         if not self.abs_client:
             return None

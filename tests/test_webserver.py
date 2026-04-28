@@ -17,10 +17,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.utils.kosync_headers import KOSYNC_ACCEPT, hash_kosync_key
 
 
-def _http_response(status_code, payload=None, text=""):
+def _http_response(status_code, payload=None, text="", headers=None):
     response = Mock()
     response.status_code = status_code
     response.text = text
+    response.headers = headers or {}
     response.json.return_value = payload or {}
     return response
 
@@ -32,6 +33,7 @@ class MockContainer:
         self.mock_sync_manager = Mock()
         self.mock_abs_client = Mock()
         self.mock_booklore_client = Mock()
+        self.mock_storygraph_client = Mock()
         self.mock_storyteller_client = Mock()
         self.mock_database_service = Mock()
         self.mock_database_service.get_all_settings.return_value = {}  # Default empty settings
@@ -59,6 +61,9 @@ class MockContainer:
 
     def storyteller_client(self):
         return self.mock_storyteller_client
+
+    def storygraph_client(self):
+        return self.mock_storygraph_client
 
     def ebook_parser(self):
         return self.mock_ebook_parser
@@ -126,11 +131,13 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
         self.mock_abs_client = self.mock_container.mock_abs_client
         self.mock_booklore_client = self.mock_container.mock_booklore_client
         self.mock_storyteller_client = self.mock_container.mock_storyteller_client
+        self.mock_storygraph_client = self.mock_container.mock_storygraph_client
         self.mock_database_service = self.mock_container.mock_database_service
 
         self.mock_database_service.get_all_books.return_value = []
         self.mock_database_service.get_all_states.return_value = []
         self.mock_database_service.get_all_hardcover_details.return_value = []
+        self.mock_database_service.get_all_storygraph_details.return_value = []
         self.mock_database_service.get_all_pending_suggestions.return_value = []
         self.mock_database_service.get_all_reading_stats.return_value = {}
         self.mock_database_service.get_booklore_book.return_value = None
@@ -138,6 +145,7 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
         self.mock_abs_client.get_all_audiobooks.return_value = []
         self.mock_abs_client.get_all_progress_raw.return_value = {}
         self.mock_booklore_client.is_configured.return_value = False
+        self.mock_storygraph_client.is_configured.return_value = False
         self.mock_storyteller_client.is_configured.return_value = False
 
     def tearDown(self):
@@ -167,6 +175,7 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
         booklore=False,
         bookloreaudio=False,
         hardcover=False,
+        storygraph=False,
     ):
         clients_dict = {
             'ABS': Mock(is_configured=Mock(return_value=True)),
@@ -175,6 +184,7 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
             'BookLore': Mock(is_configured=Mock(return_value=booklore)),
             'BookLoreAudio': Mock(is_configured=Mock(return_value=bookloreaudio)),
             'Hardcover': Mock(is_configured=Mock(return_value=hardcover)),
+            'StoryGraph': Mock(is_configured=Mock(return_value=storygraph)),
         }
         self.mock_container.mock_sync_clients.items.return_value = clients_dict.items()
 
@@ -271,6 +281,7 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
         self.mock_database_service.get_all_states.return_value = mock_states
         self.mock_database_service.get_hardcover_details.return_value = None
         self.mock_database_service.get_all_hardcover_details.return_value = []
+        self.mock_database_service.get_all_storygraph_details.return_value = []
         self.mock_database_service.get_all_pending_suggestions.return_value = []
 
         # Mock the sync_clients call for integrations
@@ -302,6 +313,7 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
             self.mock_database_service.get_all_books.assert_called_once()
             self.mock_database_service.get_all_states.assert_called_once()
             self.mock_database_service.get_all_hardcover_details.assert_called_once()
+            self.mock_database_service.get_all_storygraph_details.assert_called_once()
             self.mock_database_service.get_all_booklore_books.assert_called_once()
             self.mock_abs_client.get_all_audiobooks.assert_not_called()
             self.mock_abs_client.get_all_progress_raw.assert_not_called()
@@ -1557,7 +1569,16 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
 
     @patch('src.web_server.requests.get')
     def test_test_connection_storygraph_valid_cookies(self, mock_get):
-        mock_get.return_value = _http_response(200)
+        def fake_get(url, headers=None, timeout=None, allow_redirects=None):
+            self.assertEqual(url, 'https://app.thestorygraph.com/users/sign_in')
+            self.assertEqual(timeout, 10)
+            self.assertFalse(allow_redirects)
+            self.assertIn('_storygraph_session=session-cookie', headers['Cookie'])
+            self.assertIn('remember_user_token=remember-token', headers['Cookie'])
+            self.assertNotIn('_story_graph_session', headers['Cookie'])
+            return _http_response(302, headers={'Location': '/books/book-1'})
+
+        mock_get.side_effect = fake_get
 
         response = self.client.post(
             '/api/test-connection/storygraph',
@@ -1572,6 +1593,24 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
         data = response.get_json()
         self.assertTrue(data['ok'])
         self.assertEqual(data['message'], 'StoryGraph session accepted')
+
+    @patch('src.web_server.requests.get')
+    def test_test_connection_storygraph_sign_in_redirect_is_invalid(self, mock_get):
+        mock_get.return_value = _http_response(302, headers={'Location': '/users/sign_in'})
+
+        response = self.client.post(
+            '/api/test-connection/storygraph',
+            json={
+                'STORYGRAPH_ENABLED': True,
+                'STORYGRAPH_SESSION_COOKIE': 'session-cookie',
+                'STORYGRAPH_REMEMBER_USER_TOKEN': 'remember-token',
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['message'], 'Invalid StoryGraph session cookies')
 
     @patch('src.web_server.requests.get')
     def test_test_connection_storygraph_disabled(self, mock_get):
@@ -1589,6 +1628,99 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
         self.assertFalse(data['ok'])
         self.assertEqual(data['message'], 'StoryGraph is disabled')
         mock_get.assert_not_called()
+
+    def test_storygraph_card_renders_on_dashboard(self):
+        from src.db.models import Book, State, StorygraphDetails
+
+        self._set_dashboard_integrations(storygraph=True)
+        self.mock_database_service.get_all_books.return_value = [
+            Book(abs_id='abs-storygraph-1', abs_title='Story Book', ebook_filename='story.epub')
+        ]
+        self.mock_database_service.get_all_states.return_value = [
+            State(abs_id='abs-storygraph-1', client_name='storygraph', percentage=0.37, last_updated=1)
+        ]
+        self.mock_database_service.get_all_storygraph_details.return_value = [
+            StorygraphDetails(
+                abs_id='abs-storygraph-1',
+                storygraph_book_id='sg-1',
+                storygraph_url='https://app.thestorygraph.com/books/sg-1',
+                matched_by='manual',
+            )
+        ]
+
+        html = self._render_index_template_source()
+
+        self.assertIn('StoryGraph', html)
+        self.assertIn('linkStorygraph(event)', html)
+        self.assertIn('https://app.thestorygraph.com/books/sg-1', html)
+
+    def test_api_storygraph_resolve_uses_abs_metadata(self):
+        from src.db.models import Book
+
+        self.mock_storygraph_client.is_configured.return_value = True
+        self.mock_database_service.get_storygraph_details.return_value = None
+        self.mock_database_service.get_book.return_value = Book(
+            abs_id='abs-storygraph-1',
+            abs_title='Bridge Book',
+            ebook_filename='bridge.epub',
+        )
+        self.mock_abs_client.get_item_details.return_value = {
+            'media': {'metadata': {'title': 'Bridge Book', 'authorName': 'Bridge Author', 'isbn': '1234567890'}}
+        }
+        self.mock_storygraph_client.resolve_book.return_value = {
+            'book_id': 'sg-1',
+            'title': 'Bridge Book',
+            'author': 'Bridge Author',
+            'url': 'https://app.thestorygraph.com/books/sg-1',
+        }
+
+        response = self.client.get('/api/storygraph/resolve?abs_id=abs-storygraph-1')
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertTrue(data['found'])
+        self.assertEqual(data['book_id'], 'sg-1')
+        self.assertEqual(data['url'], 'https://app.thestorygraph.com/books/sg-1')
+        self.mock_storygraph_client.resolve_book.assert_called_once_with(
+            title='Bridge Book',
+            author='Bridge Author',
+            isbn='1234567890',
+        )
+
+    def test_link_storygraph_saves_details_and_sets_status(self):
+        from src.db.models import Book
+
+        self.mock_storygraph_client.is_configured.return_value = True
+        self.mock_database_service.get_book.return_value = Book(
+            abs_id='abs-storygraph-1',
+            abs_title='Bridge Book',
+            ebook_filename='bridge.epub',
+        )
+        self.mock_abs_client.get_item_details.return_value = {
+            'media': {'metadata': {'isbn': '1234567890', 'asin': 'B000123'}}
+        }
+
+        response = self.client.post(
+            '/link-storygraph/abs-storygraph-1',
+            json={
+                'book_id': 'sg-1',
+                'title': 'Bridge Book',
+                'url': 'https://app.thestorygraph.com/books/sg-1',
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertTrue(data['success'])
+
+        saved_details = self.mock_database_service.save_storygraph_details.call_args.args[0]
+        self.assertEqual(saved_details.abs_id, 'abs-storygraph-1')
+        self.assertEqual(saved_details.storygraph_book_id, 'sg-1')
+        self.assertEqual(saved_details.storygraph_url, 'https://app.thestorygraph.com/books/sg-1')
+        self.assertEqual(saved_details.isbn, '1234567890')
+        self.assertEqual(saved_details.asin, 'B000123')
+        self.assertEqual(saved_details.matched_by, 'manual')
+        self.mock_storygraph_client.update_status.assert_called_once_with('sg-1', 1)
 
     def test_clear_stale_suggestions_api(self):
         """Test the clear-stale-suggestions API endpoint."""

@@ -29,8 +29,30 @@ class TestStorygraphClient(unittest.TestCase):
 
     @patch("src.api.storygraph_client.requests.get")
     def test_check_connection_ok(self, mock_get):
-        mock_get.return_value = Mock(status_code=200)
+        mock_get.return_value = Mock(status_code=302, headers={"Location": "/books/book-1"})
         self.assertTrue(self.client.check_connection())
+
+    @patch("src.api.storygraph_client.requests.get")
+    def test_check_connection_sign_in_redirect_fails(self, mock_get):
+        mock_get.return_value = Mock(status_code=302, headers={"Location": "/users/sign_in"})
+
+        with self.assertRaisesRegex(Exception, "authentication failed"):
+            self.client.check_connection()
+
+    def test_cookie_header_uses_live_env_and_correct_cookie_name(self):
+        with patch.dict(
+            os.environ,
+            {
+                "STORYGRAPH_SESSION_COOKIE": "fresh-session",
+                "STORYGRAPH_REMEMBER_USER_TOKEN": "fresh-remember",
+            },
+            clear=False,
+        ):
+            cookie = self.client._cookie_header()
+
+        self.assertIn("_storygraph_session=fresh-session", cookie)
+        self.assertIn("remember_user_token=fresh-remember", cookie)
+        self.assertNotIn("_story_graph_session", cookie)
 
     @patch("src.api.storygraph_client.requests.get")
     def test_search_books_parses_results(self, mock_get):
@@ -40,7 +62,7 @@ class TestStorygraphClient(unittest.TestCase):
           <a href='/authors/x'>Author Name</a>
         </div>
         """
-        mock_get.return_value = Mock(status_code=200, text=html)
+        mock_get.return_value = Mock(status_code=200, text=html, headers={})
 
         results = self.client.search_books("Book", "Author")
         self.assertEqual(len(results), 1)
@@ -48,14 +70,53 @@ class TestStorygraphClient(unittest.TestCase):
 
     @patch("src.api.storygraph_client.requests.get")
     @patch("src.api.storygraph_client.requests.post")
-    def test_update_progress_posts_to_endpoint(self, mock_post, mock_get):
+    def test_update_status_posts_authenticity_token_and_retries_rereading(self, mock_post, mock_get):
         html = '<meta name="csrf-token" content="csrf123" />'
-        mock_get.return_value = Mock(status_code=200, text=html)
-        mock_post.return_value = Mock(status_code=200)
+        mock_get.return_value = Mock(status_code=200, text=html, headers={})
+        mock_post.side_effect = [
+            Mock(status_code=302, headers={"Location": "/users/sign_in"}),
+            Mock(status_code=200, headers={}),
+        ]
+
+        ok = self.client.update_status("book-1", 2)
+
+        self.assertTrue(ok)
+        self.assertEqual(mock_post.call_count, 2)
+        first_url = mock_post.call_args_list[0].args[0]
+        second_url = mock_post.call_args_list[1].args[0]
+        self.assertIn("/update-status.js?book_id=book-1&status=currently-reading", first_url)
+        self.assertIn("/update-status.js?book_id=book-1&status=rereading", second_url)
+        self.assertEqual(mock_post.call_args_list[0].kwargs["data"], {"authenticity_token": "csrf123"})
+        self.assertEqual(mock_post.call_args_list[0].kwargs["headers"]["X-CSRF-Token"], "csrf123")
+        self.assertFalse(mock_post.call_args_list[0].kwargs["allow_redirects"])
+
+    @patch("src.api.storygraph_client.requests.get")
+    @patch("src.api.storygraph_client.requests.post")
+    def test_update_progress_posts_plugin_payload_to_endpoint(self, mock_post, mock_get):
+        html = """
+        <meta name="csrf-token" content="csrf123" />
+        <input class="read-status-book-num-of-pages" value="321" />
+        """
+        mock_get.return_value = Mock(status_code=200, text=html, headers={})
+        mock_post.return_value = Mock(status_code=200, headers={})
 
         ok = self.client.update_progress("book-1", 0.42)
+
         self.assertTrue(ok)
-        self.assertIn("/update-progress.js?book_id=book-1", mock_post.call_args[0][0])
+        self.assertEqual(mock_post.call_args.args[0], "https://app.thestorygraph.com/update-progress")
+        self.assertEqual(
+            mock_post.call_args.kwargs["data"],
+            {
+                "read_status[progress_number]": "42",
+                "read_status[progress_type]": "percentage",
+                "read_status[book_num_of_pages]": "321",
+                "book_id": "book-1",
+                "on_book_page": "true",
+                "authenticity_token": "csrf123",
+            },
+        )
+        self.assertEqual(mock_post.call_args.kwargs["headers"]["X-CSRF-Token"], "csrf123")
+        self.assertFalse(mock_post.call_args.kwargs["allow_redirects"])
 
 
 if __name__ == "__main__":
