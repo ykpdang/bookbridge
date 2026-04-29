@@ -95,6 +95,11 @@ class StorygraphClient:
         return None
 
     @staticmethod
+    def _is_audio_edition(text: str) -> bool:
+        txt = (text or "").lower()
+        return any(kw in txt for kw in ("audio", "mp3", "cd", "cassette", "narrat"))
+
+    @staticmethod
     def _is_sign_in_redirect(resp) -> bool:
         if resp is None or resp.status_code not in (301, 302, 303, 307, 308):
             return False
@@ -254,11 +259,16 @@ class StorygraphClient:
             if match_pages:
                 pages_val = int(match_pages.group(1))
 
+            is_audio = self._is_audio_edition(details_text)
+
             formats = ["Paperback", "Hardcover", "Ebook", "Kindle Edition", "Audiobook", "Audio CD", "Digital Audiobook"]
             for f in formats:
                 if f.lower() in details_text.lower():
                     format_val = f
                     break
+
+            if format_val == "Unknown" and is_audio:
+                format_val = "Audiobook"
 
             # Language
             language = ""
@@ -275,7 +285,7 @@ class StorygraphClient:
                 "format": format_val,
                 "pages": pages_val,
                 "language": language,
-                "is_audio": "audio" in format_val.lower()
+                "is_audio": is_audio
             })
 
         return editions
@@ -332,6 +342,10 @@ class StorygraphClient:
         except Exception:
             pass
 
+        match = re.search(r"/books/([^/?#]+)", value, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+
         match = re.search(r"(?:^|/)([^/?#\s]+)$", value)
         return match.group(1) if match else value
 
@@ -373,7 +387,7 @@ class StorygraphClient:
         if not value:
             return None
 
-        if "/books/" in value or value.startswith("http"):
+        if "/books/" in value or value.startswith("http") or "thestorygraph.com" in value:
             book_id = self._extract_book_id_from_input(value)
             return self.get_book_details(book_id)
 

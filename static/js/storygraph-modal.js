@@ -82,7 +82,8 @@ async function resolveStorygraphManualInput() {
     }
 }
 
-function getSgFormatIcon(format) {
+function getSgFormatIcon(format, isAudio) {
+    if (isAudio) return '🎧';
     var f = (format || '').toLowerCase();
     if (f.includes('audio')) return '🎧';
     if (f.includes('hard')) return '📕';
@@ -117,6 +118,8 @@ function displayStorygraphBook(data) {
                 var edId = String(ed.id);
                 var isSelected = (edId === preSelectId);
                 var isLinked = (edId === linkedId);
+                
+                var edIsAudio = ed.is_audio || (ed.format && ed.format.toLowerCase().includes('audio'));
 
                 var div = document.createElement('div');
                 div.className = 'hc-edition-option' + (isSelected ? ' selected' : '');
@@ -126,14 +129,14 @@ function displayStorygraphBook(data) {
 
                 var iconDiv = document.createElement('div');
                 iconDiv.className = 'hc-edition-icon';
-                iconDiv.textContent = getSgFormatIcon(ed.format);
+                iconDiv.textContent = getSgFormatIcon(ed.format, edIsAudio);
 
                 var mainDiv = document.createElement('div');
                 mainDiv.className = 'hc-edition-main';
 
                 var formatSpan = document.createElement('span');
                 formatSpan.className = 'hc-edition-format';
-                formatSpan.textContent = ed.format || 'Unknown';
+                formatSpan.textContent = ed.format || (edIsAudio ? 'Audiobook' : 'Unknown');
                 
                 if (isLinked) {
                     var linkedBadge = document.createElement('span');

@@ -118,6 +118,40 @@ class TestStorygraphClient(unittest.TestCase):
         self.assertEqual(mock_post.call_args.kwargs["headers"]["X-CSRF-Token"], "csrf123")
         self.assertFalse(mock_post.call_args.kwargs["allow_redirects"])
 
+    def test_extract_book_id_from_input_url(self):
+        # Direct URL
+        self.assertEqual(self.client._extract_book_id_from_input("https://app.thestorygraph.com/books/abc-123-def"), "abc-123-def")
+        self.assertEqual(self.client._extract_book_id_from_input("https://app.thestorygraph.com/books/abc-123-def?redirect=true"), "abc-123-def")
+        self.assertEqual(self.client._extract_book_id_from_input("app.thestorygraph.com/books/abc-123-def?redirect=true"), "abc-123-def")
+        self.assertEqual(self.client._extract_book_id_from_input("abc-123-def"), "abc-123-def")
+
+    @patch("src.api.storygraph_client.StorygraphClient.get_book_details")
+    def test_resolve_book_from_input_url(self, mock_get_details):
+        mock_get_details.return_value = {"title": "Test Book", "book_id": "abc-123-def"}
+        
+        # Test full URL
+        res = self.client.resolve_book_from_input("https://app.thestorygraph.com/books/abc-123-def?redirect=true")
+        self.assertEqual(res["book_id"], "abc-123-def")
+        mock_get_details.assert_called_with("abc-123-def")
+        
+        # Test schemeless URL
+        res = self.client.resolve_book_from_input("app.thestorygraph.com/books/abc-123-def")
+        self.assertEqual(res["book_id"], "abc-123-def")
+        
+    @patch("src.api.storygraph_client.requests.get")
+    def test_get_book_editions_audio_detection(self, mock_get):
+        html = """
+        <div class="book-pane" data-book-id="ed-1">
+            <div class="book-title-author-and-series"><a href="/books/ed-1">Audio Edition</a></div>
+            Some description mentioning an MP3 CD, 10 hours
+        </div>
+        """
+        mock_get.return_value = Mock(status_code=200, text=html, headers={})
+        editions = self.client.get_book_editions("book-1")
+        self.assertEqual(len(editions), 1)
+        self.assertTrue(editions[0]["is_audio"])
+        self.assertEqual(editions[0]["format"], "Audiobook")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
