@@ -143,6 +143,44 @@ def test_resolve_xpath_to_index_unresolved_xpath_returns_none():
     assert index is None
 
 
+def test_resolve_xpath_to_index_bracketed_text_node_offset():
+    # KOReader emits "/text()[N].MMM" when a paragraph contains inline children
+    # (<em>, <a>, <span>...) that split its text into multiple nodes. The
+    # bracketed predicate plus the trailing character offset must both parse;
+    # otherwise the resolver returns None and KoSync falls back to percent.
+    html_content = (
+        "<html><body>"
+        "<p>Lead text <em>emphasis</em> trailing text.</p>"
+        "</body></html>"
+    )
+    parser = _parser_for_single_spine(html_content, start=0)
+
+    index = parser.resolve_xpath_to_index(
+        "book.epub", "/body/DocFragment[1]/body/p[1]/text()[2].5"
+    )
+
+    assert index is not None
+    chapter_text_len = len(
+        BeautifulSoup(html_content, "html.parser").get_text(separator=" ", strip=True)
+    )
+    assert 0 <= index <= chapter_text_len
+
+
+def test_resolve_xpath_to_index_unbracketed_text_node_offset_still_works():
+    # Regression guard: the unbracketed "/text().MMM" form must keep resolving
+    # after the bracketed-form fix.
+    html_content = (
+        "<html><body><p>Lead text emphasis trailing text.</p></body></html>"
+    )
+    parser = _parser_for_single_spine(html_content, start=0)
+
+    index = parser.resolve_xpath_to_index(
+        "book.epub", "/body/DocFragment[1]/body/p[1]/text().5"
+    )
+
+    assert index == 5
+
+
 def test_resolve_xpath_to_index_falls_back_to_nearby_spine_when_docfragment_drifts(caplog):
     caplog.set_level(logging.INFO)
     parser = _parser_for_spines(

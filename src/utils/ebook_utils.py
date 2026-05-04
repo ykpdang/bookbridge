@@ -1123,11 +1123,14 @@ class EbookParser:
             book_path = self.resolve_book_path(filename)
             full_text, spine_map = self.extract_text_and_map(book_path)
 
-            # Parse path and offset
+            # Parse path and offset. KOReader emits two forms for the trailing
+            # character offset: "/text().NNN" (single text node) and
+            # "/text()[N].MMM" (Nth text node when inline children split a
+            # paragraph's text into multiple nodes). Both must be recognised.
             relative_path = xpath_str.split(f"DocFragment[{spine_index}]")[-1]
-            offset_match = re.search(r'/text\(\)\.(\d+)$', relative_path)
+            offset_match = re.search(r'/text\(\)(?:\[\d+\])?\.(\d+)$', relative_path)
             target_offset = int(offset_match.group(1)) if offset_match else 0
-            clean_xpath = re.sub(r'/text\(\)\.(\d+)$', '', relative_path)
+            clean_xpath = re.sub(r'/text\(\)(?:\[\d+\])?\.\d+$', '', relative_path)
 
             if clean_xpath.startswith('/'):
                 clean_xpath = '.' + clean_xpath
@@ -1245,9 +1248,9 @@ class EbookParser:
             full_text, spine_map = self.extract_text_and_map(book_path)
 
             relative_path = xpath_str.split(f"DocFragment[{spine_index}]")[-1]
-            offset_match = re.search(r'/text\(\)\.(\d+)$', relative_path)
+            offset_match = re.search(r'/text\(\)(?:\[\d+\])?\.(\d+)$', relative_path)
             target_offset = int(offset_match.group(1)) if offset_match else 0
-            clean_xpath = re.sub(r'/text\(\)\.(\d+)$', '', relative_path)
+            clean_xpath = re.sub(r'/text\(\)(?:\[\d+\])?\.\d+$', '', relative_path)
 
             if clean_xpath.startswith('/'):
                 clean_xpath = '.' + clean_xpath
