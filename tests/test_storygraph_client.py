@@ -142,8 +142,12 @@ class TestStorygraphClient(unittest.TestCase):
     def test_get_book_editions_audio_detection(self, mock_get):
         html = """
         <div class="book-pane" data-book-id="ed-1">
-            <div class="book-title-author-and-series"><a href="/books/ed-1">Audio Edition</a></div>
-            Some description mentioning an MP3 CD, 10 hours
+            <div class="book-title-author-and-series"><h3><a href="/books/ed-1">1984</a></h3></div>
+            <div class="edition-info">
+                <p>Format: Audiobook</p>
+                <p>Language: English</p>
+            </div>
+            <p class="text-xs font-light">10h 30m</p>
         </div>
         """
         mock_get.return_value = Mock(status_code=200, text=html, headers={})
@@ -151,6 +155,100 @@ class TestStorygraphClient(unittest.TestCase):
         self.assertEqual(len(editions), 1)
         self.assertTrue(editions[0]["is_audio"])
         self.assertEqual(editions[0]["format"], "Audiobook")
+
+    @patch("src.api.storygraph_client.requests.get")
+    def test_get_book_editions_audio_with_duration(self, mock_get):
+        html = """
+        <div class="book-pane" data-book-id="ed-audio">
+            <div class="book-title-author-and-series"><h3><a href="/books/ed-audio">1984</a></h3></div>
+            <div class="edition-info">
+                <p>Format: Audiobook</p>
+                <p>Language: English</p>
+            </div>
+            <p class="text-xs font-light">10h 30m</p>
+        </div>
+        """
+        mock_get.return_value = Mock(status_code=200, text=html, headers={})
+        editions = self.client.get_book_editions("book-1")
+        self.assertEqual(len(editions), 1)
+        self.assertTrue(editions[0]["is_audio"])
+        self.assertEqual(editions[0]["format"], "Audiobook")
+        self.assertEqual(editions[0]["audio_seconds"], 10 * 3600 + 30 * 60)
+        self.assertEqual(editions[0]["pages"], 0)
+
+    @patch("src.api.storygraph_client.requests.get")
+    def test_get_book_editions_paperback_not_audio(self, mock_get):
+        html = """
+        <div class="book-pane" data-book-id="ed-pb">
+            <div class="book-title-author-and-series"><h3><a href="/books/ed-pb">1984</a></h3></div>
+            <div class="edition-info">
+                <p>Format: Paperback</p>
+                <p>Language: English</p>
+            </div>
+            <p class="text-xs font-light">384 pages</p>
+        </div>
+        """
+        mock_get.return_value = Mock(status_code=200, text=html, headers={})
+        editions = self.client.get_book_editions("book-1")
+        self.assertEqual(editions[0]["is_audio"], False)
+        self.assertEqual(editions[0]["format"], "Paperback")
+        self.assertEqual(editions[0]["pages"], 384)
+        self.assertIsNone(editions[0]["audio_seconds"])
+
+    @patch("src.api.storygraph_client.requests.get")
+    def test_get_book_editions_hardcover_not_misclassified_when_page_has_audio_text(self, mock_get):
+        html = """
+        <div class="page-shell">
+            <p>Also available as audiobook narrated by John Doe</p>
+            <div class="book-pane" data-book-id="ed-hc">
+                <div class="edition-info">
+                    <p>Format: Hardcover</p>
+                    <p>Language: English</p>
+                </div>
+                <p class="text-xs font-light">320 pages</p>
+            </div>
+        </div>
+        """
+        mock_get.return_value = Mock(status_code=200, text=html, headers={})
+        editions = self.client.get_book_editions("book-1")
+        self.assertEqual(len(editions), 1)
+        self.assertEqual(editions[0]["format"], "Hardcover")
+        self.assertEqual(editions[0]["is_audio"], False)
+
+    @patch("src.api.storygraph_client.requests.get")
+    def test_get_book_editions_audio_compact_duration(self, mock_get):
+        html = """
+        <div class="book-pane" data-book-id="ed-1">
+            <div class="edition-info"><p>Format: Audiobook</p></div>
+            <p class="text-xs font-light">9h 45m</p>
+        </div>
+        """
+        mock_get.return_value = Mock(status_code=200, text=html, headers={})
+        editions = self.client.get_book_editions("book-1")
+        self.assertEqual(editions[0]["audio_seconds"], 9 * 3600 + 45 * 60)
+
+    @patch("src.api.storygraph_client.requests.get")
+    def test_print_edition_not_misclassified_when_pane_div_contains_audio_ui_text(self, mock_get):
+        """'Switch to audio edition' button text must not cause a print edition to be classified as Audiobook."""
+        html = """
+        <div class="book-pane" data-book-id="ed-pb">
+            <div class="edition-info">
+                <p>Format: Paperback</p>
+                <p>Language: English</p>
+            </div>
+            <p class="text-xs font-light">328 pages</p>
+            <div class="edition-actions">
+                <button>Switch to audio edition</button>
+                <a href="/audio-books/ed-pb">Audio version available</a>
+            </div>
+        </div>
+        """
+        mock_get.return_value = Mock(status_code=200, text=html, headers={})
+        editions = self.client.get_book_editions("book-1")
+        self.assertEqual(len(editions), 1)
+        self.assertEqual(editions[0]["format"], "Paperback")
+        self.assertFalse(editions[0]["is_audio"])
+        self.assertEqual(editions[0]["pages"], 328)
 
 
 if __name__ == "__main__":

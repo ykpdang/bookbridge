@@ -85,11 +85,22 @@ async function resolveStorygraphManualInput() {
 function getSgFormatIcon(format, isAudio) {
     if (isAudio) return '🎧';
     var f = (format || '').toLowerCase();
-    if (f.includes('audio')) return '🎧';
-    if (f.includes('hard')) return '📕';
-    if (f.includes('paper') || f.includes('soft')) return '📖';
-    if (f.includes('ebook') || f.includes('kindle') || f.includes('digital')) return '📱';
+    if (f.indexOf('audio') !== -1) return '🎧';
+    if (f.indexOf('kindle') !== -1) return '📱';
+    if (f.indexOf('ebook') !== -1 || f.indexOf('e-book') !== -1 || f.indexOf('digital') !== -1) return '📱';
+    if (f.indexOf('hard') !== -1) return '📕';
+    if (f.indexOf('mass market') !== -1) return '📖';
+    if (f.indexOf('paper') !== -1 || f.indexOf('soft') !== -1) return '📖';
     return '📚';
+}
+
+function formatAudioDuration(seconds) {
+    if (!seconds || seconds <= 0) return null;
+    var hours = Math.floor(seconds / 3600);
+    var mins = Math.floor((seconds % 3600) / 60);
+    if (hours > 0 && mins > 0) return hours + 'h ' + mins + 'm';
+    if (hours > 0) return hours + 'h';
+    return mins + 'm';
 }
 
 function displayStorygraphBook(data) {
@@ -118,13 +129,16 @@ function displayStorygraphBook(data) {
                 var edId = String(ed.id);
                 var isSelected = (edId === preSelectId);
                 var isLinked = (edId === linkedId);
-                
-                var edIsAudio = ed.is_audio || (ed.format && ed.format.toLowerCase().includes('audio'));
+
+                var edIsAudio = (ed.is_audio === true) ||
+                    (ed.is_audio === undefined && ed.format && ed.format.toLowerCase().indexOf('audio') !== -1);
 
                 var div = document.createElement('div');
                 div.className = 'hc-edition-option' + (isSelected ? ' selected' : '');
                 div.dataset.editionId = ed.id;
                 div.dataset.pages = ed.pages || '';
+                div.dataset.audioSeconds = ed.audio_seconds || '';
+                div.dataset.isAudio = edIsAudio ? '1' : '0';
                 div.onclick = function() { selectSgEdition(div); };
 
                 var iconDiv = document.createElement('div');
@@ -136,8 +150,10 @@ function displayStorygraphBook(data) {
 
                 var formatSpan = document.createElement('span');
                 formatSpan.className = 'hc-edition-format';
-                formatSpan.textContent = ed.format || (edIsAudio ? 'Audiobook' : 'Unknown');
-                
+                formatSpan.textContent = ed.format && ed.format !== 'Unknown'
+                    ? ed.format
+                    : (edIsAudio ? 'Audiobook' : 'Unknown format');
+
                 if (isLinked) {
                     var linkedBadge = document.createElement('span');
                     linkedBadge.className = 'hc-edition-linked';
@@ -153,11 +169,16 @@ function displayStorygraphBook(data) {
 
                 var detailsDiv = document.createElement('div');
                 detailsDiv.className = 'hc-edition-details';
-                
-                var details = [];
-                if (ed.pages) details.push(ed.pages + ' pages');
-                if (ed.language) details.push(ed.language);
-                detailsDiv.textContent = details.join('  ·  ') || 'No details';
+
+                var detailParts = [];
+                if (edIsAudio) {
+                    var dur = formatAudioDuration(ed.audio_seconds);
+                    if (dur) detailParts.push(dur);
+                } else if (ed.pages && ed.pages > 0) {
+                    detailParts.push(ed.pages + ' pages');
+                }
+                if (ed.language) detailParts.push(ed.language);
+                detailsDiv.textContent = detailParts.join('  ·  ') || 'No details';
 
                 mainDiv.appendChild(formatSpan);
                 mainDiv.appendChild(detailsDiv);
@@ -219,9 +240,13 @@ async function linkSelectedStorygraphBook() {
     const editionId = storygraphModalState.selectedEditionId;
     
     var pages = null;
+    var audioSeconds = null;
     if (data.editions) {
         const ed = data.editions.find(function(e) { return e.id == editionId; });
-        if (ed) pages = ed.pages;
+        if (ed) {
+            pages = ed.pages;
+            audioSeconds = ed.audio_seconds;
+        }
     }
 
     if (!data || !data.book_id) return;
@@ -240,6 +265,7 @@ async function linkSelectedStorygraphBook() {
                 book_id: data.book_id,
                 edition_id: editionId,
                 pages: pages,
+                audio_seconds: audioSeconds,
                 title: data.title || '',
                 url: data.url || ''
             })

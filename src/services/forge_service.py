@@ -16,6 +16,31 @@ from src.utils.storyteller_transcript import StorytellerTranscript
 
 logger = logging.getLogger(__name__)
 AUDIO_EXTENSIONS = {'.mp3', '.m4b', '.m4a', '.flac', '.ogg', '.opus', '.wma', '.wav', '.aac'}
+
+
+def _extract_series_from_abs_meta(metadata: dict, booklore_mode: bool = False) -> tuple:
+    """Return (series_name, series_sequence) from ABS or BookLore metadata dict."""
+    if not isinstance(metadata, dict):
+        return None, None
+    if booklore_mode:
+        name = (metadata.get("seriesName") or "").strip() or None
+        raw_seq = metadata.get("seriesNumber") or metadata.get("seriesSequence")
+    else:
+        series_list = metadata.get("series") or []
+        if isinstance(series_list, list) and series_list:
+            first = series_list[0]
+            name = (first.get("name") if isinstance(first, dict) else str(first)).strip() or None
+            raw_seq = first.get("sequence") if isinstance(first, dict) else None
+        else:
+            name = (metadata.get("seriesName") or "").strip() or None
+            raw_seq = None
+    sequence = None
+    if raw_seq is not None:
+        try:
+            sequence = float(raw_seq)
+        except (TypeError, ValueError):
+            pass
+    return name, sequence
 DEFAULT_STAGE_MODE = "cleanup"
 HARDLINK_STAGE_MODE = "hardlink"
 VALID_STAGE_MODES = {DEFAULT_STAGE_MODE, HARDLINK_STAGE_MODE}
@@ -1377,6 +1402,22 @@ class ForgeService:
                     book.transcript_source = "storyteller"
                 elif transcript_source:
                     book.transcript_source = transcript_source
+                if not book.series_name:
+                    try:
+                        if audio_source != "BookLore" and item_details:
+                            _meta = item_details.get("media", {}).get("metadata", {})
+                            _sname, _sseq = _extract_series_from_abs_meta(_meta)
+                            book.series_name = _sname
+                            book.series_sequence = _sseq
+                        elif audio_source == "BookLore" and audio_source_id and self.booklore_client:
+                            _bl_detail = self.booklore_client.get_book_by_id(audio_source_id)
+                            if _bl_detail:
+                                _raw = _bl_detail.get("metadata") or _bl_detail
+                                _sname, _sseq = _extract_series_from_abs_meta(_raw, booklore_mode=True)
+                                book.series_name = _sname
+                                book.series_sequence = _sseq
+                    except Exception as _se:
+                        logger.debug(f"Auto-Forge: could not capture series metadata: {_se}")
                 self.database_service.save_book(book)
                 logger.info(f"✅ Auto-Forge: Book {abs_id} updated successfully!")
             else:

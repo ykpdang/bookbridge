@@ -10,6 +10,28 @@ import schedule
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 import re
 
+
+def _extract_series_from_abs_item(item_details: dict) -> tuple:
+    """Return (series_name, series_sequence) from an ABS get_item_details response."""
+    if not isinstance(item_details, dict):
+        return None, None
+    metadata = item_details.get("media", {}).get("metadata", {}) or {}
+    series_list = metadata.get("series") or []
+    if isinstance(series_list, list) and series_list:
+        first = series_list[0]
+        name = (first.get("name") if isinstance(first, dict) else str(first)).strip() or None
+        raw_seq = first.get("sequence") if isinstance(first, dict) else None
+    else:
+        name = (metadata.get("seriesName") or "").strip() or None
+        raw_seq = None
+    sequence = None
+    if raw_seq is not None:
+        try:
+            sequence = float(raw_seq)
+        except (TypeError, ValueError):
+            pass
+    return name, sequence
+
 import json
 from src.api.storyteller_api import StorytellerAPIClient
 from src.db.models import Job
@@ -1250,6 +1272,17 @@ class SyncManager:
                     f"Ebook-only background prep: skipping ABS item lookup for '{sanitize_log_data(abs_title)}'"
                 )
             
+            if item_details and not getattr(book, "series_name", None):
+                try:
+                    _sname, _sseq = _extract_series_from_abs_item(item_details)
+                    if _sname:
+                        book.series_name = _sname
+                        book.series_sequence = _sseq
+                        self.database_service.save_book(book)
+                        logger.debug(f"Backfilled series '{_sname}' for '{sanitize_log_data(abs_title)}'")
+                except Exception as _se:
+                    logger.debug(f"Could not backfill series metadata: {_se}")
+
             epub_path = None
             if self.library_service and item_details:
                 # Try Priority Chain (ABS Direct -> Grimmory -> CWA -> ABS Search)

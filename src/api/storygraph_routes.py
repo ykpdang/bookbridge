@@ -154,6 +154,9 @@ def link_storygraph(abs_id):
 
         edition_id = str(data.get("edition_id") or "").strip()
         pages = data.get("pages")
+        audio_seconds = data.get("audio_seconds")
+        if (pages is None or pages == 0) and audio_seconds:
+            pages = -1
 
         # Handle edition switch if needed
         existing_details = database_service.get_storygraph_details(abs_id)

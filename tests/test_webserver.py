@@ -1761,6 +1761,42 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
         self.assertEqual(saved_details.matched_by, 'manual')
         self.mock_storygraph_client.update_status.assert_called_once_with('ed-2', 1)
 
+    def test_link_storygraph_saves_audio_edition_as_pages_sentinel(self):
+        from src.db.models import Book
+
+        self.mock_storygraph_client.is_configured.return_value = True
+        self.mock_database_service.get_book.return_value = Book(
+            abs_id='abs-storygraph-3',
+            abs_title='Story Audio Book',
+            ebook_filename='story.epub',
+        )
+        self.mock_abs_client.get_item_details.return_value = {
+            'media': {'metadata': {'isbn': '1234567890', 'asin': 'B000123'}}
+        }
+
+        response = self.client.post(
+            '/link-storygraph/abs-storygraph-3',
+            json={
+                'book_id': 'sg-3',
+                'edition_id': 'ed-3',
+                'pages': 0,
+                'audio_seconds': 12345,
+                'title': 'Story Audio Book',
+                'url': 'https://app.thestorygraph.com/books/sg-3',
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertTrue(data['success'])
+
+        saved_details = self.mock_database_service.save_storygraph_details.call_args.args[0]
+        self.assertEqual(saved_details.storygraph_edition_id, 'ed-3')
+        self.assertEqual(saved_details.storygraph_pages, -1)
+        self.assertEqual(saved_details.storygraph_url, 'https://app.thestorygraph.com/books/sg-3')
+        self.assertEqual(saved_details.matched_by, 'manual')
+        self.mock_storygraph_client.update_status.assert_called_once_with('ed-3', 1)
+
     def test_clear_stale_suggestions_api(self):
         """Test the clear-stale-suggestions API endpoint."""
         # Setup mock return value

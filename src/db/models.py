@@ -88,6 +88,8 @@ class Book(Base):
     transcript_source = Column(String(32), nullable=True)  # 'storyteller', 'smil', 'whisper'
     storyteller_uuid = Column(String(36), index=True, nullable=True)
     abs_ebook_item_id = Column(String(255), nullable=True)  # New ID to track ebook item separately
+    series_name = Column(String(500), nullable=True, index=True)
+    series_sequence = Column(Float, nullable=True)
 
     # Relationships
     states = relationship("State", back_populates="book", cascade="all, delete-orphan")
@@ -107,7 +109,8 @@ class Book(Base):
                  kosync_doc_id: str = None, transcript_file: str = None,
                  status: str = 'active', duration: float = None, sync_mode: str = 'audiobook',
                  transcript_source: str = None,
-                 storyteller_uuid: str = None, abs_ebook_item_id: str = None):
+                 storyteller_uuid: str = None, abs_ebook_item_id: str = None,
+                 series_name: str = None, series_sequence: float = None):
         self.abs_id = abs_id
         self.abs_title = abs_title
         self.audio_source = audio_source
@@ -129,6 +132,8 @@ class Book(Base):
         self.transcript_source = transcript_source
         self.storyteller_uuid = storyteller_uuid
         self.abs_ebook_item_id = abs_ebook_item_id
+        self.series_name = series_name
+        self.series_sequence = series_sequence
 
     def __repr__(self):
         return f"<Book(abs_id='{self.abs_id}', title='{self.abs_title}')>"

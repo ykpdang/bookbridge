@@ -271,6 +271,62 @@
     </div>
     {% endmacro %}
 
+    {% macro render_series_card(group, integrations) %}
+    <div class="series-group" id="{{ group.dom_id }}"
+         data-series-name="{{ group.series_name }}"
+         data-title="{{ group.series_name }}"
+         data-author="{{ group.series_author }}"
+         data-progress="{{ group.avg_progress }}"
+         data-last-sync="{{ group.last_sync_unix }}"
+         data-child-count="{{ group.child_count }}">
+      <div class="series-header" role="button" tabindex="0"
+           aria-controls="{{ group.dom_id }}-children" aria-expanded="false"
+           onclick="toggleSeries('{{ group.dom_id }}')"
+           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleSeries('{{ group.dom_id }}');}">
+
+        <div class="series-cover-stack">
+          {% for url in group.stack_cover_urls[:3] %}
+          <img src="{{ url }}" alt="" class="series-stack-cover stack-{{ loop.index }}"
+               loading="lazy" decoding="async"
+               onerror="this.style.visibility='hidden';">
+          {% endfor %}
+          {% if not group.stack_cover_urls %}
+          <div class="series-stack-cover stack-1 series-stack-placeholder">&#128218;</div>
+          {% endif %}
+        </div>
+
+        <div class="series-info">
+          <div class="series-name">{{ group.series_name }}</div>
+          {% if group.series_author %}
+          <div class="series-author">{{ group.series_author }}</div>
+          {% endif %}
+
+          <div class="series-meta-row">
+            <span class="series-count">{{ group.finished_count }}/{{ group.child_count }} finished</span>
+            <span class="series-sep">·</span>
+            <span class="series-avg">{{ '%.1f'|format(group.avg_progress) }}% avg</span>
+            {% if group.next_book and group.next_book.unified_progress < 100 %}
+            <span class="series-sep">·</span>
+            <span class="series-next">Next: {{ group.next_book.display_title }}</span>
+            {% endif %}
+          </div>
+
+          <div class="series-progress-bar">
+            <div class="series-progress-fill" style="width: {{ group.avg_progress }}%"></div>
+          </div>
+        </div>
+
+        <span class="series-chevron" aria-hidden="true">&#9654;</span>
+      </div>
+
+      <div class="series-children" id="{{ group.dom_id }}-children">
+        {% for child in group.children %}
+        {{ render_book_card(child, integrations) }}
+        {% endfor %}
+      </div>
+    </div>
+    {% endmacro %}
+
     <title>ABS-KoSync Bridge</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="icon" type="image/jpeg" href="/static/icon.jpg">
@@ -1642,6 +1698,109 @@
                 transform: translateY(0);
             }
         }
+
+        /* Series Group */
+        .series-group { display: flex; flex-direction: column; }
+
+        .series-header {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 14px 16px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            user-select: none;
+        }
+        .series-header:hover {
+            background: rgba(255, 255, 255, 0.05);
+            border-color: rgba(102, 126, 234, 0.4);
+        }
+        .series-group.expanded .series-header {
+            border-bottom-left-radius: 0;
+            border-bottom-right-radius: 0;
+            border-bottom-color: transparent;
+        }
+
+        .series-cover-stack {
+            position: relative;
+            width: 72px;
+            min-width: 72px;
+            height: 96px;
+            flex-shrink: 0;
+        }
+        .series-stack-cover {
+            position: absolute;
+            width: 56px;
+            height: 84px;
+            border-radius: 4px;
+            object-fit: cover;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+        }
+        .series-stack-cover.stack-1 { left: 0;   top: 6px; transform: rotate(-5deg); z-index: 1; }
+        .series-stack-cover.stack-2 { left: 8px; top: 0;   transform: rotate(0deg);  z-index: 2; }
+        .series-stack-cover.stack-3 { left: 16px; top: 6px; transform: rotate(5deg);  z-index: 3; }
+        .series-stack-placeholder {
+            display: flex; align-items: center; justify-content: center;
+            font-size: 28px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+
+        .series-info { flex: 1; min-width: 0; }
+        .series-name {
+            font-size: 15px; font-weight: 700; color: #fff;
+            line-height: 1.3;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .series-author {
+            font-size: 12px; color: rgba(255, 255, 255, 0.55);
+            margin-top: 2px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .series-meta-row {
+            display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+            font-size: 11px; color: rgba(255, 255, 255, 0.6);
+            margin-top: 6px;
+        }
+        .series-sep { color: rgba(255, 255, 255, 0.2); }
+        .series-next { color: rgba(102, 126, 234, 0.9); font-weight: 600; }
+
+        .series-progress-bar {
+            height: 4px; background: rgba(255, 255, 255, 0.1);
+            border-radius: 2px; overflow: hidden;
+            margin-top: 8px;
+        }
+        .series-progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.5s ease;
+        }
+
+        .series-chevron {
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.5);
+            transition: transform 0.3s ease;
+            flex-shrink: 0;
+        }
+        .series-group.expanded .series-chevron { transform: rotate(90deg); }
+
+        .series-children {
+            display: none;
+            flex-direction: column;
+            gap: 12px;
+            padding: 12px 12px 12px 24px;
+            background: rgba(255, 255, 255, 0.015);
+            border-bottom-left-radius: 12px;
+            border-bottom-right-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-top: none;
+        }
+        .series-group.expanded .series-children { display: flex; }
+        .series-children .book-card { width: auto; }
     </style>
 </head>
 
@@ -1900,13 +2059,16 @@
         {% endwith %}
         {% if mappings %}
         {% set section_flags = namespace(has_in_progress=false, has_not_started=false, has_finished=false) %}
-        {% for mapping in mappings %}
-        {% if mapping.unified_progress > 0 and mapping.unified_progress < 100 %}
-        {% set section_flags.has_in_progress = true %}
-        {% elif mapping.unified_progress == 0 %}
-        {% set section_flags.has_not_started = true %}
-        {% elif mapping.unified_progress >= 100 %}
-        {% set section_flags.has_finished = true %}
+        {% for m in mappings %}
+          {% if m.unified_progress > 0 and m.unified_progress < 100 %}{% set section_flags.has_in_progress = true %}{% endif %}
+        {% endfor %}
+        {% for entry in grouped_mappings %}
+        {% if entry.is_series_group %}
+          {% if entry.section_bucket == 'not_started' %}{% set section_flags.has_not_started = true %}{% endif %}
+          {% if entry.section_bucket == 'finished' %}{% set section_flags.has_finished = true %}{% endif %}
+        {% else %}
+          {% if entry.unified_progress == 0 %}{% set section_flags.has_not_started = true %}{% endif %}
+          {% if entry.unified_progress >= 100 %}{% set section_flags.has_finished = true %}{% endif %}
         {% endif %}
         {% endfor %}
         <div class="controls-bar">
@@ -1940,10 +2102,8 @@
             </div>
 
             <div class="book-grid" id="in-progress-grid">
-                {% for mapping in mappings %}
-                {% if mapping.unified_progress > 0 and mapping.unified_progress < 100 %}
-                {{ render_book_card(mapping, integrations) }}
-                {% endif %}
+                {% for m in mappings %}
+                  {% if m.unified_progress > 0 and m.unified_progress < 100 %}{{ render_book_card(m, integrations) }}{% endif %}
                 {% endfor %}
             </div>
         </div>
@@ -1958,9 +2118,11 @@
             </div>
 
             <div class="book-grid collapsible-book-grid" id="not-started-grid">
-                {% for mapping in mappings %}
-                {% if mapping.unified_progress == 0 %}
-                {{ render_book_card(mapping, integrations) }}
+                {% for entry in grouped_mappings %}
+                {% if entry.is_series_group %}
+                  {% if entry.section_bucket == 'not_started' %}{{ render_series_card(entry, integrations) }}{% endif %}
+                {% else %}
+                  {% if entry.unified_progress == 0 %}{{ render_book_card(entry, integrations) }}{% endif %}
                 {% endif %}
                 {% endfor %}
             </div>
@@ -1974,9 +2136,11 @@
             </div>
 
             <div class="book-grid" id="finished-grid">
-                {% for mapping in mappings %}
-                {% if mapping.unified_progress >= 100 %}
-                {{ render_book_card(mapping, integrations) }}
+                {% for entry in grouped_mappings %}
+                {% if entry.is_series_group %}
+                  {% if entry.section_bucket == 'finished' %}{{ render_series_card(entry, integrations) }}{% endif %}
+                {% else %}
+                  {% if entry.unified_progress >= 100 %}{{ render_book_card(entry, integrations) }}{% endif %}
                 {% endif %}
                 {% endfor %}
             </div>
@@ -2020,7 +2184,8 @@
                     if (!grid) return;
 
                     const visibleCards = grid.querySelectorAll('.book-card:not(.hidden)');
-                    if (visibleCards.length > 0) {
+                    const visibleGroups = grid.querySelectorAll('.series-group:not(.hidden)');
+                    if (visibleCards.length > 0 || visibleGroups.length > 0) {
                         section.classList.remove('hidden');
                     } else {
                         section.classList.add('hidden');
@@ -2046,12 +2211,11 @@
             function filterBooks() {
                 const filterValue = filterSelect.value;
                 const searchString = dashboardSearch ? dashboardSearch.value.toLowerCase() : '';
+
+                // Filter flat book cards
                 const cards = document.querySelectorAll('.book-card');
-
                 cards.forEach(card => {
-                    // Default to 'audiobook' if not specified
                     const syncMode = card.dataset.syncMode || 'audiobook';
-
                     const title = (card.dataset.title || '').toLowerCase();
                     const author = (card.dataset.author || '').toLowerCase();
                     const filename = (card.dataset.filename || '').toLowerCase();
@@ -2062,19 +2226,44 @@
                     } else if (filterValue === 'ebook_only' && syncMode !== 'ebook_only') {
                         isVisible = false;
                     }
-
                     if (isVisible && searchString) {
                         if (!title.includes(searchString) && !author.includes(searchString) && !filename.includes(searchString)) {
                             isVisible = false;
                         }
                     }
-
                     if (isVisible) {
                         card.classList.remove('hidden');
-                        card.style.display = ''; // Ensure display is reset if it was hidden inline
+                        card.style.display = '';
                     } else {
                         card.classList.add('hidden');
-                        card.style.display = 'none'; // Force hide
+                        card.style.display = 'none';
+                    }
+                });
+
+                // Handle series groups: show if any child matches, or series name matches search
+                document.querySelectorAll('.series-group').forEach(group => {
+                    const seriesName = (group.dataset.seriesName || '').toLowerCase();
+                    const seriesAuthor = (group.dataset.author || '').toLowerCase();
+                    const seriesNameMatchesSearch = searchString && (seriesName.includes(searchString) || seriesAuthor.includes(searchString));
+
+                    const childCards = group.querySelectorAll('.book-card');
+                    let anyChildVisible = false;
+                    childCards.forEach(child => {
+                        if (seriesNameMatchesSearch) {
+                            child.classList.remove('hidden');
+                            child.style.display = '';
+                            anyChildVisible = true;
+                        } else if (!child.classList.contains('hidden')) {
+                            anyChildVisible = true;
+                        }
+                    });
+
+                    if (anyChildVisible) {
+                        group.classList.remove('hidden');
+                        group.style.display = '';
+                    } else {
+                        group.classList.add('hidden');
+                        group.style.display = 'none';
                     }
                 });
 
@@ -2083,6 +2272,21 @@
                 // Persist choice
                 localStorage.setItem('abs_kosync_filter', filterValue);
             }
+
+            window.toggleSeries = function (domId) {
+                const group = document.getElementById(domId);
+                if (!group) return;
+                const expanded = group.classList.toggle('expanded');
+                const header = group.querySelector('.series-header');
+                if (header) header.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+                try {
+                    if (expanded) {
+                        localStorage.setItem('series_expanded_' + domId, '1');
+                    } else {
+                        localStorage.removeItem('series_expanded_' + domId);
+                    }
+                } catch (e) { /* ignore */ }
+            };
 
             function updateKoSyncHash(event) {
                 event.stopPropagation();
@@ -2139,51 +2343,56 @@
                 }
             }
 
-            // Parse "Time Ago" for sorting
+            // Parse "Time Ago" or unix timestamp for sorting (smaller = more recent)
             function parseLastSync(syncText) {
-                if (!syncText || syncText === 'Never' || syncText === 'Error') return -1;
-
+                if (!syncText || syncText === 'Never' || syncText === 'Error') return Infinity;
+                // Handle raw unix timestamps from series groups
+                const asNum = parseFloat(syncText);
+                if (!isNaN(asNum) && asNum > 1e9) {
+                    return Math.max(0, Date.now() / 1000 - asNum);
+                }
                 const match = syncText.match(/(\d+)([smhd])/);
-                if (!match) return -1;
-
+                if (!match) return Infinity;
                 const value = parseInt(match[1]);
                 const unit = match[2];
-
                 if (unit === 's') return value;
                 if (unit === 'm') return value * 60;
                 if (unit === 'h') return value * 3600;
                 if (unit === 'd') return value * 86400;
-
-                return -1;
+                return Infinity;
             }
 
             function sortCards(grid, sortBy, direction) {
                 if (!grid) return;
-                const cards = Array.from(grid.children);
+                const items = Array.from(grid.children);
 
-                const sortedCards = cards.sort((a, b) => {
+                const sorted = items.sort((a, b) => {
                     let comparison = 0;
+                    const isSeries = (el) => el.classList.contains('series-group');
 
-                    // Safety checks for missing data attributes
-                    const valA = a.dataset[sortBy === 'last_sync' ? 'lastSync' : sortBy] || '';
-                    const valB = b.dataset[sortBy === 'last_sync' ? 'lastSync' : sortBy] || '';
-
-                    if (sortBy === 'title') {
+                    let valA, valB;
+                    if (sortBy === 'last_sync') {
+                        valA = a.dataset.lastSync || '';
+                        valB = b.dataset.lastSync || '';
+                        comparison = parseLastSync(valA) - parseLastSync(valB);
+                    } else if (sortBy === 'title') {
+                        valA = (a.dataset.title || a.dataset.seriesName || '').toLowerCase();
+                        valB = (b.dataset.title || b.dataset.seriesName || '').toLowerCase();
                         comparison = valA.localeCompare(valB);
                     } else if (sortBy === 'progress') {
-                        comparison = (parseFloat(valA) || 0) - (parseFloat(valB) || 0);
+                        valA = parseFloat(a.dataset.progress || '0') || 0;
+                        valB = parseFloat(b.dataset.progress || '0') || 0;
+                        comparison = valA - valB;
                     } else if (sortBy === 'status') {
+                        valA = a.dataset.status || '';
+                        valB = b.dataset.status || '';
                         comparison = valA.localeCompare(valB);
-                    } else if (sortBy === 'last_sync') {
-                        comparison = parseLastSync(valA) - parseLastSync(valB);
                     }
 
-                    // Apply direction
                     return direction === 'asc' ? comparison : -comparison;
                 });
 
-                // Re-append in new order
-                sortedCards.forEach(card => grid.appendChild(card));
+                sorted.forEach(el => grid.appendChild(el));
             }
 
             function sortBooks(sortBy, direction) {
@@ -2265,6 +2474,17 @@
                     console.debug('LocalStorage error:', e);
                     updateNotStartedChevron(false);
                 }
+
+                // Restore per-series expansion state
+                document.querySelectorAll('.series-group').forEach(function (group) {
+                    try {
+                        if (localStorage.getItem('series_expanded_' + group.id) === '1') {
+                            group.classList.add('expanded');
+                            const header = group.querySelector('.series-header');
+                            if (header) header.setAttribute('aria-expanded', 'true');
+                        }
+                    } catch (e) { /* ignore */ }
+                });
             });
 
             // --- Initialization ---

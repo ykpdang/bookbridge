@@ -1551,6 +1551,131 @@ def _coerce_author_display(value):
     return ""
 
 
+def _extract_series_from_abs_metadata(metadata: dict) -> tuple:
+    """Return (series_name, series_sequence) from an ABS media.metadata block."""
+    if not isinstance(metadata, dict):
+        return None, None
+    series_list = metadata.get("series") or []
+    if not isinstance(series_list, list) or not series_list:
+        name = (metadata.get("seriesName") or "").strip()
+        return (name or None, None)
+    first = series_list[0]
+    if isinstance(first, dict):
+        name = (first.get("name") or "").strip() or None
+        raw_seq = first.get("sequence")
+    else:
+        name = str(first).strip() or None
+        raw_seq = None
+    sequence = None
+    if raw_seq is not None:
+        try:
+            sequence = float(raw_seq)
+        except (TypeError, ValueError):
+            sequence = None
+    return name, sequence
+
+
+def _extract_series_from_booklore_metadata(raw: dict) -> tuple:
+    """Return (series_name, series_sequence) from cached BookLore raw_metadata."""
+    if not isinstance(raw, dict):
+        return None, None
+    metadata = raw.get("metadata") or raw
+    name = (metadata.get("seriesName") or "").strip() or None
+    raw_seq = metadata.get("seriesNumber") or metadata.get("seriesSequence")
+    sequence = None
+    if raw_seq is not None:
+        try:
+            sequence = float(raw_seq)
+        except (TypeError, ValueError):
+            sequence = None
+    return name, sequence
+
+
+def _normalize_series_key(name: str) -> str:
+    """Case- and whitespace-insensitive key for grouping series."""
+    return re.sub(r"\s+", " ", (name or "").strip()).casefold()
+
+
+def _finalize_series_group(group: dict) -> None:
+    """Compute aggregate display fields for a series group in-place."""
+    from collections import Counter
+    children = group["children"]
+    children.sort(key=lambda c: (
+        c.get("series_sequence") if c.get("series_sequence") is not None else float("inf"),
+        (c.get("display_title") or "").casefold(),
+    ))
+
+    total = len(children)
+    finished = sum(1 for c in children if (c.get("unified_progress") or 0) >= 100)
+    in_progress = sum(1 for c in children if 0 < (c.get("unified_progress") or 0) < 100)
+    avg = round(sum((c.get("unified_progress") or 0) for c in children) / total, 1) if total else 0.0
+    next_book = next((c for c in children if (c.get("unified_progress") or 0) < 100), None)
+
+    last_sync_unix = 0.0
+    for c in children:
+        ts = c.get("last_sync_unix") or 0.0
+        if ts > last_sync_unix:
+            last_sync_unix = ts
+
+    author_counts = Counter(
+        (c.get("display_author") or "").strip() for c in children if c.get("display_author")
+    )
+    if author_counts:
+        group["series_author"] = author_counts.most_common(1)[0][0]
+
+    group.update({
+        "child_count": total,
+        "finished_count": finished,
+        "in_progress_count": in_progress,
+        "avg_progress": avg,
+        "next_book": next_book,
+        "last_sync_unix": last_sync_unix,
+        "stack_cover_urls": [c.get("cover_url") for c in children[:3] if c.get("cover_url")],
+        "section_bucket": "finished" if finished == total else "not_started",
+        "dom_id": "series-" + re.sub(r"[^a-z0-9]+", "-", group["series_key"]).strip("-"),
+    })
+
+
+def _group_dashboard_mappings_by_series(mappings: list) -> list:
+    """
+    Convert flat mapping list into a mixed list of flat mappings and series group dicts.
+    Groups with only one child are demoted back to flat mappings.
+    """
+    groups = {}
+    order = []
+
+    for m in mappings:
+        series_name = (m.get("series_name") or "").strip()
+        key = _normalize_series_key(series_name)
+        if not key:
+            entry_id = id(m)
+            order.append(("single", entry_id))
+            groups[entry_id] = m
+            continue
+        if key not in groups:
+            groups[key] = {
+                "is_series_group": True,
+                "series_name": series_name,
+                "series_key": key,
+                "series_author": m.get("display_author") or "",
+                "children": [],
+            }
+            order.append(("series", key))
+        groups[key]["children"].append(m)
+
+    result = []
+    for kind, key in order:
+        entry = groups[key]
+        if kind == "single":
+            result.append(entry)
+        elif len(entry["children"]) == 1:
+            result.append(entry["children"][0])
+        else:
+            _finalize_series_group(entry)
+            result.append(entry)
+    return result
+
+
 def _dashboard_filename_key(filename):
     value = (filename or "").strip()
     return value.casefold() if value else ""
@@ -2011,6 +2136,9 @@ def _build_dashboard_mapping(
     mapping["is_out_of_sync"] = mapping["sync_warning_pct"] > 5.0
     mapping["unified_progress"] = min(max_progress, 100.0)
     mapping["last_sync"] = _format_dashboard_last_sync(latest_update_time)
+    mapping["last_sync_unix"] = latest_update_time
+    mapping["series_name"] = getattr(book, "series_name", None) or None
+    mapping["series_sequence"] = getattr(book, "series_sequence", None)
 
     if mapping.get("audio_cover_url"):
         mapping["cover_url"] = mapping["audio_cover_url"]
@@ -2119,12 +2247,14 @@ def index():
     )
 
     suggestions = [s for s in database_service.get_all_pending_suggestions() if len(s.matches) > 0]
+    grouped_mappings = _group_dashboard_mappings_by_series(mappings)
 
     latest_version, update_available = get_update_status()
 
     return render_template(
         'index.html',
         mappings=mappings,
+        grouped_mappings=grouped_mappings,
         integrations=integrations,
         progress=overall_progress,
         suggestions=suggestions,
@@ -2696,6 +2826,12 @@ def match():
         if abs_ebook_item_id is None and current_book_entry:
             abs_ebook_item_id = current_book_entry.abs_ebook_item_id
 
+        # Extract series metadata from ABS item details
+        _match_series_name, _match_series_seq = None, None
+        if item_details:
+            _abs_meta = item_details.get("media", {}).get("metadata", {})
+            _match_series_name, _match_series_seq = _extract_series_from_abs_metadata(_abs_meta)
+
         # Create Book object and save to database service
         from src.db.models import Book
         storyteller_manifest = ingest_storyteller_transcripts(abs_id, abs_title, chapters)
@@ -2725,6 +2861,8 @@ def match():
             abs_ebook_item_id=abs_ebook_item_id,
             ebook_source=ebook_source,
             ebook_source_id=ebook_source_id,
+            series_name=_match_series_name,
+            series_sequence=_match_series_seq,
         )
 
         database_service.save_book(book)
@@ -5263,6 +5401,148 @@ def api_storyteller_backfill():
     return jsonify(summary), status_code
 
 
+def _extract_series_from_title(title: str) -> tuple:
+    """
+    Heuristic: extract series name + sequence from a title like
+    "Solar Dragons Need Love, Too! 2" or "Returner's Defiance 3".
+
+    Handles patterns:
+      "Series Name N"          → (Series Name, N)
+      "Series Name, Book N"    → (Series Name, N)
+      "Series Name (Book N)"   → (Series Name, N)
+    Returns (None, None) when no clear numeric suffix is found.
+    """
+    if not title:
+        return None, None
+    # Strip trailing unabridged/abridged qualifiers
+    clean = re.sub(r'\s*\((?:unabridged|abridged|audio(?:\s+book)?)\)\s*$', '', title.strip(), flags=re.IGNORECASE)
+
+    # "Title, Book N" / "Title - Book N" / "Title (Book N)"
+    m = re.search(
+        r'^(.+?)[\s,\-:]+\(?(?:book|volume|vol\.?|part)\s+(\d+(?:\.\d+)?)\)?\s*$',
+        clean, re.IGNORECASE,
+    )
+    if m:
+        series = m.group(1).rstrip(' ,.!:-').strip()
+        if series:
+            return series, float(m.group(2))
+
+    # "Title N" — trailing integer (not float, to avoid matching "Author 2.0")
+    m = re.match(r'^(.+?)\s+(\d{1,3})\s*$', clean)
+    if m:
+        series = m.group(1).rstrip(' ,.!:-').strip()
+        seq = int(m.group(2))
+        # Guard: series candidate must be non-trivially long and seq plausible
+        if len(series) >= 4 and 1 <= seq <= 50:
+            return series, float(seq)
+
+    return None, None
+
+
+def api_series_backfill():
+    """Backfill series_name/series_sequence for all books that lack it.
+
+    Tries ABS metadata first; falls back to parsing the number out of the title.
+    Writes via direct SQL UPDATE to avoid ORM session lifecycle issues.
+    """
+    import time as _time
+    import sqlalchemy as _sa
+    start = _time.time()
+    db = container.database_service()
+    abs_client = container.abs_client()
+    if not abs_client or not abs_client.is_configured():
+        return jsonify({"error": "ABS not configured"}), 400
+
+    # Collect all rows that need updating — read-only pass
+    with db.get_session() as session:
+        rows = session.execute(
+            _sa.text("SELECT abs_id, abs_title, audio_source FROM books WHERE series_name IS NULL OR series_name = ''")
+        ).fetchall()
+
+    updates = []   # list of (abs_id, series_name, series_sequence)
+    skipped = 0
+    failed = 0
+
+    for abs_id, abs_title, audio_source in rows:
+        sname, sseq = None, None
+
+        if audio_source == "ABS" and abs_id:
+            try:
+                item_details = abs_client.get_item_details(abs_id)
+                if item_details:
+                    meta = item_details.get("media", {}).get("metadata", {})
+                    sname, sseq = _extract_series_from_abs_metadata(meta)
+            except Exception as e:
+                logger.warning(f"Series backfill ABS lookup failed for '{abs_title}': {e}")
+                failed += 1
+                continue
+
+        if not sname:
+            sname, sseq = _extract_series_from_title(abs_title or "")
+
+        if sname:
+            updates.append((abs_id, sname, sseq))
+            logger.debug(f"Series backfill queued: '{sname}' #{sseq} → '{abs_title}'")
+
+    # Write pass — single transaction, plain SQL
+    if updates:
+        with db.get_session() as session:
+            for abs_id, sname, sseq in updates:
+                session.execute(
+                    _sa.text("UPDATE books SET series_name = :sname, series_sequence = :sseq WHERE abs_id = :abs_id"),
+                    {"sname": sname, "sseq": sseq, "abs_id": abs_id},
+                )
+
+    duration = round(_time.time() - start, 1)
+    logger.info(
+        f"Series backfill complete: updated={len(updates)} skipped={skipped} "
+        f"failed={failed} duration={duration}s"
+    )
+    return jsonify({
+        "scanned": len(rows),
+        "updated": len(updates),
+        "skipped_already_set": skipped,
+        "failed": failed,
+        "duration_seconds": duration,
+        "sample_updates": [{"abs_id": a, "series": s, "seq": q} for a, s, q in updates[:10]],
+    }), 200
+
+
+def api_debug_abs_series():
+    """Return the raw series metadata ABS sends for a given abs_id. For debugging only."""
+    abs_id = request.args.get("abs_id", "").strip()
+    if not abs_id:
+        return jsonify({"error": "abs_id query param required"}), 400
+    abs_client = container.abs_client()
+    if not abs_client or not abs_client.is_configured():
+        return jsonify({"error": "ABS not configured"}), 400
+
+    abs_client._update_session_headers()
+    url = f"{abs_client.base_url}/api/items/{abs_id}"
+    try:
+        r = abs_client.session.get(url, timeout=abs_client.timeout)
+        if r.status_code != 200:
+            return jsonify({
+                "error": f"ABS returned HTTP {r.status_code}",
+                "url_called": url,
+                "response_preview": r.text[:500],
+            }), 502
+        item = r.json()
+    except Exception as e:
+        return jsonify({"error": str(e), "url_called": url}), 502
+
+    meta = item.get("media", {}).get("metadata", {}) or {}
+    sname, sseq = _extract_series_from_abs_metadata(meta)
+    return jsonify({
+        "abs_id": abs_id,
+        "media_metadata_keys": list(meta.keys()),
+        "series_field": meta.get("series"),
+        "seriesName_field": meta.get("seriesName"),
+        "parsed_series_name": sname,
+        "parsed_series_sequence": sseq,
+    })
+
+
 def proxy_cover(abs_id):
     """Proxy cover access to allow loading covers from local network ABS instances."""
     try:
@@ -5850,6 +6130,8 @@ def create_app(test_container=None):
     app.add_url_rule('/api/storyteller/search', 'api_storyteller_search', api_storyteller_search, methods=['GET'])
     app.add_url_rule('/api/storyteller/link/<abs_id>', 'api_storyteller_link', api_storyteller_link, methods=['POST'])
     app.add_url_rule('/api/storyteller/backfill', 'api_storyteller_backfill', api_storyteller_backfill, methods=['POST'])
+    app.add_url_rule('/api/admin/backfill-series', 'api_series_backfill', api_series_backfill, methods=['POST'])
+    app.add_url_rule('/api/admin/debug-abs-series', 'api_debug_abs_series', api_debug_abs_series, methods=['GET'])
 
     # Forge routes
     app.add_url_rule('/api/forge/search_audio', 'forge_search_audio', forge_search_audio, methods=['GET'])
