@@ -42,11 +42,19 @@ while true; do
 
     # If we get here, the app exited/crashed
     echo "Running cleanup..."
-    
-    # If exit code is 0 (clean exit), maybe we should still restart? 
-    # Usually servers don't exit with 0 unless stopped. 
+
+    # Record exit code so the next startup can report the real cause (e.g. OOM kill = 137)
+    if [ "$EXIT_CODE" -eq 137 ]; then
+        echo "💀 Process OOM-killed (exit 137). Writing sentinel..."
+        echo "137" > /data/.last_exit_code
+    else
+        rm -f /data/.last_exit_code
+    fi
+
+    # If exit code is 0 (clean exit), maybe we should still restart?
+    # Usually servers don't exit with 0 unless stopped.
     # But if we were killed by signal trapped above, the script exits in 'cleanup'.
-    
+
     echo "⚠️  Application exited with code $EXIT_CODE. Restarting in 3 seconds..."
     sleep 3
 done

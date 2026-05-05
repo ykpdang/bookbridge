@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class KoSyncSyncClient(SyncClient):
     _FRAGILE_INLINE_SEGMENT_RE = re.compile(
-        r"/(?:span|em|strong|b|i|u|small|sub|sup|font|mark|abbr|cite|code|q|time|s|del|ins)(?:\[\d+\])?/(?!text\(\))",
+        r"/(?:span|em|strong|b|i|u|small|sub|sup|font|mark|abbr|cite|code|q|time|s|del|ins)(?:\[\d+\])?/",
         re.IGNORECASE,
     )
 

@@ -105,7 +105,9 @@ def api_storygraph_resolve():
 
     editions = []
     try:
-        editions = storygraph_client.get_book_editions(book_id)
+        raw_editions = storygraph_client.get_book_editions(book_id)
+        if isinstance(raw_editions, list):
+            editions = raw_editions
     except Exception as exc:
         logger.warning("Failed to fetch StoryGraph editions for %s: %s", book_id, exc)
 

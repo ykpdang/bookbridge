@@ -728,16 +728,6 @@ class EbookParser:
         anchor = self._nearest_crengine_anchor(element)
         suffix = self._first_non_empty_direct_text_suffix(anchor)
 
-        if not suffix and anchor is not element and el_tag in self.CRENGINE_FRAGILE_INLINE_TAGS:
-            # Structural anchor has no direct text — all text lives inside an inline child
-            # (common in EPUBs where every <p> wraps content in <span>).
-            # Include the inline element in the XPath so CREngine can resolve the text node.
-            inline_step = self._build_inline_step(anchor, element)
-            if inline_step:
-                inline_text_suffix = self._first_non_empty_direct_text_suffix(element) or "/text()"
-                xpath_base = self._build_xpath(anchor)
-                return f"/body/DocFragment[{spine_index}]/{xpath_base}{inline_step}{inline_text_suffix}.0"
-
         if not suffix:
             suffix = "/text()"
 

@@ -17,4 +17,5 @@ sqlalchemy
 alembic
 python-socketio[client]
 mkdocs-material
+tzdata
 

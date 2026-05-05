@@ -406,6 +406,17 @@ class SyncManager:
     def cleanup_stale_jobs(self):
         """Reset jobs that were interrupted mid-process on restart."""
         try:
+            sentinel = Path("/data/.last_exit_code")
+            restart_error = "Interrupted by restart"
+            if sentinel.exists():
+                try:
+                    code = sentinel.read_text().strip()
+                    sentinel.unlink(missing_ok=True)
+                    if code == "137":
+                        restart_error = "OOM killed (exit 137)"
+                except Exception:
+                    pass
+
             # Get books with crashed status and reset them to active
             crashed_books = self.database_service.get_books_by_status('crashed')
             for book in crashed_books:
@@ -439,7 +450,7 @@ class SyncManager:
                         abs_id=book.abs_id,
                         last_attempt=time.time(),
                         retry_count=0,
-                        last_error='Interrupted by restart'
+                        last_error=restart_error
                     )
                     self.database_service.save_job(job)
 

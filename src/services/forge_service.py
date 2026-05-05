@@ -63,9 +63,9 @@ class ForgeService:
         self.ABS_API_URL = os.environ.get("ABS_SERVER")
         self.ABS_AUDIO_ROOT = Path(os.environ.get("AUDIOBOOKS_DIR", "/audiobooks"))
         self.storyteller_cleanup_grace_seconds = self._safe_int_env("STORYTELLER_CLEANUP_GRACE_SECONDS", 120)
-        self.storyteller_recovery_max_wait_seconds = self._safe_int_env("STORYTELLER_RECOVERY_MAX_WAIT_SECONDS", 21600)
+        self.storyteller_recovery_max_wait_seconds = self._safe_int_env("STORYTELLER_RECOVERY_MAX_WAIT_MINUTES", 360) * 60
         self.storyteller_recovery_poll_interval_seconds = max(
-            30, self._safe_int_env("STORYTELLER_RECOVERY_POLL_INTERVAL_SECONDS", 120)
+            30, self._safe_int_env("STORYTELLER_RECOVERY_POLL_INTERVAL_MINUTES", 2) * 60
         )
 
     @staticmethod
@@ -1291,15 +1291,53 @@ class ForgeService:
                 time.sleep(self.storyteller_cleanup_grace_seconds)
 
             # --- DOWNLOAD ---
-            logger.info("Auto-Forge: Processing complete. Downloading artifact...")
+            no_epub_cache = os.environ.get("STORYTELLER_NO_EPUB_CACHE", "false").lower() == "true"
             target_filename = f"storyteller_{book_uuid}.epub"
             target_path = epub_cache / target_filename
 
-            try:
-                if not st_client.download_book(book_uuid, target_path):
-                    raise Exception("API download returned False")
-            except Exception as api_err:
-                raise Exception(f"Failed to download Storyteller artifact: {api_err}")
+            if no_epub_cache:
+                original_name = Path(str(original_ebook_filename or original_filename or "")).name
+                nocache_candidates = []
+                if original_name:
+                    nocache_candidates.append(self.ebook_parser.epub_cache_dir / original_name)
+                source_path = text_item.get('path') if isinstance(text_item, dict) else None
+                if source_path:
+                    nocache_candidates.append(Path(source_path))
+                try:
+                    nocache_candidates.append(self.ebook_parser.resolve_book_path(original_name))
+                except Exception:
+                    pass
+
+                resolved = None
+                for c in nocache_candidates:
+                    try:
+                        if c and Path(c).exists():
+                            resolved = Path(c)
+                            break
+                    except Exception:
+                        continue
+
+                if resolved:
+                    logger.info(
+                        "⚡ Auto-Forge: STORYTELLER_NO_EPUB_CACHE=true; using original EPUB '%s'",
+                        resolved.name,
+                    )
+                    target_path = resolved
+                    target_filename = resolved.name
+                else:
+                    logger.warning(
+                        "⚡ Auto-Forge: STORYTELLER_NO_EPUB_CACHE=true but no original EPUB found; "
+                        "falling back to Storyteller ReadAloud download"
+                    )
+                    no_epub_cache = False
+
+            if not no_epub_cache:
+                logger.info("Auto-Forge: Processing complete. Downloading artifact...")
+                try:
+                    if not st_client.download_book(book_uuid, target_path):
+                        raise Exception("API download returned False")
+                except Exception as api_err:
+                    raise Exception(f"Failed to download Storyteller artifact: {api_err}")
 
             # --- RECALCULATE HASH ---
             if original_hash:
