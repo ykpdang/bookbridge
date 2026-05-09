@@ -729,6 +729,10 @@ class BookloreClient:
         Refresh the book cache using robust pagination.
         Fetches books in batches to ensure complete library sync.
         """
+        if not self.is_configured():
+            logger.info("Grimmory not configured, skipping library scan.")
+            return False
+
         # Avoid overlapping full scans from concurrent API requests.
         # Returning True here means "refresh skipped because another one is running",
         # which allows callers to continue serving from the current cache.
@@ -753,7 +757,7 @@ class BookloreClient:
                 if not response or response.status_code != 200:
                     logger.error(f"âŒ Grimmory: Failed to fetch page {page}")
                     self._last_refresh_failed = True
-                
+                    return False
 
                 data = self._parse_json_response(response, f"Grimmory books page {page}")
                 if data is None:

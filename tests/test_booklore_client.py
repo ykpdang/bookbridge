@@ -1810,3 +1810,34 @@ class TestMagicShelfFilterEvaluator:
             mapping = booklore_client.get_book_shelf_mapping(mode="magic", excludes=[])
 
         assert mapping == {"100": ["SciFi Horror"]}
+
+
+class TestRefreshGuardedWhenDisabled:
+    """Regression: when Grimmory is disabled, library scans must be skipped without crashing.
+
+    Bug: _refresh_book_cache() previously called _make_request(), which returned None when
+    not configured, then handed that None to _parse_json_response() and crashed with
+    'NoneType' object has no attribute 'json'.
+    """
+
+    def test_refresh_skipped_when_enabled_flag_false(self, booklore_client, caplog):
+        with patch.dict(os.environ, {"BOOKLORE_ENABLED": "false"}):
+            assert booklore_client.is_configured() is False
+            with patch.object(booklore_client, "_make_request") as mock_req, \
+                 caplog.at_level("INFO", logger="src.api.booklore_client"):
+                result = booklore_client._refresh_book_cache()
+
+        assert result is False
+        mock_req.assert_not_called()
+        assert any(
+            "Grimmory not configured, skipping library scan." in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_get_all_books_does_not_crash_when_disabled(self, booklore_client):
+        with patch.dict(os.environ, {"BOOKLORE_ENABLED": "false"}):
+            with patch.object(booklore_client, "_make_request") as mock_req:
+                books = booklore_client.get_all_books()
+
+        assert books == []
+        mock_req.assert_not_called()
