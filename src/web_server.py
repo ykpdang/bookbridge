@@ -648,15 +648,54 @@ def _is_storyteller_artifact_filename(filename):
     return bool(filename and re.match(r"^storyteller_[0-9a-fA-F-]+\.epub$", filename))
 
 
-def _download_storyteller_artifact(storyteller_uuid, abs_title=None):
-    """Download Storyteller artifact to epub cache; fall back to local library when available."""
+def _download_storyteller_artifact(storyteller_uuid, abs_title=None, *, original_ebook_filename=None):
+    """Resolve a Storyteller artifact path.
+
+    When ``STORYTELLER_NO_EPUB_CACHE`` is enabled and an original EPUB can be
+    located via ``EbookParser.resolve_book_path``, skip the API download and
+    return ``(original_name, original_path)``. Otherwise, download the
+    Storyteller ReadAloud EPUB into the epub cache as before, falling back to
+    a local ``STORYTELLER_LIBRARY_DIR`` copy on failure.
+
+    Returns ``(filename, Path)`` on success, ``(None, None)`` on failure.
+    """
     epub_cache = container.epub_cache_dir()
     epub_cache.mkdir(parents=True, exist_ok=True)
 
     artifact_filename = f"storyteller_{storyteller_uuid}.epub"
     target_path = epub_cache / artifact_filename
-    downloaded = False
 
+    no_epub_cache = os.environ.get("STORYTELLER_NO_EPUB_CACHE", "false").lower() == "true"
+    if no_epub_cache and original_ebook_filename:
+        original_name = Path(str(original_ebook_filename)).name
+        nocache_candidates = [epub_cache / original_name]
+        try:
+            nocache_candidates.append(container.ebook_parser().resolve_book_path(original_name))
+        except Exception:
+            pass
+
+        resolved = None
+        for candidate in nocache_candidates:
+            try:
+                if candidate and Path(candidate).exists():
+                    resolved = Path(candidate)
+                    break
+            except Exception:
+                continue
+
+        if resolved:
+            logger.info(
+                "📦 Storyteller download: STORYTELLER_NO_EPUB_CACHE=true; using original EPUB '%s'",
+                resolved.name,
+            )
+            return resolved.name, resolved
+        logger.warning(
+            "📦 Storyteller download: STORYTELLER_NO_EPUB_CACHE=true but no original EPUB found "
+            "for '%s'; falling back to Storyteller ReadAloud download",
+            original_name,
+        )
+
+    downloaded = False
     try:
         downloaded = container.storyteller_client().download_book(storyteller_uuid, target_path)
     except Exception as dl_err:
@@ -739,7 +778,11 @@ def _upsert_storyteller_mapping(
     resolved_ebook_filename = selected_ebook_filename or (target_book.ebook_filename if target_book else None)
 
     if selected_storyteller_uuid:
-        artifact_filename, _artifact_path = _download_storyteller_artifact(selected_storyteller_uuid, abs_title)
+        artifact_filename, _artifact_path = _download_storyteller_artifact(
+            selected_storyteller_uuid,
+            abs_title,
+            original_ebook_filename=original_ebook_filename,
+        )
         if not artifact_filename:
             return None, "Failed to download Storyteller artifact", 500
         resolved_ebook_filename = artifact_filename
@@ -1307,7 +1350,11 @@ def _create_or_update_booklore_audio_mapping(
         original_ebook_filename = existing_book.original_ebook_filename
 
     if storyteller_uuid:
-        artifact_filename, _artifact_path = _download_storyteller_artifact(storyteller_uuid, audio_title)
+        artifact_filename, _artifact_path = _download_storyteller_artifact(
+            storyteller_uuid,
+            audio_title,
+            original_ebook_filename=original_ebook_filename,
+        )
         if not artifact_filename:
             return None, "Failed to download Storyteller artifact", 500
         resolved_ebook_filename = artifact_filename
@@ -2838,7 +2885,11 @@ def match():
             # If Storyteller UUID is selected, we prioritize it
             try:
                 logger.info(f"🔍 Using Storyteller Artifact: '{storyteller_uuid}'")
-                target_filename, _target_path = _download_storyteller_artifact(storyteller_uuid, abs_title)
+                target_filename, _target_path = _download_storyteller_artifact(
+                    storyteller_uuid,
+                    abs_title,
+                    original_ebook_filename=selected_filename,
+                )
                 if not target_filename:
                     return "Failed to download Storyteller artifact", 500
 
@@ -3127,20 +3178,18 @@ def batch_match():
                     kosync_doc_id = None
 
                     try:
-                        epub_cache = container.epub_cache_dir()
-                        if not epub_cache.exists():
-                            epub_cache.mkdir(parents=True, exist_ok=True)
-
-                        target_filename = f"storyteller_{storyteller_uuid}.epub"
-                        target_path = epub_cache / target_filename
-
                         logger.info(
                             "Batch Forge: Using Storyteller Artifact '%s' for '%s'",
                             sanitize_log_data(storyteller_uuid),
                             sanitize_log_data(item.get('abs_title')),
                         )
 
-                        if container.storyteller_client().download_book(storyteller_uuid, target_path):
+                        target_filename, _target_path = _download_storyteller_artifact(
+                            storyteller_uuid,
+                            item.get('abs_title'),
+                            original_ebook_filename=ebook_filename,
+                        )
+                        if target_filename:
                             original_ebook_filename = ebook_filename
                             ebook_filename = target_filename
 
@@ -3151,7 +3200,7 @@ def batch_match():
                             )
                         else:
                             logger.warning(
-                                "Batch Forge: Failed to download Storyteller artifact '%s' for '%s', skipping",
+                                "Batch Forge: Failed to obtain Storyteller artifact '%s' for '%s', skipping",
                                 sanitize_log_data(storyteller_uuid),
                                 sanitize_log_data(item.get('abs_title')),
                             )
@@ -3405,17 +3454,16 @@ def batch_match():
                 if storyteller_uuid:
                     # Storyteller Tri-Link Logic (mirrors match POST handler)
                     try:
-                        epub_cache = container.epub_cache_dir()
-                        if not epub_cache.exists(): epub_cache.mkdir(parents=True, exist_ok=True)
-
-                        target_filename = f"storyteller_{storyteller_uuid}.epub"
-                        target_path = epub_cache / target_filename
-
                         logger.info(f"🔍 Batch Match: Using Storyteller Artifact '{storyteller_uuid}' for '{item['abs_title']}'")
 
-                        if container.storyteller_client().download_book(storyteller_uuid, target_path):
+                        target_filename, _target_path = _download_storyteller_artifact(
+                            storyteller_uuid,
+                            item.get('abs_title'),
+                            original_ebook_filename=ebook_filename,
+                        )
+                        if target_filename:
                             original_ebook_filename = ebook_filename  # Preserve original (may be empty for storyteller-only)
-                            ebook_filename = target_filename  # Override filename to cached artifact
+                            ebook_filename = target_filename  # Override filename (artifact or original under NO_EPUB_CACHE)
 
                             kosync_doc_id = _compute_storyteller_trilink_kosync_id(
                                 original_ebook_filename,
@@ -3423,7 +3471,7 @@ def batch_match():
                                 "Batch Match Tri-Link",
                             )
                         else:
-                            logger.warning(f"⚠️ Failed to download Storyteller artifact '{storyteller_uuid}' for '{item['abs_title']}', skipping")
+                            logger.warning(f"⚠️ Failed to obtain Storyteller artifact '{storyteller_uuid}' for '{item['abs_title']}', skipping")
                             continue
                     except Exception as e:
                         logger.error(f"❌ Storyteller Tri-Link failed for '{item['abs_title']}': {e}")
@@ -4020,16 +4068,14 @@ def suggestions_page():
                 if storyteller_uuid:
                     # Storyteller Tri-Link Logic (mirrors match POST handler)
                     try:
-                        epub_cache = container.epub_cache_dir()
-                        if not epub_cache.exists():
-                            epub_cache.mkdir(parents=True, exist_ok=True)
-
-                        target_filename = f"storyteller_{storyteller_uuid}.epub"
-                        target_path = epub_cache / target_filename
-
                         logger.info(f"Batch Match: Using Storyteller Artifact '{storyteller_uuid}' for '{item['abs_title']}'")
 
-                        if container.storyteller_client().download_book(storyteller_uuid, target_path):
+                        target_filename, _target_path = _download_storyteller_artifact(
+                            storyteller_uuid,
+                            item.get('abs_title'),
+                            original_ebook_filename=ebook_filename,
+                        )
+                        if target_filename:
                             original_ebook_filename = ebook_filename
                             ebook_filename = target_filename
 
@@ -4039,7 +4085,7 @@ def suggestions_page():
                                 "Batch Match Tri-Link",
                             )
                         else:
-                            logger.warning(f"Failed to download Storyteller artifact '{storyteller_uuid}' for '{item['abs_title']}', skipping")
+                            logger.warning(f"Failed to obtain Storyteller artifact '{storyteller_uuid}' for '{item['abs_title']}', skipping")
                             continue
                     except Exception as e:
                         logger.error(f"Storyteller Tri-Link failed for '{item['abs_title']}': {e}")
