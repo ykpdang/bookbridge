@@ -1761,6 +1761,45 @@ def _get_cached_ebook_display_metadata(book, cached_booklore_by_filename=None):
     return {}
 
 
+def _coerce_dashboard_rating(value):
+    if value in (None, ""):
+        return None
+    try:
+        rating = float(str(value).replace(",", "").strip())
+    except Exception:
+        return None
+    if rating < 0:
+        return None
+    return rating
+
+
+def _coerce_dashboard_count(value):
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(str(value).replace(",", "").strip()))
+    except Exception:
+        return None
+
+
+def _get_cached_goodreads_rating(book, cached_booklore_by_filename=None):
+    cached = _get_cached_booklore_book(book, cached_booklore_by_filename=cached_booklore_by_filename)
+    if not cached:
+        return {}
+
+    raw = cached.raw_metadata_dict if hasattr(cached, "raw_metadata_dict") and isinstance(cached.raw_metadata_dict, dict) else {}
+    metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+
+    rating = _coerce_dashboard_rating(metadata.get("goodreadsRating") or raw.get("goodreadsRating"))
+    review_count = _coerce_dashboard_count(metadata.get("goodreadsReviewCount") or raw.get("goodreadsReviewCount"))
+    if rating is None and review_count is None:
+        return {}
+    return {
+        "goodreads_rating": rating,
+        "goodreads_review_count": review_count,
+    }
+
+
 def _get_cached_booklore_id(book, cached_booklore_by_filename=None):
     cached = _get_cached_booklore_book(book, cached_booklore_by_filename=cached_booklore_by_filename)
     if not cached:
@@ -2133,6 +2172,8 @@ def _build_dashboard_mapping(
             "storygraph_url": storygraph_details.storygraph_url,
             "storygraph_title": book.abs_title,
             "storygraph_matched_by": storygraph_details.matched_by,
+            "storygraph_rating": _coerce_dashboard_rating(getattr(storygraph_details, "storygraph_rating", None)),
+            "storygraph_review_count": _coerce_dashboard_count(getattr(storygraph_details, "storygraph_review_count", None)),
         })
     else:
         mapping.update({
@@ -2141,6 +2182,8 @@ def _build_dashboard_mapping(
             "storygraph_url": None,
             "storygraph_title": None,
             "storygraph_matched_by": None,
+            "storygraph_rating": None,
+            "storygraph_review_count": None,
         })
 
     mapping["storyteller_legacy_link"] = "storyteller" in state_by_client and not book.storyteller_uuid
@@ -2160,6 +2203,12 @@ def _build_dashboard_mapping(
         mapping["booklore_url"] = f"{manager.booklore_client.base_url}/book/{mapping['booklore_id']}?tab=view"
     else:
         mapping["booklore_url"] = None
+
+    mapping.update({
+        "goodreads_rating": None,
+        "goodreads_review_count": None,
+    })
+    mapping.update(_get_cached_goodreads_rating(book, cached_booklore_by_filename=cached_booklore_by_filename))
 
     if mapping.get("hardcover_slug"):
         mapping["hardcover_url"] = f"https://hardcover.app/books/{mapping['hardcover_slug']}"
@@ -6249,7 +6298,16 @@ if __name__ == '__main__':
     poller_thread = threading.Thread(target=client_poller.start, daemon=True)
     poller_thread.start()
 
-
+    # One-time backfill of StoryGraph ratings for already-linked books.
+    # Self-limiting: rows with storygraph_rating_updated_at set are skipped on future startups.
+    try:
+        from src.services.storygraph_rating_backfill import start_backfill_thread as _start_sg_backfill
+        _start_sg_backfill(
+            database_service=database_service,
+            storygraph_client=container.storygraph_client(),
+        )
+    except Exception as exc:
+        logger.warning("StoryGraph rating backfill thread failed to start: %s", exc)
 
     # Check ebook source configuration
     booklore_configured = container.booklore_client().is_configured()

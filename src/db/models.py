@@ -187,6 +187,9 @@ class StorygraphDetails(Base):
     storygraph_url = Column(String(1000))
     storygraph_edition_id = Column(String(255), nullable=True)
     storygraph_pages = Column(Integer, nullable=True)
+    storygraph_rating = Column(Float, nullable=True)
+    storygraph_review_count = Column(Integer, nullable=True)
+    storygraph_rating_updated_at = Column(Float, nullable=True)
     isbn = Column(String(255))
     asin = Column(String(255))
     matched_by = Column(String(50))  # 'isbn', 'asin', 'title_author', 'title', 'manual'
@@ -200,6 +203,9 @@ class StorygraphDetails(Base):
         storygraph_url: str = None,
         storygraph_edition_id: str = None,
         storygraph_pages: int = None,
+        storygraph_rating: float = None,
+        storygraph_review_count: int = None,
+        storygraph_rating_updated_at: float = None,
         isbn: str = None,
         asin: str = None,
         matched_by: str = None,
@@ -209,6 +215,9 @@ class StorygraphDetails(Base):
         self.storygraph_url = storygraph_url
         self.storygraph_edition_id = storygraph_edition_id
         self.storygraph_pages = storygraph_pages
+        self.storygraph_rating = storygraph_rating
+        self.storygraph_review_count = storygraph_review_count
+        self.storygraph_rating_updated_at = storygraph_rating_updated_at
         self.isbn = isbn
         self.asin = asin
         self.matched_by = matched_by

@@ -114,3 +114,24 @@ def test_booklore_raw_metadata_dict_none(session):
     assert retrieved.raw_metadata_dict == {}
 
 
+def test_storygraph_details_rating_fields(session):
+    from src.db.models import Book, StorygraphDetails
+
+    book = Book(abs_id="sg-rating-book", abs_title="StoryGraph Rated")
+    details = StorygraphDetails(
+        abs_id="sg-rating-book",
+        storygraph_book_id="sg-1",
+        storygraph_rating=3.78,
+        storygraph_review_count=9305,
+        storygraph_rating_updated_at=1710000000.0,
+    )
+    session.add(book)
+    session.add(details)
+    session.commit()
+
+    retrieved = session.query(StorygraphDetails).filter_by(abs_id="sg-rating-book").first()
+    assert retrieved.storygraph_rating == 3.78
+    assert retrieved.storygraph_review_count == 9305
+    assert retrieved.storygraph_rating_updated_at == 1710000000.0
+
+

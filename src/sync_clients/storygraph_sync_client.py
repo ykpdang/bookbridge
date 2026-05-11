@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Optional
 
 from src.api.storygraph_client import StorygraphClient
@@ -130,12 +131,25 @@ class StorygraphSyncClient(SyncClient):
                     edition_id,
                 )
 
+        rating_info = {}
+        try:
+            rating_info = self.storygraph_client.get_book_rating(book_id) or {}
+        except Exception as exc:
+            logger.warning("StoryGraph: failed to fetch rating for automatch %s: %s", book_id, exc)
+        if not isinstance(rating_info, dict):
+            rating_info = {}
+
+        rating = rating_info.get("rating")
+        review_count = rating_info.get("review_count")
         details = StorygraphDetails(
             abs_id=book.abs_id,
             storygraph_book_id=book_id,
             storygraph_url=self.storygraph_client.book_url(book_id),
             storygraph_edition_id=edition_id if edition_id != book_id else None,
             storygraph_pages=pages,
+            storygraph_rating=rating,
+            storygraph_review_count=review_count,
+            storygraph_rating_updated_at=time.time() if rating is not None or review_count is not None else None,
             isbn=isbn,
             asin=asin,
             matched_by='automatch',

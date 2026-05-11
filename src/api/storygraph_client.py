@@ -196,6 +196,56 @@ class StorygraphClient:
             return str(node.get("value"))
         return "0"
 
+    @staticmethod
+    def _parse_review_count(value: str) -> Optional[int]:
+        if not value:
+            return None
+        match = re.search(r"([\d,.]+)\s+reviews?", value, flags=re.IGNORECASE)
+        if not match:
+            return None
+        try:
+            return int(match.group(1).replace(",", "").replace(".", ""))
+        except Exception:
+            return None
+
+    @classmethod
+    def _parse_community_reviews_rating(cls, html: str) -> dict:
+        if not html:
+            return {"rating": None, "review_count": None}
+
+        soup = BeautifulSoup(html, "html.parser")
+        lines = [line.strip() for line in soup.get_text("\n", strip=True).splitlines() if line.strip()]
+        rating = None
+
+        for idx, line in enumerate(lines):
+            if line.lower() != "community reviews":
+                continue
+            for candidate in lines[idx + 1: idx + 6]:
+                if re.fullmatch(r"[0-5](?:\.\d{1,2})?", candidate):
+                    try:
+                        rating = float(candidate)
+                    except Exception:
+                        rating = None
+                    break
+            if rating is not None:
+                break
+
+        if rating is None:
+            text = "\n".join(lines)
+            match = re.search(
+                r"(?<!\d)([0-5](?:\.\d{1,2})?)\s+(?:AVERAGE|average)\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                try:
+                    rating = float(match.group(1))
+                except Exception:
+                    rating = None
+
+        review_count = cls._parse_review_count("\n".join(lines))
+        return {"rating": rating, "review_count": review_count}
+
     def _request(
         self,
         path: str,
@@ -451,6 +501,16 @@ class StorygraphClient:
             "author": author,
             "url": self.book_url(book_id),
         }
+
+    def get_book_rating(self, book_id: str) -> dict:
+        if not book_id:
+            return {"rating": None, "review_count": None}
+
+        resp = self._request(f"/books/{book_id}/community_reviews", allow_redirects=False)
+        if not resp or resp.status_code != 200 or self._is_sign_in_redirect(resp):
+            return {"rating": None, "review_count": None}
+
+        return self._parse_community_reviews_rating(resp.text)
 
     def resolve_book_from_input(self, input_str: str) -> Optional[dict]:
         value = (input_str or "").strip()

@@ -98,10 +98,23 @@ def test_init_loads_from_db(mock_db):
     
     with patch.dict(os.environ, {"DATA_DIR": "/tmp/data"}):
         client = BookloreClient(database_service=mock_db)
-        
+
         assert "test_book.epub" in client._book_cache
         assert client._book_cache["test_book.epub"]["id"] == "123"
         assert client._book_id_cache["123"]["title"] == "Test Book"
+
+
+def test_process_book_detail_preserves_goodreads_metadata(booklore_client):
+    detail = make_detail("rating-1", title="Rated Book", filename="rated.epub")
+    detail["metadata"]["goodreadsRating"] = 4.12
+    detail["metadata"]["goodreadsReviewCount"] = 3456
+
+    booklore_client._process_book_detail(detail)
+
+    saved_book = booklore_client.db.save_booklore_book.call_args.args[0]
+    raw = json.loads(saved_book.raw_metadata)
+    assert raw["metadata"]["goodreadsRating"] == 4.12
+    assert raw["metadata"]["goodreadsReviewCount"] == 3456
 
 def test_migration_from_legacy_json(mock_db):
     # Setup: DB is empty, Legacy JSON exists

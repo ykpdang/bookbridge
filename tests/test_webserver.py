@@ -1074,6 +1074,94 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
         self.assertIn('loading="lazy"', html)
         self.assertIn('decoding="async"', html)
 
+    def test_index_endpoint_uses_cached_storygraph_and_goodreads_ratings(self):
+        from src.db.models import Book, BookloreBook, StorygraphDetails
+
+        test_book = Book(
+            abs_id='ratings-1',
+            abs_title='Ratings Book',
+            ebook_filename='ratings.epub',
+            sync_mode='ebook_only',
+            status='active'
+        )
+        cached_book = BookloreBook(
+            filename='ratings.epub',
+            title='Ratings Book',
+            authors='Rating Author',
+            raw_metadata=json.dumps({
+                'metadata': {
+                    'goodreadsRating': 4.12,
+                    'goodreadsReviewCount': 3456,
+                }
+            })
+        )
+        storygraph_details = StorygraphDetails(
+            abs_id='ratings-1',
+            storygraph_book_id='sg-ratings',
+            storygraph_url='https://app.thestorygraph.com/books/sg-ratings',
+            storygraph_rating=3.78,
+            storygraph_review_count=9305,
+        )
+
+        self.mock_database_service.get_all_books.return_value = [test_book]
+        self.mock_database_service.get_all_states.return_value = []
+        self.mock_database_service.get_all_hardcover_details.return_value = []
+        self.mock_database_service.get_all_storygraph_details.return_value = [storygraph_details]
+        self.mock_database_service.get_all_pending_suggestions.return_value = []
+        self.mock_database_service.get_all_booklore_books.return_value = [cached_book]
+        self.mock_booklore_client.is_configured.return_value = False
+        self._set_dashboard_integrations(storygraph=True)
+
+        mapping = self._capture_index_mapping()
+
+        self.assertEqual(mapping['storygraph_rating'], 3.78)
+        self.assertEqual(mapping['storygraph_review_count'], 9305)
+        self.assertEqual(mapping['goodreads_rating'], 4.12)
+        self.assertEqual(mapping['goodreads_review_count'], 3456)
+        self.mock_storygraph_client.get_book_rating.assert_not_called()
+
+    def test_index_template_renders_rating_badges_under_cover(self):
+        from src.db.models import Book, BookloreBook, StorygraphDetails
+
+        self.mock_database_service.get_all_books.return_value = [
+            Book(abs_id='ratings-template-1', abs_title='Ratings Template', ebook_filename='ratings-template.epub', status='active')
+        ]
+        self.mock_database_service.get_all_states.return_value = []
+        self.mock_database_service.get_all_hardcover_details.return_value = []
+        self.mock_database_service.get_all_storygraph_details.return_value = [
+            StorygraphDetails(
+                abs_id='ratings-template-1',
+                storygraph_book_id='sg-ratings-template',
+                storygraph_rating=3.78,
+                storygraph_review_count=9305,
+            )
+        ]
+        self.mock_database_service.get_all_booklore_books.return_value = [
+            BookloreBook(filename='ratings-template.epub', raw_metadata=json.dumps({
+                'metadata': {'goodreadsRating': 4.12, 'goodreadsReviewCount': 3456}
+            }))
+        ]
+        self.mock_database_service.get_all_pending_suggestions.return_value = []
+        self.mock_booklore_client.is_configured.return_value = False
+        self._set_dashboard_integrations(storygraph=True)
+
+        html = self._render_index_template_source()
+
+        self.assertIn('class="book-media-column"', html)
+        self.assertIn('class="rating-badge rating-badge-sg"', html)
+        self.assertIn('class="rating-badge rating-badge-gr"', html)
+        self.assertIn('<span class="rating-source">SG</span>', html)
+        self.assertIn('<span class="rating-value">3.8</span>', html)
+        self.assertIn('<span class="rating-source">GR</span>', html)
+        self.assertIn('<span class="rating-value">4.1</span>', html)
+        self.assertIn('StoryGraph: 3.78 based on 9,305 reviews', html)
+        self.assertIn('Goodreads: 4.12 based on 3,456 reviews', html)
+        # data-rating uses the avg of both sources (3.78 + 4.12) / 2 = 3.95
+        self.assertIn('data-rating="3.95"', html)
+        # Rating option is in the sort dropdown
+        self.assertIn('<option value="rating">Rating</option>', html)
+        self.mock_storygraph_client.get_book_rating.assert_not_called()
+
     def test_index_template_renders_three_progress_sections_and_not_started_toggle(self):
         from src.db.models import Book, State
 

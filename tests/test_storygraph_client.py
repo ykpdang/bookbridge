@@ -54,6 +54,33 @@ class TestStorygraphClient(unittest.TestCase):
         self.assertIn("remember_user_token=fresh-remember", cookie)
         self.assertNotIn("_story_graph_session", cookie)
 
+    def test_parse_community_reviews_rating_confirmed_shape(self):
+        html = """
+        <h3>Community Reviews</h3>
+        <div>3.78</div>
+        <span>based on</span>
+        <span>9,305 reviews</span>
+        """
+
+        rating = self.client._parse_community_reviews_rating(html)
+
+        self.assertEqual(rating["rating"], 3.78)
+        self.assertEqual(rating["review_count"], 9305)
+
+    @patch("src.api.storygraph_client.requests.get")
+    def test_get_book_rating_fetches_community_reviews_frame(self, mock_get):
+        mock_get.return_value = Mock(
+            status_code=200,
+            text="<h3>Community Reviews</h3><div>4.25</div><span>based on</span><span>1,234 reviews</span>",
+            headers={},
+        )
+
+        rating = self.client.get_book_rating("book-1")
+
+        self.assertEqual(rating["rating"], 4.25)
+        self.assertEqual(rating["review_count"], 1234)
+        self.assertIn("/books/book-1/community_reviews", mock_get.call_args.args[0])
+
     @patch("src.api.storygraph_client.requests.get")
     def test_search_books_parses_results(self, mock_get):
         html = """

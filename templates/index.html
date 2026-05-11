@@ -16,10 +16,12 @@
         data-last-sync="{{ mapping.last_sync }}" data-status="{{ mapping.status }}" data-title="{{ full_display_title }}"
         data-author="{{ mapping.display_author }}" data-filename="{{ mapping.display_filename }}"
         data-sync-mode="{{ mapping.sync_mode }}" data-abs-id="{{ mapping.abs_id }}"
+        data-rating="{% if mapping.storygraph_rating is not none and mapping.goodreads_rating is not none %}{{ ((mapping.storygraph_rating + mapping.goodreads_rating) / 2) }}{% elif mapping.storygraph_rating is not none %}{{ mapping.storygraph_rating }}{% elif mapping.goodreads_rating is not none %}{{ mapping.goodreads_rating }}{% endif %}"
         {% if mapping.display_filename %}title="{{ mapping.display_filename }}"{% endif %}>
 
         {# Cover image section - prioritize ebook cover, fallback to ABS cover #}
-        <div class="book-cover-section">
+        <div class="book-media-column">
+            <div class="book-cover-section">
             {% if mapping.kosync_doc_id %}
             <img src="/covers/{{ mapping.kosync_doc_id }}.jpg" alt="Cover" class="book-cover"
                 loading="lazy" decoding="async"
@@ -32,6 +34,26 @@
             <div class="book-cover-placeholder hidden">📖</div>
             {% else %}
             <div class="book-cover-placeholder">📖</div>
+            {% endif %}
+            </div>
+
+            {% if mapping.storygraph_rating is not none or mapping.goodreads_rating is not none %}
+            <div class="rating-badges" aria-label="Book ratings">
+                {% if mapping.storygraph_rating is not none %}
+                <span class="rating-badge rating-badge-sg"
+                    title="StoryGraph: {{ '%.2f' | format(mapping.storygraph_rating) }}{% if mapping.storygraph_review_count %} based on {{ '{:,}'.format(mapping.storygraph_review_count) }} reviews{% endif %}">
+                    <span class="rating-source">SG</span>
+                    <span class="rating-value">{{ '%.1f' | format(mapping.storygraph_rating) }}</span>
+                </span>
+                {% endif %}
+                {% if mapping.goodreads_rating is not none %}
+                <span class="rating-badge rating-badge-gr"
+                    title="Goodreads: {{ '%.2f' | format(mapping.goodreads_rating) }}{% if mapping.goodreads_review_count %} based on {{ '{:,}'.format(mapping.goodreads_review_count) }} reviews{% endif %}">
+                    <span class="rating-source">GR</span>
+                    <span class="rating-value">{{ '%.1f' | format(mapping.goodreads_rating) }}</span>
+                </span>
+                {% endif %}
+            </div>
             {% endif %}
         </div>
 
@@ -635,6 +657,13 @@
         }
 
         /* Cover Section */
+        .book-media-column {
+            width: 100px;
+            min-width: 100px;
+            flex-shrink: 0;
+            align-self: flex-start;
+        }
+
         .book-cover-section {
             width: 100px;
             min-width: 100px;
@@ -667,6 +696,49 @@
             align-items: center;
             justify-content: center;
             font-size: 36px;
+        }
+
+        .rating-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            margin-top: 6px;
+        }
+
+        .rating-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            min-height: 20px;
+            max-width: 100%;
+            padding: 2px 5px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.06);
+            color: rgba(255, 255, 255, 0.88);
+            font-size: 10px;
+            line-height: 1;
+            white-space: nowrap;
+        }
+
+        .rating-source {
+            color: rgba(255, 255, 255, 0.58);
+            font-weight: 700;
+        }
+
+        .rating-value {
+            color: #ffffff;
+            font-weight: 700;
+        }
+
+        .rating-badge-sg {
+            border-color: rgba(52, 211, 153, 0.24);
+            background: rgba(52, 211, 153, 0.10);
+        }
+
+        .rating-badge-gr {
+            border-color: rgba(244, 190, 96, 0.24);
+            background: rgba(244, 190, 96, 0.10);
         }
 
         /* Info Section */
@@ -1052,6 +1124,7 @@
                 gap: 12px;
             }
 
+            .book-media-column,
             .book-cover-section {
                 width: 80px;
                 min-width: 80px;
@@ -2090,6 +2163,7 @@
                     <option value="progress">Progress</option>
                     <option value="status">Status</option>
                     <option value="last_sync">Last Synced</option>
+                    <option value="rating">Rating</option>
                 </select>
                 <span class="sort-direction" id="sort-direction" title="Click to Reverse Order">↓</span>
             </div>
@@ -2319,7 +2393,8 @@
                 title: 'asc',      // A-Z default
                 progress: 'desc',  // Highest progress first
                 status: 'asc',
-                last_sync: 'desc'  // Newest sync first
+                last_sync: 'desc', // Newest sync first
+                rating: 'desc'     // Highest rating first
             };
 
             // Track last sort to detect toggles.
@@ -2387,6 +2462,17 @@
                         valA = a.dataset.status || '';
                         valB = b.dataset.status || '';
                         comparison = valA.localeCompare(valB);
+                    } else if (sortBy === 'rating') {
+                        const rawA = a.dataset.rating;
+                        const rawB = b.dataset.rating;
+                        const hasA = rawA !== undefined && rawA !== '';
+                        const hasB = rawB !== undefined && rawB !== '';
+                        if (!hasA && !hasB) return 0;
+                        if (!hasA) return 1;   // unrated always last
+                        if (!hasB) return -1;  // unrated always last
+                        valA = parseFloat(rawA);
+                        valB = parseFloat(rawB);
+                        comparison = valA - valB;
                     }
 
                     return direction === 'asc' ? comparison : -comparison;

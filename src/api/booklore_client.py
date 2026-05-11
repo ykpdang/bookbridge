@@ -1029,6 +1029,7 @@ class BookloreClient:
             'title': title,
             'subtitle': subtitle,
             'authors': author_str,
+            'metadata': metadata,
             'bookType': book_type,
             'primaryFile': detail.get('primaryFile'),
             'bookFiles': detail.get('bookFiles'),
