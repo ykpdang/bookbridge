@@ -26,10 +26,12 @@ class ClientPoller:
         ('CWA', 'CWA_SYNC'),
     ]
 
-    def __init__(self, database_service, sync_manager, sync_clients_dict: dict):
+    def __init__(self, database_service, sync_manager, sync_clients_dict: dict,
+                 shelf_watch_service=None):
         self._db = database_service
         self._sync_manager = sync_manager
         self._sync_clients = sync_clients_dict
+        self._shelf_watch_service = shelf_watch_service
         self._last_known: dict[tuple, float] = {}  # {(client_name, abs_id): last_pct}
         self._last_poll: dict[str, float] = {}     # {client_name: last_poll_timestamp}
         self._running = False
@@ -91,6 +93,14 @@ class ClientPoller:
                 continue
 
             self._last_poll[client_name] = now
+            # Grimmory "Up Next" shelf-watch runs on the same cadence as the
+            # Booklore poll when BOOKLORE_POLL_MODE=custom. In global mode the
+            # check is invoked from sync_manager._sync_cycle_internal instead.
+            if client_name == 'BookLore' and self._shelf_watch_service:
+                try:
+                    self._shelf_watch_service.process_watch_shelf()
+                except Exception as e:
+                    logger.debug(f"ClientPoller: shelf-watch run failed: {e}")
             self._poll_client(client_name)
 
     def _poll_client(self, client_name: str) -> None:

@@ -758,6 +758,46 @@
 
                     <!-- Separator -->
                     <div class="full-width" style="margin: 10px 0; border-top: 1px solid rgba(255,255,255,0.1);"></div>
+                    <h4 class="full-width" style="font-size: 14px; color: #fff; margin-bottom: -10px;">"Up Next" Shelf Auto-Match</h4>
+
+                    <div class="checkbox-wrapper full-width">
+                        <input type="checkbox" id="booklore_shelf_watch" name="BOOKLORE_SHELF_WATCH_ENABLED"
+                            onchange="toggleSection('shelf_watch_body', this.checked)"
+                            {% if get_bool('BOOKLORE_SHELF_WATCH_ENABLED') %}checked{% endif %}>
+                        <label for="booklore_shelf_watch">Watch a Grimmory shelf for auto-matching</label>
+                    </div>
+                    <div id="shelf_watch_body" class="full-width" {% if not get_bool('BOOKLORE_SHELF_WATCH_ENABLED') %}style="display:none;"{% endif %}>
+                        <div class="form-group full-width">
+                            <label>Watch Shelf Name</label>
+                            <div style="display: flex; gap: 10px;">
+                                <input type="text" name="BOOKLORE_SHELF_WATCH_NAME"
+                                    value="{{ get_val('BOOKLORE_SHELF_WATCH_NAME', 'Up Next') }}"
+                                    placeholder="Up Next" style="flex:1;">
+                                <button class="btn" type="button" onclick="checkBookloreWatchShelf()">🔍 Find Shelves</button>
+                            </div>
+                            <select id="booklore_watch_shelf_picker" style="display:none; margin-top:10px;"
+                                onchange="applyShelfPickerSelection('BOOKLORE_SHELF_WATCH_NAME', 'booklore_watch_shelf_picker', true)">
+                                <option value="">Select a shelf...</option>
+                            </select>
+                            <div id="booklore_watch_shelf_picker_status" class="help-text" style="display:none; margin-top:6px;"></div>
+                            <div class="help-text">Create a shelf in <b>Grimmory</b> (pick any icon you like there), then use <b>Find Shelves</b> above to select it here. Books placed on this shelf are auto-matched on each poll cycle and moved to <code>{{ get_val('BOOKLORE_SHELF_NAME', 'Kobo') }}</code> on success.</div>
+                        </div>
+                        <div class="form-group">
+                            <label>Auto-Match Threshold (%)</label>
+                            <input type="number" name="BOOKLORE_SHELF_WATCH_THRESHOLD" min="60" max="100"
+                                value="{{ get_val('BOOKLORE_SHELF_WATCH_THRESHOLD', '95') }}">
+                            <div class="help-text">Matches at or above this score auto-create a mapping. Lower-scoring matches become pending Suggestions.</div>
+                        </div>
+                        <div class="form-group">
+                            <label>Rescan Cooldown (hours)</label>
+                            <input type="number" name="BOOKLORE_SHELF_WATCH_RESCAN_HOURS" min="1"
+                                value="{{ get_val('BOOKLORE_SHELF_WATCH_RESCAN_HOURS', '24') }}">
+                            <div class="help-text">Books on the watch shelf with no audio candidate are re-scanned no more often than this.</div>
+                        </div>
+                    </div>
+
+                    <!-- Separator -->
+                    <div class="full-width" style="margin: 10px 0; border-top: 1px solid rgba(255,255,255,0.1);"></div>
                     <h4 class="full-width" style="font-size: 14px; color: #fff; margin-bottom: -10px;">Device Sync Collections</h4>
 
                     <div class="form-group full-width">
@@ -1548,11 +1588,19 @@
             });
         }
 
-        function applyShelfPickerSelection(inputName, selectId) {
+        function applyShelfPickerSelection(inputName, selectId, singleSelect) {
             const input = document.querySelector(`input[name="${inputName}"]`);
             const select = document.getElementById(selectId);
             if (!input || !select || !select.value) return;
-            
+
+            if (singleSelect) {
+                // Watch shelf: a single shelf name, not a comma-separated list.
+                input.value = select.value;
+                if (typeof markDirty === 'function') markDirty();
+                select.value = "";
+                return;
+            }
+
             let currentStr = input.value || '';
             let current = currentStr.split(',').map(s => s.trim()).filter(Boolean);
             if (!current.includes(select.value)) {
@@ -1571,6 +1619,18 @@
                 selectId: 'booklore_shelf_picker',
                 statusId: 'booklore_shelf_picker_status',
                 emptyMessage: 'No shelves found. Check connection or try syncing first.',
+                labelBuilder: (shelf) => `${shelf.name} (${shelf.count} books)`,
+            });
+        }
+
+        function checkBookloreWatchShelf() {
+            populateLibraryPicker({
+                endpoint: '/api/booklore/shelves',
+                button: event.target,
+                inputName: 'BOOKLORE_SHELF_WATCH_NAME',
+                selectId: 'booklore_watch_shelf_picker',
+                statusId: 'booklore_watch_shelf_picker_status',
+                emptyMessage: 'No shelves found. Create one in Grimmory first, then click Find again.',
                 labelBuilder: (shelf) => `${shelf.name} (${shelf.count} books)`,
             });
         }

@@ -231,7 +231,9 @@ class BookloreClient:
 
     def _make_request(self, method, endpoint, json_data=None):
         token = self._get_fresh_token()
-        if not token: return None
+        if not token:
+            logger.warning(f"Grimmory: _make_request returning None (no token) for {method} {endpoint}")
+            return None
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         url = f"{self.base_url}{endpoint}"
         try:
@@ -246,7 +248,9 @@ class BookloreClient:
                     self._token = None
                     self._token_timestamp = 0
                 token = self._get_fresh_token()
-                if not token: return None
+                if not token:
+                    logger.warning(f"Grimmory: _make_request returning None after 401 retry (no token) for {method} {endpoint}")
+                    return None
                 headers["Authorization"] = f"Bearer {token}"
                 if method.upper() == "GET":
                     response = self.session.get(url, headers=headers, timeout=10)
@@ -2527,17 +2531,21 @@ class BookloreClient:
         if shelf_id:
             return shelf_id
 
-        create_response = self._make_request("POST", "/api/v1/shelves", {
+        create_body = {
             "name": shelf_name,
             "icon": "📚",
             "iconType": "PRIME_NG"
-        })
-        if not create_response or create_response.status_code not in (200, 201):
+        }
+        create_response = self._make_request("POST", "/api/v1/shelves", create_body)
+        # Use `is None` here: requests.Response.__bool__ returns False for >=400
+        # status codes, which would cause us to mis-report a real 4xx error as
+        # "No response" with the truthiness check.
+        if create_response is None or create_response.status_code not in (200, 201):
             logger.error(
                 "❌ Failed to create Grimmory shelf '%s' (status=%s, body=%s)",
                 shelf_name,
-                create_response.status_code if create_response else "No response",
-                self._response_text_preview(create_response, limit=300) if create_response else "<unavailable>",
+                create_response.status_code if create_response is not None else "No response",
+                self._response_text_preview(create_response, limit=500) if create_response is not None else "<unavailable>",
             )
             return None
 
@@ -2646,4 +2654,99 @@ class BookloreClient:
             logger.error(f"âŒ Error removing book from Grimmory shelf: {e}")
             return False
 
+    def ensure_shelf_exists(self, shelf_name):
+        """Ensure the named Grimmory shelf exists, creating it if missing.
+
+        Returns the shelf id on success, or None on failure / missing name.
+        Used by the Up Next shelf-watcher so users don't have to manually
+        create the watch shelf in Grimmory before enabling the feature.
+        """
+        if not shelf_name:
+            return None
+        try:
+            return self._get_or_create_shelf_id(shelf_name)
+        except Exception as e:
+            logger.error(f"Failed to ensure Grimmory shelf '{shelf_name}' exists: {e}")
+            return None
+
+    def list_books_on_shelf(self, shelf_name):
+        """Return the list of Grimmory book dicts currently on the named shelf.
+
+        Each returned dict is enriched from the local _book_id_cache so callers
+        get fileName/title/authors fields even when the shelf-books endpoint
+        returns minimal records. Returns an empty list if the shelf does not
+        exist or the request fails.
+        """
+        if not shelf_name:
+            return []
+        try:
+            shelf_id = self._get_shelf_id(shelf_name)
+            if not shelf_id:
+                logger.debug(f"Grimmory: Shelf '{shelf_name}' not found - list_books_on_shelf returning empty")
+                return []
+            response = self._make_request("GET", f"/api/v1/shelves/{shelf_id}/books")
+            if response is None or response.status_code != 200:
+                logger.warning(
+                    "Grimmory: Could not fetch books for shelf '%s' (id=%s) status=%s",
+                    shelf_name, shelf_id,
+                    response.status_code if response is not None else "no-response",
+                )
+                return []
+            data = self._parse_json_response(response, f"Grimmory shelf {shelf_name} books")
+            if isinstance(data, list):
+                raw_books = data
+            elif isinstance(data, dict):
+                raw_books = data.get("content") or data.get("books") or []
+            else:
+                raw_books = []
+
+            enriched = []
+            with self._cache_lock:
+                cache_by_id = dict(self._book_id_cache)
+            for b in raw_books:
+                if not isinstance(b, dict):
+                    continue
+                bid = b.get('id')
+                if bid is None:
+                    continue
+                # Cache keys may be int or str; try both.
+                full = cache_by_id.get(bid) or cache_by_id.get(str(bid))
+                if full:
+                    merged = dict(full)
+                    merged.update({k: v for k, v in b.items() if v is not None})
+                    merged['id'] = bid
+                    enriched.append(merged)
+                else:
+                    enriched.append(b)
+            return enriched
+        except Exception as e:
+            logger.error(f"Error listing books on Grimmory shelf '{shelf_name}': {e}")
+            return []
+
+    def move_between_shelves(self, ebook_filename, from_shelf, to_shelf):
+        """Atomically remove a book from one shelf and add it to another.
+
+        Returns True only if both legs succeed. If the remove leg fails, the add
+        leg is skipped so the book is not left on both shelves.
+        """
+        if not ebook_filename or not from_shelf or not to_shelf:
+            logger.warning("Grimmory: move_between_shelves called with missing arguments")
+            return False
+        if from_shelf == to_shelf:
+            logger.debug(f"Grimmory: move_between_shelves no-op ('{from_shelf}' == '{to_shelf}')")
+            return True
+        if not self.remove_from_shelf(ebook_filename, from_shelf):
+            logger.warning(
+                f"Grimmory: move_between_shelves aborted - remove from '{from_shelf}' failed for "
+                f"{sanitize_log_data(ebook_filename)}"
+            )
+            return False
+        if not self.add_to_shelf(ebook_filename, to_shelf):
+            logger.error(
+                f"Grimmory: move_between_shelves left book off both shelves - remove from "
+                f"'{from_shelf}' succeeded but add to '{to_shelf}' failed for "
+                f"{sanitize_log_data(ebook_filename)}"
+            )
+            return False
+        return True
 

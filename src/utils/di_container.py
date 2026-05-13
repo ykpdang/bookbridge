@@ -30,6 +30,8 @@ from src.services.forge_service import ForgeService
 from src.services.koreader_device_sync_service import KOReaderDeviceSyncService
 from src.services.audio_source_adapters import ABSAudioSourceAdapter, BookLoreAudioSourceAdapter
 from src.services.calibre_identifier_resolver import CalibreIdentifierResolver
+from src.services.book_mapping_service import BookMappingService
+from src.services.shelf_watch_service import ShelfWatchService
 from src.sync_clients.abs_sync_client import ABSSyncClient
 from src.sync_clients.kosync_sync_client import KoSyncSyncClient
 from src.sync_clients.storyteller_sync_client import StorytellerSyncClient
@@ -280,6 +282,30 @@ class Container(containers.DeclarativeContainer):
         StoryGraph=storygraph_sync_client
     )
 
+    # Book mapping helper for shelf-watch auto-matches + ebook-only fallbacks.
+    # Constructed late so it can pull sync_clients (also a Singleton) for Hardcover/StoryGraph automatch.
+    book_mapping_service = providers.Singleton(
+        BookMappingService,
+        database_service=database_service,
+        booklore_client=booklore_client,
+        ebook_parser=ebook_parser,
+        abs_client=abs_client,
+        sync_clients=providers.Dict(
+            Hardcover=hardcover_sync_client,
+            StoryGraph=storygraph_sync_client,
+        ),
+    )
+
+    # Grimmory "Up Next" shelf watcher. SuggestionsService is lazy-imported from
+    # web_server at first use to avoid the module-load-time cycle (web_server
+    # owns the closures the SuggestionsService captures).
+    shelf_watch_service = providers.Singleton(
+        ShelfWatchService,
+        booklore_client=booklore_client,
+        database_service=database_service,
+        book_mapping_service=book_mapping_service,
+    )
+
     # Sync Manager
     sync_manager = providers.Singleton(
         SyncManager,
@@ -296,6 +322,7 @@ class Container(containers.DeclarativeContainer):
         alignment_service=alignment_service,
         library_service=library_service,
         migration_service=migration_service,
+        shelf_watch_service=shelf_watch_service,
         audio_source_adapters=audio_source_adapters,
 
         epub_cache_dir=epub_cache_dir,

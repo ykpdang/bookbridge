@@ -296,6 +296,15 @@ def setup_dependencies(app, test_container=None):
     # Initialize manager and services
     manager = container.sync_manager()
 
+    # Wire the SuggestionsService factory into the shelf-watch singleton.
+    # web_server.py is the `__main__` entry point; if shelf_watch_service tried
+    # `from src.web_server import ...` it would create a second, uninitialized
+    # module instance (with container=None), so we inject the factory here.
+    try:
+        container.shelf_watch_service().set_suggestions_service_factory(_get_suggestions_service)
+    except Exception as e:
+        logger.warning(f"Could not wire shelf_watch_service suggestions factory: {e}")
+
     # Get data directories (now using updated env vars)
     DATA_DIR = container.data_dir()
     EBOOK_DIR = container.books_dir()
@@ -1044,13 +1053,16 @@ def get_searchable_audiobooks(search_term):
     adapters = container.audio_source_adapters() if hasattr(container, "audio_source_adapters") else {}
     results = []
     seen = set()
+    per_adapter_counts = {}
 
     for source_name, adapter in adapters.items():
         try:
             provider_results = adapter.search(search_term)
         except Exception as e:
             logger.warning(f"⚠️ Audiobook search failed for {source_name}: {e}")
+            per_adapter_counts[source_name] = f"error:{type(e).__name__}"
             continue
+        per_adapter_counts[source_name] = len(provider_results) if provider_results else 0
 
         for result in provider_results or []:
             if not isinstance(result, AudioResult):
@@ -1062,6 +1074,10 @@ def get_searchable_audiobooks(search_term):
             results.append(result)
 
     results.sort(key=lambda item: (item.title or item.display_name or "").lower())
+    logger.debug(
+        "get_searchable_audiobooks(query=%r): adapters=%s, deduped_total=%d",
+        search_term, per_adapter_counts, len(results),
+    )
     return results
 
 
@@ -4056,6 +4072,29 @@ def suggestions_page():
                             sanitize_log_data(item.get('audio_title') or item.get('audio_source_id')),
                             err_msg,
                         )
+                    elif saved_book:
+                        # Approving a shelf-watch suggestion needs the Up Next
+                        # leg of the shelf move; _create_or_update_booklore_audio_mapping
+                        # only adds to Kobo, it does not remove from Up Next.
+                        try:
+                            sw_pending = database_service.get_pending_suggestion(item.get('audio_source_id') or saved_book.abs_id)
+                        except Exception:
+                            sw_pending = None
+                        if (
+                            sw_pending
+                            and getattr(sw_pending, 'origin', None) == 'shelf_watch'
+                            and container.booklore_client().is_configured()
+                        ):
+                            try:
+                                meta = sw_pending.origin_metadata or {}
+                                grimmory_filename = meta.get('grimmory_filename')
+                                watch_shelf = os.environ.get('BOOKLORE_SHELF_WATCH_NAME', 'Up Next')
+                                if grimmory_filename:
+                                    container.booklore_client().remove_from_shelf(
+                                        grimmory_filename, watch_shelf,
+                                    )
+                            except Exception as bl_err:
+                                logger.warning(f"Shelf-watch approval Up Next removal failed: {bl_err}")
                     continue
 
                 ebook_filename = item['ebook_filename']
@@ -4149,7 +4188,33 @@ def suggestions_page():
 
                 if not str(item['abs_id']).startswith('booklore:'):
                     container.abs_client().add_to_collection(item['abs_id'], ABS_COLLECTION_NAME)
-                if container.booklore_client().is_configured():
+
+                # If this suggestion originated from the shelf-watch flow, do a full
+                # shelf MOVE (Up Next -> Kobo) rather than just an add. The origin
+                # metadata carries the Grimmory filename which is the canonical key
+                # for shelf operations even if the user picked a different ebook
+                # source during approval.
+                shelf_watch_pending = None
+                try:
+                    shelf_watch_pending = database_service.get_pending_suggestion(item['abs_id'])
+                except Exception:
+                    shelf_watch_pending = None
+                if (
+                    shelf_watch_pending
+                    and getattr(shelf_watch_pending, 'origin', None) == 'shelf_watch'
+                    and container.booklore_client().is_configured()
+                ):
+                    try:
+                        meta = shelf_watch_pending.origin_metadata or {}
+                        grimmory_filename = meta.get('grimmory_filename')
+                        watch_shelf = os.environ.get('BOOKLORE_SHELF_WATCH_NAME', 'Up Next')
+                        if grimmory_filename:
+                            container.booklore_client().move_between_shelves(
+                                grimmory_filename, watch_shelf, BOOKLORE_SHELF_NAME,
+                            )
+                    except Exception as bl_err:
+                        logger.warning(f"Shelf-watch approval move failed: {bl_err}")
+                elif container.booklore_client().is_configured():
                     shelf_filename = original_ebook_filename or ebook_filename
                     container.booklore_client().add_to_shelf(shelf_filename, BOOKLORE_SHELF_NAME)
                 if container.storyteller_client().is_configured():
@@ -6340,6 +6405,7 @@ if __name__ == '__main__':
         database_service=database_service,
         sync_manager=manager,
         sync_clients_dict=container.sync_clients(),
+        shelf_watch_service=container.shelf_watch_service(),
     )
     poller_thread = threading.Thread(target=client_poller.start, daemon=True)
     poller_thread.start()

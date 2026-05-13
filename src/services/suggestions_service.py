@@ -355,6 +355,153 @@ class SuggestionsService:
             "matches": matches,
         }
 
+    def _build_audiobook_candidate_pool(self) -> List[dict]:
+        """Build searchable audiobook candidates once per shelf-watch scan.
+
+        Mirrors `_build_ebook_candidate_pool` but inverted: callers anchor on a
+        known ebook and we score audiobook candidates against it.
+        """
+        try:
+            audiobooks = self.get_audiobooks_conditionally()
+        except Exception as e:
+            self.logger.warning(f"Shelf-watch scan failed to load audiobook candidate pool: {e}")
+            return []
+
+        raw_count = len(audiobooks) if audiobooks else 0
+        prepared = []
+        skipped_no_bridge = 0
+        skipped_no_title = 0
+        for ab in audiobooks or []:
+            audio_source = self._audio_source(ab)
+            audio_source_id = self._audio_source_id(ab)
+            bridge_key = self._audio_bridge_key(ab)
+            audio_title = self._audio_title(ab)
+            if not bridge_key:
+                skipped_no_bridge += 1
+                continue
+            if not audio_title:
+                skipped_no_title += 1
+                continue
+            audio_author = self._audio_author(ab)
+            audio_duration = self._audio_duration(ab)
+            audio_cover_url = self._audio_cover_url(ab, audio_source, audio_source_id)
+            prepared.append({
+                "audio_source": audio_source,
+                "audio_source_id": audio_source_id,
+                "bridge_key": bridge_key,
+                "audio_title": audio_title,
+                "audio_author": audio_author,
+                "audio_duration": audio_duration,
+                "audio_cover_url": audio_cover_url,
+                "audio_provider_book_id": str(ab.get("audio_provider_book_id") or audio_source_id or ""),
+                "audio_provider_file_id": str(ab.get("audio_provider_file_id") or ""),
+                "search_text": f"{audio_title} {audio_author}".strip(),
+            })
+        self.logger.info(
+            "Shelf-watch candidate pool: raw=%d kept=%d skipped_no_bridge=%d skipped_no_title=%d",
+            raw_count, len(prepared), skipped_no_bridge, skipped_no_title,
+        )
+        return prepared
+
+    @staticmethod
+    def _ebook_anchor_fields(ebook: dict) -> dict:
+        """Extract title/author/filename/id from a Grimmory ebook dict (lenient on key names)."""
+        title = (ebook.get("title") or ebook.get("name") or "").strip()
+        author = (
+            ebook.get("author")
+            or ebook.get("authors")
+            or ""
+        )
+        if isinstance(author, list):
+            author = ", ".join(str(a) for a in author if a)
+        author = str(author or "").strip()
+        filename = (ebook.get("filename") or ebook.get("fileName") or ebook.get("name") or "").strip()
+        grimmory_id = ebook.get("grimmory_id") or ebook.get("id") or ebook.get("book_id")
+        if grimmory_id is not None:
+            grimmory_id = str(grimmory_id).strip()
+        return {
+            "title": title,
+            "author": author,
+            "filename": filename,
+            "grimmory_id": grimmory_id or "",
+        }
+
+    def _scan_single_ebook(self, ebook: dict, candidate_pool: List[dict]) -> Optional[dict]:
+        """Reverse counterpart of `_scan_single_audiobook` for the shelf-watch flow.
+
+        Takes a Grimmory ebook as the anchor and scans audiobook candidates,
+        applying the same `rapidfuzz.fuzz.token_sort_ratio` scoring formula and
+        60-point floor. Returns None when no candidate clears the floor.
+        """
+        from rapidfuzz import fuzz
+
+        anchor = self._ebook_anchor_fields(ebook)
+        if not anchor["title"]:
+            self.logger.debug(
+                f"Shelf-watch scan: skipping '{anchor.get('filename')}' — no anchor title"
+            )
+            return None
+
+        if not candidate_pool:
+            self.logger.debug(
+                f"Shelf-watch scan: '{anchor['title']}' — candidate pool empty"
+            )
+            return None
+
+        ebook_title = anchor["title"]
+        ebook_author = anchor["author"]
+
+        matches = []
+        best_overall = None  # Track the highest-scoring candidate even if below the floor.
+        for cand in candidate_pool:
+            cand_title = cand.get("audio_title") or ""
+            cand_author = cand.get("audio_author") or ""
+
+            title_score = float(fuzz.token_sort_ratio(ebook_title, cand_title))
+            if ebook_author:
+                author_score = float(fuzz.token_sort_ratio(ebook_author, cand_author)) if cand_author else 0.0
+                score = (title_score * 0.7) + (author_score * 0.3)
+            else:
+                score = title_score
+
+            if best_overall is None or score > best_overall[0]:
+                best_overall = (score, cand_title, cand_author)
+
+            if score < 60:
+                continue
+
+            matches.append({
+                "audio_source": cand.get("audio_source", ""),
+                "audio_source_id": cand.get("audio_source_id", ""),
+                "bridge_key": cand.get("bridge_key", ""),
+                "audio_title": cand_title,
+                "audio_author": cand_author,
+                "audio_duration": cand.get("audio_duration"),
+                "audio_cover_url": cand.get("audio_cover_url", ""),
+                "audio_provider_book_id": cand.get("audio_provider_book_id", ""),
+                "audio_provider_file_id": cand.get("audio_provider_file_id", ""),
+                "score": round(score, 1),
+            })
+
+        if not matches:
+            if best_overall is not None:
+                self.logger.info(
+                    f"Shelf-watch scan: '{ebook_title}' / '{ebook_author}' — "
+                    f"no audio above 60-point floor. Closest: '{best_overall[1]}' / "
+                    f"'{best_overall[2]}' score={round(best_overall[0], 1)}"
+                )
+            else:
+                self.logger.info(
+                    f"Shelf-watch scan: '{ebook_title}' — pool empty after candidate filtering"
+                )
+            return None
+
+        matches.sort(key=lambda m: m.get("score", 0), reverse=True)
+        return {
+            "ebook_anchor": anchor,
+            "matches": matches,
+        }
+
     def scan_library_suggestions(
         self,
         cached_suggestions_by_abs: Optional[Dict[str, dict]] = None,

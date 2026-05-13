@@ -304,10 +304,12 @@ class PendingSuggestion(Base):
     matches_json = Column(Text)
     status = Column(String(20), default='pending')
     created_at = Column(DateTime, default=datetime.utcnow)
+    origin = Column(String(50), nullable=True, index=True)
+    origin_metadata_json = Column(Text, nullable=True)
 
     def __init__(self, source_id: str, title: str, author: str = None,
                  cover_url: str = None, matches_json: str = "[]", status: str = 'pending',
-                 source: str = None):
+                 source: str = None, origin: str = None, origin_metadata_json: str = None):
         self.source = source or 'abs'
         self.source_id = source_id
         self.title = title
@@ -316,6 +318,8 @@ class PendingSuggestion(Base):
         self.matches_json = matches_json
         self.status = status
         self.created_at = datetime.utcnow()
+        self.origin = origin
+        self.origin_metadata_json = origin_metadata_json
 
     @property
     def matches(self):
@@ -324,7 +328,15 @@ class PendingSuggestion(Base):
             return json.loads(self.matches_json) if self.matches_json else []
         except json.JSONDecodeError:
             return []
-    
+
+    @property
+    def origin_metadata(self):
+        import json
+        try:
+            return json.loads(self.origin_metadata_json) if self.origin_metadata_json else {}
+        except json.JSONDecodeError:
+            return {}
+
     @property
     def audiobook_count(self):
         """Count only audiobook matches, excluding ebook entries."""
@@ -332,6 +344,32 @@ class PendingSuggestion(Base):
 
     def __repr__(self):
         return f"<PendingSuggestion(id={self.id}, title='{self.title}', status='{self.status}')>"
+
+
+class ShelfWatchScan(Base):
+    """
+    Throttle / history row for the Grimmory "Up Next" shelf watcher.
+    One row per Grimmory book that has been considered for auto-matching.
+    """
+    __tablename__ = 'shelf_watch_scans'
+
+    grimmory_book_id = Column(String(255), primary_key=True)
+    grimmory_filename = Column(String(500), nullable=False)
+    last_scan_at = Column(DateTime, nullable=False, index=True)
+    last_top_score = Column(Float, nullable=True)
+    last_status = Column(String(50), nullable=True)
+
+    def __init__(self, grimmory_book_id: str, grimmory_filename: str,
+                 last_scan_at: datetime = None, last_top_score: float = None,
+                 last_status: str = None):
+        self.grimmory_book_id = grimmory_book_id
+        self.grimmory_filename = grimmory_filename
+        self.last_scan_at = last_scan_at or datetime.utcnow()
+        self.last_top_score = last_top_score
+        self.last_status = last_status
+
+    def __repr__(self):
+        return f"<ShelfWatchScan(book_id='{self.grimmory_book_id}', status='{self.last_status}')>"
 
 
 class Setting(Base):

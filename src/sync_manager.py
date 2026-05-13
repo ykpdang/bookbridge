@@ -73,6 +73,7 @@ class SyncManager:
                  alignment_service: AlignmentService = None,
                  library_service: LibraryService = None,
                  migration_service: MigrationService = None,
+                 shelf_watch_service=None,
                  audio_source_adapters: dict | None = None,
                  epub_cache_dir=None,
                  data_dir=None,
@@ -92,6 +93,7 @@ class SyncManager:
         self.alignment_service = alignment_service
         self.library_service = library_service
         self.migration_service = migration_service
+        self.shelf_watch_service = shelf_watch_service
         self.audio_source_adapters = audio_source_adapters or {}
         
         self.data_dir = data_dir
@@ -1869,7 +1871,22 @@ class SyncManager:
         if self.library_service and (time.time() - self._last_library_sync > 900):
             self.library_service.sync_library_books()
             self._last_library_sync = time.time()
-    
+
+        # Grimmory "Up Next" shelf watch — runs only in global poll mode and only
+        # on full cycles (not Instant Sync). Custom mode runs the check from
+        # ClientPoller instead so we don't double-fire.
+        # getattr handles older tests that build SyncManager via __new__ and skip __init__.
+        shelf_watch = getattr(self, 'shelf_watch_service', None)
+        if (
+            shelf_watch
+            and not target_abs_id
+            and os.environ.get('BOOKLORE_POLL_MODE', 'global').lower() == 'global'
+        ):
+            try:
+                shelf_watch.process_watch_shelf()
+            except Exception as e:
+                logger.warning(f"Shelf-watch run failed: {e}")
+
         # Get active books directly from database service
         active_books = []
         if target_abs_id:

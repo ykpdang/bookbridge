@@ -26,6 +26,7 @@ from .models import (
     ReadingSession,
     KOReaderBookStat,
     KOReaderPageStat,
+    ShelfWatchScan,
     Base,
 )
 
@@ -703,6 +704,19 @@ class DatabaseService:
                 session.expunge(book)
             return book
 
+    def get_book_by_ebook_source(self, ebook_source: str, ebook_source_id: str) -> Optional['Book']:
+        """Find a book by its ebook source + source id (e.g. BookLore/<grimmory_id>)."""
+        if not ebook_source or not ebook_source_id:
+            return None
+        with self.get_session() as session:
+            book = session.query(Book).filter(
+                Book.ebook_source == ebook_source,
+                Book.ebook_source_id == str(ebook_source_id),
+            ).first()
+            if book:
+                session.expunge(book)
+            return book
+
     def get_kosync_doc_by_filename(self, filename: str) -> Optional[KosyncDocument]:
         """Find a KOSync document by its associated filename."""
         with self.get_session() as session:
@@ -751,7 +765,8 @@ class DatabaseService:
             ).first()
 
             if existing:
-                for attr in ['source', 'title', 'author', 'cover_url', 'matches_json', 'status']:
+                for attr in ['source', 'title', 'author', 'cover_url', 'matches_json',
+                             'status', 'origin', 'origin_metadata_json']:
                     if hasattr(suggestion, attr):
                         setattr(existing, attr, getattr(suggestion, attr))
                 session.flush()
@@ -815,6 +830,48 @@ class DatabaseService:
                 suggestion.status = 'ignored'
                 return True
             return False
+
+    # ShelfWatchScan operations (Grimmory "Up Next" throttle table)
+    def get_shelf_watch_scan(self, grimmory_book_id: str) -> Optional[ShelfWatchScan]:
+        """Look up the most recent shelf-watch scan record for a Grimmory book."""
+        with self.get_session() as session:
+            row = session.query(ShelfWatchScan).filter(
+                ShelfWatchScan.grimmory_book_id == str(grimmory_book_id)
+            ).first()
+            if row:
+                session.expunge(row)
+            return row
+
+    def upsert_shelf_watch_scan(self, grimmory_book_id: str, grimmory_filename: str,
+                                top_score: Optional[float], status: str) -> ShelfWatchScan:
+        """Insert or update the throttle row for a Grimmory book. Sets last_scan_at = utcnow."""
+        gid = str(grimmory_book_id)
+        with self.get_session() as session:
+            existing = session.query(ShelfWatchScan).filter(
+                ShelfWatchScan.grimmory_book_id == gid
+            ).first()
+            now = datetime.utcnow()
+            if existing:
+                existing.grimmory_filename = grimmory_filename
+                existing.last_scan_at = now
+                existing.last_top_score = top_score
+                existing.last_status = status
+                session.flush()
+                session.refresh(existing)
+                session.expunge(existing)
+                return existing
+            row = ShelfWatchScan(
+                grimmory_book_id=gid,
+                grimmory_filename=grimmory_filename,
+                last_scan_at=now,
+                last_top_score=top_score,
+                last_status=status,
+            )
+            session.add(row)
+            session.flush()
+            session.refresh(row)
+            session.expunge(row)
+            return row
 
     def clear_stale_suggestions(self) -> int:
         """
