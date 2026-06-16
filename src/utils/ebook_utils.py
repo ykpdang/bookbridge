@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import glob
+import posixpath
 import threading
 import rapidfuzz
 import zipfile
@@ -240,6 +241,43 @@ class EbookParser:
             logger.error(f"❌ Error extracting cover from '{filepath}': {e}")
             return False
 
+    def _build_href_resolver(self, str_path):
+        """Return a fn mapping an ebooklib OPF-relative href to its full archive
+        path.
+
+        ebooklib's `item.get_name()` is relative to the OPF file. When the OPF
+        lives in a subdirectory (e.g. `OEBPS/package.opf`), the name omits that
+        prefix (`xhtml/chapter3.xhtml`), but Readium/Storyteller key their
+        reading-order and stored positions on the full archive path
+        (`OEBPS/xhtml/chapter3.xhtml`). Pushing the bare name leaves the
+        position unresolvable, so the reader opens at the cover. Resolve against
+        the OPF directory (verified against the zip entries) so our hrefs match.
+        """
+        opf_dir = ""
+        zip_names = set()
+        try:
+            with zipfile.ZipFile(str_path) as zf:
+                zip_names = set(zf.namelist())
+                container = zf.read("META-INF/container.xml").decode("utf-8", "replace")
+                match = re.search(r'full-path="([^"]+)"', container)
+                if match:
+                    opf_dir = posixpath.dirname(match.group(1))
+        except Exception as e:
+            logger.debug(f"href resolver: could not read container for '{str_path}': {e}")
+
+        def resolve(name):
+            if not name:
+                return name
+            if name in zip_names:
+                return name
+            if opf_dir:
+                candidate = posixpath.normpath(posixpath.join(opf_dir, name))
+                if not zip_names or candidate in zip_names:
+                    return candidate
+            return name
+
+        return resolve
+
     def extract_text_and_map(self, filepath, progress_callback=None):
         """
         Used for fuzzy matching and general content extraction.
@@ -259,6 +297,7 @@ class EbookParser:
 
         try:
             book = epub.read_epub(str_path)
+            href_resolver = self._build_href_resolver(str_path)
             full_text_parts = []
             spine_map = []
             current_idx = 0
@@ -283,7 +322,7 @@ class EbookParser:
                         "end": end,
                         "char_len": length,
                         "spine_index": i + 1,
-                        "href": item.get_name(),
+                        "href": href_resolver(item.get_name()),
                         "content": item.get_content()
                     })
 
