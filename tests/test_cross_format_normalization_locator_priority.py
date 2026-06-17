@@ -778,6 +778,7 @@ def test_sync_cycle_skips_deadband_rollback_to_high_conf_kosync():
     manager.delta_chars_thresh = 2000
     manager._sync_cycle_ebook_cache = {}
     manager._sync_cycle_local_epub_cache = {}
+    manager._storyteller_epub_ensure_attempted = set()
     manager._last_library_sync = 0
     manager.library_service = None
     manager.booklore_client = None

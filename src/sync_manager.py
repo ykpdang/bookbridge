@@ -128,6 +128,9 @@ class SyncManager:
         self._suggestion_lock = threading.Lock()
         self._sync_cycle_ebook_cache: dict[str, tuple[str, int]] = {}
         self._sync_cycle_local_epub_cache: dict[str, Path | None] = {}
+        # Storyteller UUIDs whose slim ReadAloud EPUB materialization was already
+        # attempted this cycle (avoids re-downloading on every resolver call).
+        self._storyteller_epub_ensure_attempted: set[str] = set()
         self._post_cycle_callbacks: list = []
         # StoryGraph idle-cooldown tracker: {abs_id: {'pct': float, 'changed_at': float}}.
         # In-memory only; on restart the first observation reseeds 'changed_at', so a post
@@ -187,6 +190,23 @@ class SyncManager:
             candidate = f"storyteller_{storyteller_uuid}.epub"
             if self._get_local_epub(candidate):
                 return candidate
+
+            # Materialize a slim (audio-stripped) ReadAloud EPUB so Storyteller
+            # locator fragments resolve against the media-overlay (SMIL) ids even
+            # when STORYTELLER_NO_EPUB_CACHE (a Forge-only setting) is enabled.
+            # Attempt at most once per cycle per book to avoid repeat downloads.
+            if (
+                self.storyteller_client
+                and storyteller_uuid not in self._storyteller_epub_ensure_attempted
+            ):
+                self._storyteller_epub_ensure_attempted.add(storyteller_uuid)
+                if self.storyteller_client.ensure_readaloud_epub_cached(
+                    storyteller_uuid, self.epub_cache_dir
+                ):
+                    # Drop the negative result cached by the miss above.
+                    self._sync_cycle_local_epub_cache.pop(candidate, None)
+                    if self._get_local_epub(candidate):
+                        return candidate
 
         return current
 
@@ -2015,6 +2035,7 @@ class SyncManager:
         # Clear caches at start of cycle
         self._sync_cycle_ebook_cache.clear()
         self._sync_cycle_local_epub_cache.clear()
+        self._storyteller_epub_ensure_attempted.clear()
         storyteller_client = self.sync_clients.get('Storyteller')
         if storyteller_client and hasattr(storyteller_client, 'storyteller_client'):
             if hasattr(storyteller_client.storyteller_client, 'clear_cache'):
