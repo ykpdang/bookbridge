@@ -312,6 +312,48 @@ class TestKosyncEndpoints(unittest.TestCase):
         data_bn = response_bn.get_json()
         self.assertIsInstance(data_bn['timestamp'], int)
 
+    def test_put_links_unmapped_hash_to_book_via_filename_sibling(self):
+        """A device hash unknown to the book but sharing the ebook filename should
+        link to the existing book on PUT instead of falling to auto-discovery."""
+        from src import web_server
+        db = web_server.database_service
+
+        primary_hash = 'a1' * 16
+        device_hash = 'b2' * 16
+
+        db.save_book(Book(
+            abs_id="abs-sib",
+            abs_title="Shared Title",
+            ebook_filename="sibling.epub",
+            kosync_doc_id=primary_hash,
+            status="active",
+        ))
+        # The device hash was seen by a prior scan/GET, so its filename is cached but
+        # it is not yet linked to any book.
+        db.save_kosync_document(KosyncDocument(
+            document_hash=device_hash,
+            filename="sibling.epub",
+        ))
+
+        response = self.client.put(
+            '/syncs/progress',
+            headers=self.auth_headers,
+            json={
+                'document': device_hash,
+                'progress': '/body/test',
+                'percentage': 0.42,
+                'device': 'go7',
+                'device_id': 'go7',
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        linked = db.get_kosync_document(device_hash)
+        self.assertIsNotNone(linked)
+        self.assertEqual(linked.linked_abs_id, "abs-sib")
+        # It linked to the existing book rather than auto-creating an ebook-only mapping.
+        self.assertIsNone(db.get_book("ebook-" + device_hash[:16]))
+
     def test_get_progress_returns_502_for_missing(self):
         """Test that GET returns 502 (not 404) for missing document."""
         response = self.client.get(

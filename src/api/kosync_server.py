@@ -1214,8 +1214,14 @@ def kosync_put_progress():
         linked_book = _database_service.get_book(kosync_doc.linked_abs_id)
     else:
         linked_book = _database_service.get_book_by_kosync_id(doc_hash)
+        if not linked_book:
+            # Mirror the GET path: an unlinked device hash may belong to an
+            # already-mapped book (e.g. a different EPUB build of the same title),
+            # resolvable via a filename sibling. Try that before falling through to
+            # auto-discovery so we link instead of creating a duplicate mapping.
+            linked_book = _resolve_book_by_sibling_hash(doc_hash, existing_doc=kosync_doc)
         if linked_book:
-            _database_service.link_kosync_document(doc_hash, linked_book.abs_id)
+            _register_hash_for_book(doc_hash, linked_book)
 
     if linked_book and not is_internal:
         _record_user_kosync_state(linked_book, percentage, progress, now, request_user_id)

@@ -1054,6 +1054,30 @@ class DatabaseService:
                 return True
             return False
 
+    def ensure_linked_kosync_document(self, document_hash: str, abs_id: str) -> bool:
+        """Ensure a KosyncDocument row exists for ``document_hash`` and is linked to ``abs_id``.
+
+        Upsert variant of :meth:`link_kosync_document`: creates the row when it is
+        missing (instead of returning False), and (re)links it when it points
+        elsewhere. Lets a manually-pinned or device-sync-reconciled hash become a
+        durable, resolvable sibling so a later primary-pointer change can never
+        strand it. Returns True if a row was created or its link changed.
+        """
+        if not document_hash or not abs_id:
+            return False
+        with self.get_session() as session:
+            doc = session.query(KosyncDocument).filter(
+                KosyncDocument.document_hash == document_hash
+            ).first()
+            if doc is None:
+                session.add(KosyncDocument(document_hash=document_hash, linked_abs_id=abs_id))
+                return True
+            if doc.linked_abs_id != abs_id:
+                doc.linked_abs_id = abs_id
+                doc.last_updated = datetime.utcnow()
+                return True
+            return False
+
     def unlink_kosync_document(self, document_hash: str) -> bool:
         """Remove the ABS book link from a KOSync document."""
         with self.get_session() as session:

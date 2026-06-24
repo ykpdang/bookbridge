@@ -608,6 +608,11 @@ class TestMultiUserAuth(unittest.TestCase):
             302,
         )
         self.assertEqual(self.svc.get_book("reg-book").kosync_doc_id, "new-hash")
+        # The pinned hash is registered as a durable linked KosyncDocument sibling so the
+        # device-sync reconciler / re-match can't strand it (issue #285).
+        linked_doc = self.svc.get_kosync_document("new-hash")
+        self.assertIsNotNone(linked_doc)
+        self.assertEqual(linked_doc.linked_abs_id, "reg-book")
 
         resp = self.client.post('/api/storyteller/link/reg-book', json={'uuid': 'none'})
         self.assertEqual(resp.status_code, 200)
