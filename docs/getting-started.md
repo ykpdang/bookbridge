@@ -47,8 +47,8 @@ If you plan to use them, also keep these handy:
 ## Step 2: Prepare a working directory
 
 ```bash
-mkdir ~/abs-kosync
-cd ~/abs-kosync
+mkdir ~/bookbridge
+cd ~/bookbridge
 mkdir data
 ```
 
@@ -59,8 +59,8 @@ mkdir data
 ```yaml title="docker-compose.yml"
 services:
   abs-kosync:
-    container_name: abs_kosync
-    image: ghcr.io/cporcellijr/abs-kosync-bridge:latest
+    container_name: bookbridge
+    image: ghcr.io/cporcellijr/bookbridge:latest
     restart: unless-stopped
     ports:
       - "8080:5757"

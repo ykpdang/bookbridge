@@ -28,7 +28,7 @@ def _get_commit_count():
         pass
 
     # Fallback for runtime environments without a mounted .git directory.
-    repo = os.environ.get("APP_REPO", "cporcellijr/abs-kosync-bridge")
+    repo = os.environ.get("APP_REPO", "cporcellijr/bookbridge")
     branch = os.environ.get("APP_BRANCH", "dev")
     try:
         response = requests.get(
@@ -75,7 +75,7 @@ def get_update_status():
 
     try:
         r = requests.get(
-            "https://api.github.com/repos/cporcellijr/abs-kosync-bridge/releases/latest",
+            "https://api.github.com/repos/cporcellijr/bookbridge/releases/latest",
             timeout=5,
             headers={"Accept": "application/vnd.github+json"}
         )

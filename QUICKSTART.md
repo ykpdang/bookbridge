@@ -1,4 +1,4 @@
-# Quick Start Guide - ABS-KoSync Enhanced
+# Quick Start Guide - BookBridge
 
 ## Goal
 
@@ -51,7 +51,7 @@ Use this compose file:
 services:
   abs-kosync:
     container_name: abs_kosync
-    image: ghcr.io/cporcellijr/abs-kosync-bridge:latest
+    image: ghcr.io/cporcellijr/bookbridge:latest
     restart: unless-stopped
     ports:
       - "8080:5757"

@@ -1,24 +1,24 @@
-# ABS-KoSync Enhanced
+# BookBridge
 
 <div align="center">
 
-![ABS-KoSync Bridge](static/images/logo.png)
+![BookBridge](static/images/logo.png)
 
 **The ultimate bridge for cross-platform reading and listening synchronization.**
 
-[![Documentation](https://img.shields.io/badge/docs-live-blue)](https://cporcellijr.github.io/abs-kosync-bridge/)
-[![License](https://img.shields.io/github/license/cporcellijr/abs-kosync-bridge)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/cporcellijr/abs-kosync-bridge)](https://github.com/cporcellijr/abs-kosync-bridge/releases)
+[![Documentation](https://img.shields.io/badge/docs-live-blue)](https://cporcellijr.github.io/bookbridge/)
+[![License](https://img.shields.io/github/license/cporcellijr/bookbridge)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/cporcellijr/bookbridge)](https://github.com/cporcellijr/bookbridge/releases)
 
 ---
 
-### 📚 [Read the Full Documentation](https://cporcellijr.github.io/abs-kosync-bridge/)
+### 📚 [Read the Full Documentation](https://cporcellijr.github.io/bookbridge/)
 
 </div>
 
 ## 📖 What is it?
 
-**ABS-KoSync Enhanced** is a powerful synchronization engine that bridges the gap between **Audiobookshelf** and **KOReader**. It ensures your reading and listening progress is always perfectly aligned, whether you're on your e-reader or listening on the go.
+**BookBridge** is a powerful synchronization engine that bridges the gap between **Audiobookshelf** and **KOReader**. It ensures your reading and listening progress is always perfectly aligned, whether you're on your e-reader or listening on the go.
 
 ## ✨ Key Features
 
@@ -44,7 +44,7 @@
 services:
   abs-kosync:
     container_name: abs_kosync
-    image: ghcr.io/cporcellijr/abs-kosync-bridge:latest
+    image: ghcr.io/cporcellijr/bookbridge:latest
     restart: unless-stopped
     ports:
       - "8080:5757"
@@ -67,7 +67,7 @@ If you want KOReader to download and manage bridge-provided books for you, an op
 
 If you use that plugin, Grimmory shelf settings in the bridge can also shape the KOReader collections it creates.
 
-For full installation instructions, checking logs, and advanced configuration, please visit the **[Documentation Site](https://cporcellijr.github.io/abs-kosync-bridge/)**.
+For full installation instructions, checking logs, and advanced configuration, please visit the **[Documentation Site](https://cporcellijr.github.io/bookbridge/)**.
 
 ---
 

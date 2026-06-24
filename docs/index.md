@@ -1,4 +1,4 @@
-# ABS-KoSync Enhanced
+# BookBridge
 
 <!-- markdownlint-disable MD033 -->
 <div align="center">
@@ -6,7 +6,7 @@
 **The ultimate bridge for cross-platform reading and listening synchronization.**
 
 [Getting Started](getting-started.md){ .md-button .md-button--primary }
-[View on GitHub](https://github.com/cporcellijr/abs-kosync-bridge){ .md-button }
+[View on GitHub](https://github.com/cporcellijr/bookbridge){ .md-button }
 
 </div>
 <!-- markdownlint-enable MD033 -->
@@ -15,7 +15,7 @@
 
 ## What is it?
 
-**ABS-KoSync Enhanced** is a self-hosted sync engine for audiobooks and ebooks. It keeps your reading and listening position aligned across multiple apps, whether the source is Audiobookshelf, Grimmory, KOReader, or Storyteller.
+**BookBridge** is a self-hosted sync engine for audiobooks and ebooks. It keeps your reading and listening position aligned across multiple apps, whether the source is Audiobookshelf, Grimmory, KOReader, or Storyteller.
 
 ### Five-Way Synchronization
 

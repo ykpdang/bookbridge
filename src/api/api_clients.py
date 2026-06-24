@@ -623,15 +623,15 @@ class ABSClient:
         play_url = f"{self.base_url}/api/items/{abs_id}/play"
         play_payload = {
             "deviceInfo": {
-                "id": "abs-kosync-bot",
-                "deviceId": "abs-kosync-bot",
-                "clientName": "ABS-KoSync-Bridge",
+                "id": "bookbridge-bot",
+                "deviceId": "bookbridge-bot",
+                "clientName": "BookBridge",
                 "clientVersion": "1.0",
-                "manufacturer": "ABS-KoSync",
-                "model": "Bridge",
+                "manufacturer": "BookBridge",
+                "model": "BookBridge",
                 "sdkVersion": "1.0"
             },
-            "mediaPlayer": "ABS-KoSync-Bridge",
+            "mediaPlayer": "BookBridge",
             "supportedMimeTypes": ["audio/mpeg", "audio/mp4"],
             "forceDirectPlay": True,
             "forceTranscode": False

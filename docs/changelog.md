@@ -1,6 +1,6 @@
 # Changelog
 
-For the full history of changes, please refer to the **[GitHub Releases](https://github.com/cporcellijr/abs-kosync-bridge/releases)** page.
+For the full history of changes, please refer to the **[GitHub Releases](https://github.com/cporcellijr/bookbridge/releases)** page.
 
 ---
 
