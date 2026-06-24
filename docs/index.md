@@ -46,6 +46,7 @@
 
 ### Management Web UI
 
+- **Multiple readers** with their own sign-in, their own service logins, and their own progress — each person sees only the books they are reading.
 - **Dashboard** for live sync status, reading session details, direct service links, and source badges.
 - **Add Book** for ABS, Grimmory, Storyteller, or ebook-only matching flows.
 - **Batch Match** for queue-based review and bulk linking.

@@ -93,7 +93,9 @@ Press `Ctrl+C` when you are done watching.
 
 ## Step 5: Finish setup in the Web UI
 
-Open **http://localhost:8080** and go to **Settings**.
+Open **http://localhost:8080**. The first time, you will be asked to create your account — choose a username and password. This becomes your main account.
+
+Then go to **Settings**.
 
 Add your:
 
@@ -114,6 +116,8 @@ If you are setting up an ebook-only or maintenance-focused install, you can ente
 If you mounted Storyteller assets, set **Storyteller Assets Path** to `/storyteller` and not `/storyteller/assets`.
 
 Save settings and wait a moment for the app to come back.
+
+Sharing with more than one reader? Your main account can add other people from **Settings -> Users**. Each reader signs in to their own dashboard, enters their own service logins, and only sees the books they are reading.
 
 ---
 

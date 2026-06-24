@@ -23,6 +23,7 @@
 ## ✨ Key Features
 
 - **Five-Way Sync**: Syncs Audiobookshelf, KOReader, Storyteller, Grimmory, and Hardcover.
+- **Multiple Readers**: Give each person their own sign-in, their own service logins, and their own progress — everyone sees only the books they are reading, even on a shared book.
 - **Flexible Match Flows**: Link ABS or Grimmory audiobooks, or create ebook-only links when you only want text sync.
 - **Flexible Setup**: You can intentionally turn Audiobookshelf off for ebook-only or maintenance-focused setups.
 - **Dashboard Session Details**: See recent reading or listening session summaries right on the dashboard cards.

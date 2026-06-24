@@ -113,19 +113,23 @@ docker compose logs -f
 
 ---
 
-## Step 5: Finish configuration in the Web UI
+## Step 5: Create your account and finish configuration
 
-1. Open `http://localhost:8080/settings`.
-2. Enter your **Audiobookshelf Server URL**, **API Token**, and **Library ID**.
-3. Add any optional services you want to use:
+1. Open `http://localhost:8080`. The first time you open it, you will be asked to create your account — choose a username and password. This becomes your main account.
+2. Open **Settings**.
+3. Enter your **Audiobookshelf Server URL**, **API Token**, and **Library ID**.
+4. Add any optional services you want to use:
    - KOSync
    - Grimmory or BookOrbit
    - Storyteller
    - Hardcover
-4. Use the **Test** button on any service section if you want to check a service before saving.
-5. If you mounted Storyteller assets, set **Storyteller Assets Path** to `/storyteller`.
-6. If you are setting up an ebook-only or maintenance-focused install, you can enter `disabled` in the ABS URL or token field instead of connecting Audiobookshelf.
-7. Click **Save Settings** and wait for the app to come back.
+5. Use the **Test** button on any service section if you want to check a service before saving.
+6. If you mounted Storyteller assets, set **Storyteller Assets Path** to `/storyteller`.
+7. If you are setting up an ebook-only or maintenance-focused install, you can enter `disabled` in the ABS URL or token field instead of connecting Audiobookshelf.
+8. Click **Save Settings** and wait for the app to come back.
+
+!!! tip "Sharing with more than one reader?"
+    Your main account can add other people from **Settings -> Users**. Each reader signs in to their own dashboard, enters their own service logins, and only sees the books they are reading — so everyone keeps their own progress, even on the same book.
 
 ---
 

@@ -4,7 +4,27 @@
 
 All notable changes to ABS-KoSync Enhanced will be documented in this file.
 
-## [Unreleased]
+## [7.0.0]
+
+The headline change is **user accounts**: the bridge now supports more than one reader, each with their own sign-in, their own progress, and their own view of the library. This is a bigger release than usual — if you are upgrading from an earlier version, please read the upgrade note below.
+
+### What's New
+
+- **Multiple readers.** You can now create separate accounts for different people — for example, everyone in a household. Each person signs in to their own dashboard, sees only the books they are reading, and keeps their own progress, even when two people are reading the same book.
+
+- **Personal logins for each service.** Every reader enters their own Audiobookshelf, KOSync, Grimmory or BookOrbit, Storyteller, and tracker logins, so each person syncs against their own accounts and their own shelves. The shared engine settings — how often it syncs, library scans, and shelf watching — still live in one place for the main account to manage.
+
+- **A proper sign-in screen.** The dashboard is now protected by a login. The first person to open it sets up the main account, and that account can add more readers from a new Users area in Settings.
+
+### What Changed
+
+- **Upgrading from an earlier version.** After you update and restart, open the dashboard once. Because there are no accounts yet, you will be asked to create your main login — just pick a username and password. As soon as you do, your existing library, your matches, and every service login you had already entered are moved onto that account automatically, so there is nothing to set up again. Your KOReader devices keep syncing exactly as before. From there you can add accounts for other readers whenever you like.
+
+### Fixed
+
+- **CWA progress appears sooner.** Books synced through Calibre-Web-Automated's Kobo sync now show their CWA row on the dashboard right away, instead of only after the first position comes in.
+
+## [6.8.0]
 
 ### What's New
 
