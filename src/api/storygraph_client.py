@@ -100,19 +100,10 @@ class StorygraphClient:
     def _remember_user_token(self) -> str:
         return (resolve_setting(self._creds, "STORYGRAPH_REMEMBER_USER_TOKEN") or "").strip()
 
-    def _provider_enabled(self) -> bool:
-        provider = (os.environ.get("PROGRESS_TRACKER_PROVIDER") or "").strip().lower()
-        explicit_user_enable = (
-            self._creds is not None
-            and str(self._creds.get("STORYGRAPH_ENABLED", "")).strip().lower() == "true"
-        )
-        if provider:
-            return provider == "storygraph" or explicit_user_enable
-        return str(resolve_setting(self._creds, "STORYGRAPH_ENABLED", "false")).strip().lower() == "true"
-
     def is_configured(self) -> bool:
-        if not self._provider_enabled():
-            return False
+        # Hardcover and StoryGraph are independent now — each is gated solely by its
+        # own enable toggle (global, or per-user via the user's integrations), not by
+        # a global either-or provider selector.
         enabled_val = str(resolve_setting(self._creds, "STORYGRAPH_ENABLED", "")).strip().lower()
         if enabled_val == "false":
             return False

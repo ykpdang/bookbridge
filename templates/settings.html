@@ -1193,21 +1193,15 @@
 
             <div class="tab-panel" data-panel="trackers">
 
-            <!-- Progress Tracker Provider (Either/Or) -->
             <div class="settings-section">
                 <div class="section-header">
-                    <h3>Progress Tracker</h3>
+                    <h3>Progress Trackers</h3>
                 </div>
                 <div class="section-body">
-                    <div class="form-group full-width">
-                        <label>Provider</label>
-                        <select name="PROGRESS_TRACKER_PROVIDER" id="progress_tracker_provider" onchange="onTrackerProviderChange(this.value)">
-                            {% set tracker_provider = get_val('PROGRESS_TRACKER_PROVIDER', 'none') %}
-                            <option value="none" {% if tracker_provider == 'none' %}selected{% endif %}>None</option>
-                            <option value="hardcover" {% if tracker_provider == 'hardcover' %}selected{% endif %}>Hardcover</option>
-                            <option value="storygraph" {% if tracker_provider == 'storygraph' %}selected{% endif %}>StoryGraph</option>
-                        </select>
-                        <div class="help-text">Either-or mode: only one progress tracker integration is active at a time.</div>
+                    <div class="help-text">
+                        Enable Hardcover and/or StoryGraph below to make them available. Each user picks which
+                        they actually use — and supplies their own token/cookies — in
+                        <a href="{{ url_for('settings') }}#users">Settings → Users → (user) → Integrations</a>.
                     </div>
                 </div>
             </div>
@@ -2162,26 +2156,6 @@
             ollama: ['OLLAMA_ENABLED', 'OLLAMA_URL', 'OLLAMA_EMBED_MODEL', 'OLLAMA_CHAT_MODEL'],
         };
 
-        function onTrackerProviderChange(provider) {
-            const hardcoverToggle = document.getElementById('toggle_hardcover');
-            const storygraphToggle = document.getElementById('toggle_storygraph');
-            if (!hardcoverToggle || !storygraphToggle) return;
-
-            if (provider === 'hardcover') {
-                hardcoverToggle.checked = true;
-                storygraphToggle.checked = false;
-            } else if (provider === 'storygraph') {
-                hardcoverToggle.checked = false;
-                storygraphToggle.checked = true;
-            } else {
-                hardcoverToggle.checked = false;
-                storygraphToggle.checked = false;
-            }
-
-            toggleSection('hardcover_body', hardcoverToggle.checked);
-            toggleSection('storygraph_body', storygraphToggle.checked);
-        }
-
         function getTestConnectionPayload(service) {
             const payload = {};
             const fieldNames = TEST_CONNECTION_FIELDS[service] || [];
@@ -2471,11 +2445,6 @@
             if (providerSelect) {
                 providerSelect.addEventListener('change', toggleProviderSettings);
                 toggleProviderSettings(); // Initial state
-            }
-
-            const trackerProviderSelect = document.getElementById('progress_tracker_provider');
-            if (trackerProviderSelect) {
-                onTrackerProviderChange(trackerProviderSelect.value);
             }
 
             // 3. GPU Warning

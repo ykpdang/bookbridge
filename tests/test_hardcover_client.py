@@ -86,17 +86,9 @@ class TestHardcoverClient(unittest.TestCase):
         mock_post.assert_called_once()
         mock_sleep.assert_not_called()
 
-    def test_is_configured_false_when_storygraph_provider_selected(self):
-        with patch.dict(os.environ, {"PROGRESS_TRACKER_PROVIDER": "storygraph"}, clear=False):
-            client = HardcoverClient()
-            self.assertFalse(client.is_configured())
-
     def test_is_configured_uses_per_user_enabled_flag(self):
-        with patch.dict(
-            os.environ,
-            {"HARDCOVER_ENABLED": "false", "PROGRESS_TRACKER_PROVIDER": "storygraph"},
-            clear=False,
-        ):
+        # A user with Hardcover enabled + token is configured regardless of global config.
+        with patch.dict(os.environ, {"HARDCOVER_ENABLED": "false"}, clear=False):
             client = HardcoverClient(credentials={
                 "HARDCOVER_TOKEN": "user-token",
                 "HARDCOVER_ENABLED": "true",

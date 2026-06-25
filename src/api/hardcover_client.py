@@ -81,13 +81,9 @@ class HardcoverClient:
         return float(2 ** (attempt - 1))
 
     def is_configured(self):
-        provider = (os.environ.get("PROGRESS_TRACKER_PROVIDER") or "").strip().lower()
-        explicit_user_enable = (
-            self._creds is not None
-            and str(self._creds.get("HARDCOVER_ENABLED", "")).strip().lower() == "true"
-        )
-        if provider and provider != "hardcover" and not explicit_user_enable:
-            return False
+        # Hardcover and StoryGraph are independent now — each is gated solely by its
+        # own enable toggle (global, or per-user via the user's integrations), not by
+        # a global either-or provider selector.
         enabled_val = str(resolve_setting(self._creds, "HARDCOVER_ENABLED", "")).strip().lower()
         if enabled_val == "false":
             return False

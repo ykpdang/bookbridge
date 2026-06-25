@@ -199,16 +199,11 @@ StoryGraph notes:
 - Supports **Edition Picking**: Select specific editions (Paperback, Kindle, etc.) to ensure accurate page counts.
 - **Switch Editions**: The bridge can automatically "switch" your tracked edition on StoryGraph to match your selection.
 
-#### Progress Tracker Provider
+#### Progress Trackers
 
-Since Hardcover and StoryGraph serve similar purposes, the bridge uses an "either-or" mode for active tracking.
-
-| Setting | Env Var | Default | Notes |
-| --- | --- | --- | --- |
-| Provider | `PROGRESS_TRACKER_PROVIDER` | `none` | `none`, `hardcover`, or `storygraph`. |
-
-- Selecting a provider in the UI automatically enables that service and disables the other.
-- If you want to use both simultaneously for different books, you must currently manage the "Enable" toggles manually in Settings (not recommended).
+Hardcover and StoryGraph are independent — enable either or both with their `*_ENABLED`
+toggles in Settings → Trackers. Each user then picks which they use, and supplies their own
+token/cookies, under Settings → Users → (user) → Integrations.
 
 #### Telegram Notifications
 
