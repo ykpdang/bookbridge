@@ -508,7 +508,9 @@ class StorytellerAPIClient:
 
         # 2. Create if missing
         if not target_col:
-            r_create = self._make_request("POST", "/api/v2/collections", {"name": collection_name})
+            # Create public (Storyteller collections default to public=0/private, which
+            # hides their books); a private sync collection would hide everything in it.
+            r_create = self._make_request("POST", "/api/v2/collections", {"name": collection_name, "public": True})
             if r_create and r_create.status_code in [200, 201]:
                 target_col = r_create.json()
             else: return False
@@ -540,7 +542,9 @@ class StorytellerAPIClient:
 
         # 2. Create if missing
         if not target_col:
-            r_create = self._make_request("POST", "/api/v2/collections", {"name": collection_name})
+            # Create public (Storyteller collections default to public=0/private, which
+            # hides their books); a private sync collection would hide everything in it.
+            r_create = self._make_request("POST", "/api/v2/collections", {"name": collection_name, "public": True})
             if r_create and r_create.status_code in [200, 201]:
                 target_col = r_create.json()
             else: return False
