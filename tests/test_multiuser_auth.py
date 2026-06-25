@@ -213,6 +213,29 @@ class TestMultiUserAuth(unittest.TestCase):
         self.client.post('/login', data={'username': 'reg', 'password': 'pw'})
         self.assertEqual(self.client.get(self._ipath(target.id), follow_redirects=False).status_code, 403)
 
+    def test_batch_match_admin_only_by_default(self):
+        # Default-off: regular users are forbidden, behaviour unchanged.
+        self.svc.create_user('reg', 'pw', role='user')
+        self.client.post('/login', data={'username': 'reg', 'password': 'pw'})
+        self.assertEqual(self.client.get('/batch-match', follow_redirects=False).status_code, 403)
+
+    def test_batch_match_unlocked_for_users_via_toggle(self):
+        self.svc.create_user('reg', 'pw', role='user')
+        self.client.post('/login', data={'username': 'reg', 'password': 'pw'})
+        prev = os.environ.get('ALLOW_USER_BATCH_MATCH')
+        os.environ['ALLOW_USER_BATCH_MATCH'] = 'true'
+        try:
+            self.assertEqual(self.client.get('/batch-match', follow_redirects=False).status_code, 200)
+        finally:
+            if prev is None:
+                os.environ.pop('ALLOW_USER_BATCH_MATCH', None)
+            else:
+                os.environ['ALLOW_USER_BATCH_MATCH'] = prev
+
+    def test_batch_match_always_allowed_for_admin(self):
+        self._login()  # admin
+        self.assertEqual(self.client.get('/batch-match', follow_redirects=False).status_code, 200)
+
     def test_user_library_lookup_is_admin_only(self):
         self.svc.create_user('reg', 'pw', role='user')
         target = self.svc.create_user('bob', 'pw', role='user')

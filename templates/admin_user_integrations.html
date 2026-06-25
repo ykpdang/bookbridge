@@ -81,6 +81,12 @@
                         onclick="testUserIntegration(this)">Test</button>
                     {% endif %}
                 </div>
+                {% if group == 'Storyteller' %}
+                <div class="note">For this user to <strong>Forge</strong>, their Storyteller account needs the
+                    <strong>Upload book</strong> and <strong>Book syncing</strong> permissions (granted in
+                    Storyteller → user permissions). Without them, forge fails at the upload (403 Forbidden) or
+                    the processing-trigger step.</div>
+                {% endif %}
                 {% for key, label, ftype in fields %}
                     {% if ftype == 'bool' %}
                     <div class="toggle-row">

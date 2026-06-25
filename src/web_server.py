@@ -27,7 +27,7 @@ from functools import wraps
 from src.utils.user_context import (
     set_current_user_id, reset_current_user_id,
     set_current_user_credentials, reset_current_user_credentials,
-    get_current_user_credentials,
+    get_current_user_credentials, get_current_user_id,
 )
 
 from src.utils.config_loader import ConfigLoader, env_truthy
@@ -448,6 +448,13 @@ _ADMIN_ONLY_ENDPOINTS = {
     'kosync_admin.api_delete_kosync_document',
 }
 
+# Phase II: admin-only endpoints a (global) setting can open up to regular users.
+# Endpoint stays admin-only unless its toggle is on. Default-off, so behavior is
+# unchanged until an admin opts in. Reuse the same pattern for future features.
+_USER_UNLOCKABLE_ENDPOINTS = {
+    'batch_match': 'ALLOW_USER_BATCH_MATCH',
+}
+
 
 def current_user():
     """Return the logged-in User for this request (cached on g), or None."""
@@ -673,11 +680,14 @@ def require_login_guard():
     # Scope this request to the user: their per-user settings (library id, enable
     # flags, search scope) and clients. Reset in teardown (threads are reused).
     _bind_request_user_context(user)
-    # Logged in — enforce admin-only areas.
+    # Logged in — enforce admin-only areas, unless a per-feature toggle has opened
+    # this endpoint to regular users.
     if endpoint in _ADMIN_ONLY_ENDPOINTS and not user.is_admin:
-        if _request_wants_json():
-            return jsonify({"error": "admin access required"}), 403
-        return ("Forbidden: admin access required", 403)
+        unlock_setting = _USER_UNLOCKABLE_ENDPOINTS.get(endpoint)
+        if not (unlock_setting and env_truthy(unlock_setting)):
+            if _request_wants_json():
+                return jsonify({"error": "admin access required"}), 403
+            return ("Forbidden: admin access required", 403)
     return None
 
 
@@ -2542,6 +2552,7 @@ def settings():
             'OLLAMA_TRACKER_MATCH',
             'OLLAMA_LIBRARY_MATCH',
             'OLLAMA_EBOOK_TEXT_FALLBACK',
+            'ALLOW_USER_BATCH_MATCH',
         ]
 
         # Current settings in DB
@@ -3484,10 +3495,21 @@ def _claim_book_for_current_user(abs_id):
     user = current_user()
     if user is None:
         return
+    _claim_book_for_user_id(user.id, abs_id)
+
+
+def _claim_book_for_user_id(user_id, abs_id):
+    """Claim a book for an explicit user id. Used by background workers (batch
+    match) where there's no Flask request context for `current_user()`; the id is
+    the one bound onto the worker thread via `_spawn_user_background`. No-op when
+    there's no user (single-user / login-disabled). Multiple users can claim the
+    same shared-catalog book."""
+    if not abs_id or user_id is None:
+        return
     try:
-        database_service.link_user_book(user.id, abs_id)
+        database_service.link_user_book(user_id, abs_id)
     except Exception as e:
-        logger.debug("Could not link book '%s' to user %s: %s", abs_id, getattr(user, "id", None), e)
+        logger.debug("Could not link book '%s' to user %s: %s", abs_id, user_id, e)
 
 
 def audiobook_matches_search(ab, search_term):
@@ -4342,6 +4364,8 @@ def _process_batch_queue(queue_items):
                     sanitize_log_data(item.get('audio_title') or item.get('audio_source_id')),
                     err_msg,
                 )
+            elif saved_book:
+                _claim_book_for_user_id(get_current_user_id(), saved_book.abs_id)
             continue
 
         ebook_filename = item['ebook_filename']
@@ -4429,6 +4453,7 @@ def _process_batch_queue(queue_items):
         )
 
         database_service.save_book(book)
+        _claim_book_for_user_id(get_current_user_id(), book.abs_id)
 
         # Trigger Hardcover/StoryGraph automatch in the background.
         _enqueue_tracker_automatch(clients.sync_clients, book)
@@ -4488,6 +4513,8 @@ def _process_forge_match_queue(queue_items):
                         sanitize_log_data(item.get('audio_title') or item.get('audio_source_id')),
                         err_msg,
                     )
+                elif saved_book:
+                    _claim_book_for_user_id(get_current_user_id(), saved_book.abs_id)
                 continue
 
             ebook_filename = item['ebook_filename']
@@ -4573,6 +4600,7 @@ def _process_forge_match_queue(queue_items):
             )
 
             database_service.save_book(book)
+            _claim_book_for_user_id(get_current_user_id(), book.abs_id)
 
             _enqueue_tracker_automatch(clients.sync_clients, book)
 
@@ -4673,6 +4701,7 @@ def _process_forge_match_queue(queue_items):
                 ebook_source_id=item.get('ebook_source_id'),
             )
             database_service.save_book(book)
+            _claim_book_for_user_id(get_current_user_id(), book.abs_id)
 
             container.forge_service().start_auto_forge_match(
                 abs_id=forge_id,
@@ -4714,6 +4743,7 @@ def _process_forge_match_queue(queue_items):
                 ebook_source_id=item.get('ebook_source_id'),
             )
             database_service.save_book(book)
+            _claim_book_for_user_id(get_current_user_id(), book.abs_id)
 
             container.forge_service().start_auto_forge_match(
                 abs_id=forge_id,
