@@ -4,6 +4,7 @@ import html
 import logging
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -511,6 +512,65 @@ def _client_bundle_kwargs(clients):
     if isinstance(clients, _GlobalClients):
         return {}
     return {"client_bundle": clients}
+
+
+# --- Deferred tracker auto-match -------------------------------------------------
+# Hardcover/StoryGraph auto-match downloads the EPUB, scrapes/queries the tracker,
+# and (when OLLAMA_TRACKER_MATCH is on) calls the local Ollama judge — easily tens
+# of seconds, and N× that for a batch. None of it affects what the dashboard shows,
+# so we run it off the request thread and redirect immediately. A single worker
+# drains the queue serially on purpose: auto-match hits Ollama with
+# MAX_LOADED_MODELS=1, so concurrent jobs would only thrash the model.
+_TRACKER_AUTOMATCH_QUEUE: "queue.Queue" = queue.Queue()
+_tracker_automatch_worker_started = False
+_tracker_automatch_worker_lock = threading.Lock()
+
+
+def _tracker_automatch_worker():
+    while True:
+        sync_clients, book = _TRACKER_AUTOMATCH_QUEUE.get()
+        try:
+            abs_id = getattr(book, "abs_id", "?")
+            hardcover = sync_clients.get("Hardcover")
+            if hardcover and hardcover.is_configured():
+                try:
+                    hardcover._automatch_hardcover(book)
+                except Exception as e:
+                    logger.warning("Deferred Hardcover automatch failed for '%s': %s", abs_id, e)
+            storygraph = sync_clients.get("StoryGraph")
+            if storygraph and storygraph.is_configured():
+                try:
+                    storygraph._automatch_storygraph(book)
+                except Exception as e:
+                    logger.warning("Deferred StoryGraph automatch failed for '%s': %s", abs_id, e)
+        except Exception as e:
+            logger.error("Deferred tracker automatch worker error: %s", e)
+        finally:
+            _TRACKER_AUTOMATCH_QUEUE.task_done()
+
+
+def _enqueue_tracker_automatch(sync_clients, book):
+    """Queue Hardcover/StoryGraph auto-match for `book` to run after the response.
+
+    `sync_clients` is the active bundle's sync-client dict, already resolved for the
+    request's user; it's copied and captured so the worker never touches request
+    context (where `uc()` would silently fall back to the global bundle). Idempotent
+    downstream: each client early-returns if the book is already linked.
+    """
+    if not book:
+        return
+    try:
+        snapshot = dict(sync_clients) if sync_clients else {}
+    except Exception:
+        snapshot = {}
+    if not snapshot:
+        return
+    global _tracker_automatch_worker_started
+    with _tracker_automatch_worker_lock:
+        if not _tracker_automatch_worker_started:
+            threading.Thread(target=_tracker_automatch_worker, daemon=True, name="tracker-automatch").start()
+            _tracker_automatch_worker_started = True
+    _TRACKER_AUTOMATCH_QUEUE.put((snapshot, book))
 
 
 def _request_wants_json() -> bool:
@@ -1691,26 +1751,15 @@ def _upsert_storyteller_mapping(
     if getattr(saved_book, "sync_mode", "audiobook") == "ebook_only":
         logger.info("Skipping ABS collection side effects for ebook-only mapping '%s'", saved_book.abs_id)
 
-    # Auto-match progress trackers at creation. Idempotent (each client early-returns if
-    # already linked); this closes the gap where ebook-only creates only matched on a
-    # later sync cycle, so a freshly linked BookOrbit/KOReader book gets Hardcover/
-    # StoryGraph right away.
+    # Auto-match progress trackers at creation (deferred to the background worker so the
+    # Match page redirects immediately). Idempotent (each client early-returns if already
+    # linked); this closes the gap where ebook-only creates only matched on a later sync
+    # cycle, so a freshly linked BookOrbit/KOReader book gets Hardcover/StoryGraph too.
     try:
         tracker_clients = uc().sync_clients or {}
     except Exception:
         tracker_clients = {}
-    hardcover_sync_client = tracker_clients.get('Hardcover')
-    if hardcover_sync_client and hardcover_sync_client.is_configured():
-        try:
-            hardcover_sync_client._automatch_hardcover(saved_book)
-        except Exception as hc_err:
-            logger.warning("Match: Hardcover automatch failed for '%s': %s", saved_book.abs_id, hc_err)
-    storygraph_sync_client = tracker_clients.get('StoryGraph')
-    if storygraph_sync_client and storygraph_sync_client.is_configured():
-        try:
-            storygraph_sync_client._automatch_storygraph(saved_book)
-        except Exception as sg_err:
-            logger.warning("Match: StoryGraph automatch failed for '%s': %s", saved_book.abs_id, sg_err)
+    _enqueue_tracker_automatch(tracker_clients, saved_book)
 
     database_service.dismiss_suggestion(saved_book.abs_id)
     if isinstance(saved_book.kosync_doc_id, str) and saved_book.kosync_doc_id.strip():
@@ -4154,15 +4203,8 @@ def match():
             except Exception as e:
                 logger.error(f"❌ Failed to merge book data: {e}")
 
-        # Trigger Hardcover Automatch
-        hardcover_sync_client = clients.sync_clients.get('Hardcover')
-        if hardcover_sync_client and hardcover_sync_client.is_configured():
-            hardcover_sync_client._automatch_hardcover(book)
-
-        # Trigger StoryGraph Automatch
-        storygraph_sync_client = clients.sync_clients.get('StoryGraph')
-        if storygraph_sync_client and storygraph_sync_client.is_configured():
-            storygraph_sync_client._automatch_storygraph(book)
+        # Trigger Hardcover/StoryGraph automatch in the background (redirect now).
+        _enqueue_tracker_automatch(clients.sync_clients, book)
 
         if not str(abs_id).startswith('booklore:'):
             clients.abs_client.add_to_collection(abs_id, ABS_COLLECTION_NAME)
@@ -4396,13 +4438,7 @@ def batch_match():
 
                     database_service.save_book(book)
 
-                    hardcover_sync_client = clients.sync_clients.get('Hardcover')
-                    if hardcover_sync_client and hardcover_sync_client.is_configured():
-                        hardcover_sync_client._automatch_hardcover(book)
-
-                    storygraph_sync_client = clients.sync_clients.get('StoryGraph')
-                    if storygraph_sync_client and storygraph_sync_client.is_configured():
-                        storygraph_sync_client._automatch_storygraph(book)
+                    _enqueue_tracker_automatch(clients.sync_clients, book)
 
                     if not str(item['abs_id']).startswith('booklore:'):
                         clients.abs_client.add_to_collection(item['abs_id'], ABS_COLLECTION_NAME)
@@ -4672,14 +4708,8 @@ def batch_match():
 
                 database_service.save_book(book)
 
-                # Trigger Hardcover Automatch
-                hardcover_sync_client = clients.sync_clients.get('Hardcover')
-                if hardcover_sync_client and hardcover_sync_client.is_configured():
-                    hardcover_sync_client._automatch_hardcover(book)
-
-                storygraph_sync_client = clients.sync_clients.get('StoryGraph')
-                if storygraph_sync_client and storygraph_sync_client.is_configured():
-                    storygraph_sync_client._automatch_storygraph(book)
+                # Trigger Hardcover/StoryGraph automatch in the background.
+                _enqueue_tracker_automatch(clients.sync_clients, book)
 
                 if not str(item['abs_id']).startswith('booklore:'):
                     clients.abs_client.add_to_collection(item['abs_id'], ABS_COLLECTION_NAME)
@@ -5308,13 +5338,7 @@ def suggestions_page():
 
                 database_service.save_book(book)
 
-                hardcover_sync_client = container.sync_clients().get('Hardcover')
-                if hardcover_sync_client and hardcover_sync_client.is_configured():
-                    hardcover_sync_client._automatch_hardcover(book)
-
-                storygraph_sync_client = container.sync_clients().get('StoryGraph')
-                if storygraph_sync_client and storygraph_sync_client.is_configured():
-                    storygraph_sync_client._automatch_storygraph(book)
+                _enqueue_tracker_automatch(container.sync_clients(), book)
 
                 if not str(item['abs_id']).startswith('booklore:'):
                     container.abs_client().add_to_collection(item['abs_id'], ABS_COLLECTION_NAME)
