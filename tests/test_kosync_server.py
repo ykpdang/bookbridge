@@ -1375,6 +1375,58 @@ class TestKosyncEndpoints(unittest.TestCase):
             self.assertFalse(kosync_server._kosync_open_sessions)
 
 
+class TestKosyncAuthStubs(unittest.TestCase):
+    """Security regression: the KOReader login/create stubs must not disclose
+    the configured KOSYNC_KEY or KOSYNC_USER to unauthenticated callers."""
+
+    @classmethod
+    def setUpClass(cls):
+        from src import web_server
+        web_server.database_service = DatabaseService(os.path.join(TEST_DIR, 'test.db'))
+        if not hasattr(web_server, 'app'):
+            web_server.app, _ = web_server.create_app()
+        cls.client = web_server.app.test_client()
+
+    def setUp(self):
+        import hashlib
+        from src import web_server
+        # A user must exist or require_login_guard redirects to first-run setup.
+        if web_server.database_service.count_users() == 0:
+            web_server.database_service.create_user("admin", "secret", role="admin")
+        # KOSYNC_USER/KOSYNC_KEY are set to testuser/testpass at module import.
+        self.valid_headers = {
+            'x-auth-user': 'testuser',
+            'x-auth-key': hashlib.md5(b'testpass').hexdigest(),
+        }
+
+    def test_login_does_not_leak_global_key(self):
+        resp = self.client.post('/users/login', headers=self.valid_headers)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json() or {}
+        self.assertNotIn('token', data)
+        self.assertNotIn('testpass', str(data))
+        self.assertEqual(data.get('username'), 'testuser')
+
+    def test_login_rejects_missing_credentials(self):
+        resp = self.client.post('/users/login')
+        self.assertEqual(resp.status_code, 401)
+
+    def test_login_rejects_bad_credentials(self):
+        resp = self.client.post(
+            '/users/login',
+            headers={'x-auth-user': 'testuser', 'x-auth-key': 'wrong'},
+        )
+        self.assertEqual(resp.status_code, 401)
+
+    def test_create_does_not_leak_configured_username(self):
+        resp = self.client.post('/users/create', json={'username': 'someoneelse'})
+        self.assertEqual(resp.status_code, 201)
+        data = resp.get_json() or {}
+        # echoes the requested name, never the server's configured KOSYNC_USER
+        self.assertEqual(data.get('username'), 'someoneelse')
+        self.assertNotIn('testuser', str(data))
+
+
 class TestKosyncEstimatedSessions(unittest.TestCase):
     def setUp(self):
         import src.api.kosync_server as ks

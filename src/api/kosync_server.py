@@ -752,23 +752,40 @@ def kosync_users_auth():
 @kosync_sync_bp.route('/users/create', methods=['POST'])
 @kosync_sync_bp.route('/koreader/users/create', methods=['POST'])
 def kosync_users_create():
-    """Stub for KOReader user registration check"""
-    return jsonify({
-        "id": 1,
-        "username": os.environ.get("KOSYNC_USER", "user")
-    }), 201
+    """Stub for KOReader user registration.
+
+    BookBridge manages accounts in its web UI, not via KOReader registration, so
+    this only acknowledges the request. It echoes back the *requested* username
+    (never the server's configured KOSYNC_USER) to avoid disclosing credentials
+    to an unauthenticated caller.
+    """
+    data = request.get_json(silent=True) or {}
+    requested = data.get("username") or request.form.get("username") or ""
+    return jsonify({"username": requested}), 201
 
 
 @kosync_sync_bp.route('/users/login', methods=['POST'])
 @kosync_sync_bp.route('/koreader/users/login', methods=['POST'])
 def kosync_users_login():
-    """Stub for KOReader login check"""
-    return jsonify({
-        "id": 1,
-        "username": os.environ.get("KOSYNC_USER", "user"),
-        "active": True,
-        "token": os.environ.get("KOSYNC_KEY", "")
-    }), 200
+    """KOReader login check.
+
+    Validates the supplied credentials (header or JSON body) and returns success
+    without disclosing any secret. Previously this stub echoed back KOSYNC_KEY as
+    a "token" to any unauthenticated caller, leaking the global sync key.
+    """
+    user = request.headers.get('x-auth-user')
+    key = request.headers.get('x-auth-key')
+    if not user or not key:
+        data = request.get_json(silent=True) or {}
+        user = user or data.get("username")
+        key = key or data.get("password")
+
+    authenticated, _ = authenticate_kosync(user, key)
+    if not authenticated:
+        logger.warning(f"⚠️ KOSync Login: Failed attempt for user '{user}' from '{request.remote_addr}'")
+        return jsonify({"message": "Unauthorized"}), 401
+
+    return jsonify({"username": user}), 200
 
 
 @kosync_sync_bp.route('/syncs/progress/<doc_id>', methods=['GET'])
