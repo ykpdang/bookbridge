@@ -852,7 +852,9 @@ class ForgeService:
             return False
 
     @staticmethod
-    def _collect_audio_files(root_dir: Path) -> list[Path]:
+    def _collect_audio_files(root_dir) -> list[Path]:
+        if not root_dir:
+            return []
         root_dir = Path(root_dir)
         if not root_dir.exists():
             return []
@@ -1300,6 +1302,70 @@ class ForgeService:
                     "continuing with recovery polling"
                 )
 
+            # Poll Storyteller to completion, download the artifact, build the
+            # alignment map, and finalize the DB row. Extracted so a restart can
+            # re-attach this watcher (the thread does not survive a process
+            # restart) — see resume_pending_forge_matches().
+            self._run_forge_match_completion(
+                abs_id=abs_id,
+                book_uuid=book_uuid,
+                title=title,
+                text_item=text_item,
+                item_details=item_details,
+                chapters=chapters,
+                original_filename=original_filename,
+                original_ebook_filename=original_ebook_filename,
+                original_hash=original_hash,
+                audio_source=audio_source,
+                audio_source_id=audio_source_id,
+                temp_dir=temp_dir,
+                processing_triggered=processing_triggered,
+            )
+
+        except Exception as e:
+            logger.error(f"❌ Auto-Forge: Pipeline failed: {e}", exc_info=True)
+            try:
+                book = self.database_service.get_book(abs_id)
+                if book:
+                    book.status = 'error'
+                    self.database_service.save_book(book)
+                self._update_forge_match_job(abs_id, last_error=str(e))
+            except: pass
+
+        finally:
+            if temp_dir and temp_dir.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            with self.lock:
+                self.active_tasks.discard(title)
+
+
+    def _run_forge_match_completion(
+        self,
+        abs_id,
+        book_uuid,
+        title,
+        text_item,
+        item_details,
+        chapters,
+        original_filename,
+        original_ebook_filename,
+        original_hash,
+        audio_source: str = None,
+        audio_source_id: str = None,
+        temp_dir=None,
+        processing_triggered: bool = False,
+    ):
+        """Poll Storyteller for alignment completion, then download the
+        artifact, build the alignment map, finalize the DB row, and shelve.
+
+        Extracted from _auto_forge_background_task so the completion watcher
+        can be re-attached after a restart (the background thread does not
+        survive a process restart). On the resume path temp_dir is None (the
+        staged audio is gone; the Whisper fallback re-fetches from source) and
+        processing_triggered is True (Storyteller was already triggered, so an
+        in-flight/aligned book is never re-triggered)."""
+        st_client = self.storyteller_client
+        try:
             # --- WAIT FOR COMPLETION ---
             MAX_WAIT = 3600
             POLL_INTERVAL = 30
@@ -1660,7 +1726,6 @@ class ForgeService:
 
             except Exception as e:
                 logger.warning(f"⚠️ Auto-Forge: Failed to add to collections/shelves: {e}")
-
         except Exception as e:
             logger.error(f"❌ Auto-Forge: Pipeline failed: {e}", exc_info=True)
             try:
@@ -1669,11 +1734,159 @@ class ForgeService:
                     book.status = 'error'
                     self.database_service.save_book(book)
                 self._update_forge_match_job(abs_id, last_error=str(e))
-            except: pass
+            except Exception:
+                pass
 
+    def _reconstruct_forge_text_item(self, book) -> dict:
+        """Rebuild a forge text_item from a persisted Book.
+
+        The original request payload is gone after a restart, so resume/
+        re-forge reconstructs it from the durable Book columns (mirrors
+        web_server._build_forge_text_item)."""
+        source = self._normalize_text_source(getattr(book, 'ebook_source', None) or '')
+        source_id = str(getattr(book, 'ebook_source_id', None) or '').strip()
+        original = getattr(book, 'original_ebook_filename', None) or getattr(book, 'ebook_filename', None)
+        text_item = {
+            'source': source or 'Local File',
+            'filename': original,
+            'original_ebook_filename': original,
+            'booklore_id': source_id,
+            'bookorbit_id': source_id,
+            'cwa_id': source_id,
+            'abs_id': source_id,
+            'source_id': source_id,
+        }
+        if not source or source == 'Local File':
+            text_item['source'] = 'Local File'
+            if original:
+                try:
+                    resolved = self.ebook_parser.resolve_book_path(original)
+                    if resolved:
+                        text_item['path'] = str(resolved)
+                except Exception:
+                    pass
+        return text_item
+
+    def resume_pending_forge_matches(self) -> int:
+        """Re-attach Forge & Match work left behind by a previous run.
+
+        The completion watcher lives only in a background thread, so a restart
+        orphans every book stuck at status='forging'. Books already uploaded
+        to Storyteller (storyteller_uuid set) get just the completion watcher
+        re-attached; books that never finished uploading are fully re-forged.
+        Resume uses the global client bundle (no request context at startup),
+        which matches the primary user's credentials."""
+        try:
+            forging = self.database_service.get_books_by_status('forging') or []
+        except Exception as exc:
+            logger.warning("Forge & Match resume: could not list forging books: %s", exc)
+            return 0
+
+        resumed = 0
+        re_forged = 0
+        for book in forging:
+            abs_id = getattr(book, 'abs_id', None)
+            if not abs_id:
+                continue
+            title = getattr(book, 'abs_title', None) or abs_id
+            if title in self.active_tasks:
+                # Already being worked (e.g. resume invoked twice) — don't double up.
+                continue
+            book_uuid = getattr(book, 'storyteller_uuid', None)
+            if book_uuid:
+                threading.Thread(
+                    target=self._resume_forge_match_background_task,
+                    args=(abs_id, book_uuid),
+                    daemon=True,
+                ).start()
+                resumed += 1
+            elif self._reforge_pending_book(book):
+                re_forged += 1
+
+        if resumed or re_forged:
+            logger.info(
+                "🔁 Forge & Match resume: re-attached %d completion watcher(s), re-started %d full forge(s)",
+                resumed,
+                re_forged,
+            )
+        return resumed + re_forged
+
+    def _reforge_pending_book(self, book) -> bool:
+        """Re-run the full forge for a book whose Storyteller upload never finished."""
+        abs_id = getattr(book, 'abs_id', None)
+        if not abs_id:
+            return False
+        title = getattr(book, 'abs_title', None) or abs_id
+        original_ebook_filename = getattr(book, 'original_ebook_filename', None)
+        original_filename = original_ebook_filename or getattr(book, 'ebook_filename', None)
+        raw_hash = getattr(book, 'kosync_doc_id', None)
+        original_hash = raw_hash if raw_hash and not str(raw_hash).startswith('forging_') else None
+        text_item = self._reconstruct_forge_text_item(book)
+        kwargs = {}
+        audio_source = getattr(book, 'audio_source', None)
+        audio_source_id = getattr(book, 'audio_source_id', None)
+        if audio_source:
+            kwargs['audio_source'] = audio_source
+        if audio_source_id:
+            kwargs['audio_source_id'] = audio_source_id
+        logger.info(
+            "🔁 Forge & Match resume: re-running full forge for '%s' (no Storyteller upload to resume)",
+            abs_id,
+        )
+        threading.Thread(
+            target=self._auto_forge_background_task,
+            args=(abs_id, text_item, title, None, original_filename, original_hash),
+            kwargs=kwargs,
+            daemon=True,
+        ).start()
+        return True
+
+    def _resume_forge_match_background_task(self, abs_id, book_uuid):
+        """Resume only the completion phase for a book already uploaded to
+        Storyteller, reconstructing the inputs from the persisted Book."""
+        book = self.database_service.get_book(abs_id)
+        if not book:
+            logger.warning("Forge & Match resume: book '%s' vanished before completion resume", abs_id)
+            return
+        title = getattr(book, 'abs_title', None) or abs_id
+        audio_source = getattr(book, 'audio_source', None)
+        audio_source_id = getattr(book, 'audio_source_id', None)
+        original_ebook_filename = getattr(book, 'original_ebook_filename', None)
+        original_filename = original_ebook_filename or getattr(book, 'ebook_filename', None)
+        raw_hash = getattr(book, 'kosync_doc_id', None)
+        original_hash = raw_hash if raw_hash and not str(raw_hash).startswith('forging_') else None
+        text_item = self._reconstruct_forge_text_item(book)
+
+        item_details = None
+        chapters = []
+        if audio_source != 'BookLore':
+            try:
+                item_details = self.abs_client.get_item_details(abs_id)
+            except Exception as exc:
+                logger.debug("Forge & Match resume: chapter fetch failed for '%s': %s", abs_id, exc)
+            if item_details:
+                chapters = item_details.get('media', {}).get('chapters', []) or []
+
+        with self.lock:
+            self.active_tasks.add(title)
+        self._update_forge_match_job(abs_id, progress=0.35, last_error="Resumed after restart; waiting for Storyteller")
+        logger.info("🔁 Forge & Match resume: re-attaching completion watcher for '%s' (uuid=%s)", abs_id, book_uuid)
+        try:
+            self._run_forge_match_completion(
+                abs_id=abs_id,
+                book_uuid=book_uuid,
+                title=title,
+                text_item=text_item,
+                item_details=item_details,
+                chapters=chapters,
+                original_filename=original_filename,
+                original_ebook_filename=original_ebook_filename,
+                original_hash=original_hash,
+                audio_source=audio_source,
+                audio_source_id=audio_source_id,
+                temp_dir=None,
+                processing_triggered=True,
+            )
         finally:
-            if temp_dir and temp_dir.exists():
-                shutil.rmtree(temp_dir, ignore_errors=True)
             with self.lock:
                 self.active_tasks.discard(title)
-

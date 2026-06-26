@@ -8527,6 +8527,14 @@ if __name__ == '__main__':
     poller_thread = threading.Thread(target=client_poller.start, daemon=True)
     poller_thread.start()
 
+    # Re-attach Forge & Match completion watchers orphaned by a restart. The
+    # banner/card survive in the DB (status='forging'), but the polling thread
+    # that finalizes the forge does not, so resume it here.
+    try:
+        container.forge_service().resume_pending_forge_matches()
+    except Exception as exc:
+        logger.warning("Forge & Match: resume on startup failed: %s", exc)
+
     # One-time backfill of StoryGraph ratings for already-linked books.
     # Self-limiting: rows with storygraph_rating_updated_at set are skipped on future startups.
     try:
