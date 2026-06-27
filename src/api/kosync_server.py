@@ -85,11 +85,12 @@ def _record_recent_external_kosync_put(
     device_id: str | None,
     percentage,
     now_ts: float,
+    user_id=None,
 ) -> None:
     if not document_hash:
         return
     with _kosync_recent_external_puts_lock:
-        _kosync_recent_external_puts[document_hash] = {
+        _kosync_recent_external_puts[(document_hash, user_id)] = {
             "timestamp": now_ts,
             "device": device or "",
             "device_id": device_id or "",
@@ -97,18 +98,18 @@ def _record_recent_external_kosync_put(
         }
 
 
-def _recent_external_kosync_put_metadata(document_hash: str | None, percentage=None) -> dict:
+def _recent_external_kosync_put_metadata(document_hash: str | None, percentage=None, user_id=None) -> dict:
     if not document_hash:
         return {}
     now_ts = time.time()
     ttl = _recent_external_put_ttl_seconds()
     with _kosync_recent_external_puts_lock:
-        entry = _kosync_recent_external_puts.get(document_hash)
+        entry = _kosync_recent_external_puts.get((document_hash, user_id))
         if not entry:
             return {}
         age = now_ts - float(entry.get("timestamp") or 0)
         if ttl <= 0 or age > ttl:
-            _kosync_recent_external_puts.pop(document_hash, None)
+            _kosync_recent_external_puts.pop((document_hash, user_id), None)
             return {}
 
     if percentage is not None:
@@ -822,29 +823,40 @@ def kosync_get_progress(doc_id):
             return _respond_from_book_states(doc_id, resolved_book)
 
         request_user_id = getattr(g, "kosync_user_id", None)
-        doc_user_id = getattr(kosync_doc, "user_id", None)
-        can_use_direct_doc = request_user_id is None or doc_user_id in (None, request_user_id)
-        has_progress = can_use_direct_doc and kosync_doc.percentage and float(kosync_doc.percentage) > 0
+        # Per-user device progress lives in kosync_user_progress. Fall back to the
+        # shared kosync_doc row (legacy / pre-migration) only when it is this
+        # user's own or unstamped (legacy) — never another user's position.
+        progress_row = _database_service.get_user_kosync_progress(doc_id, request_user_id)
+        if progress_row is None:
+            doc_user_id = getattr(kosync_doc, "user_id", None)
+            if request_user_id is None or doc_user_id in (None, request_user_id):
+                progress_row = kosync_doc
+        has_progress = (
+            progress_row is not None
+            and progress_row.percentage
+            and float(progress_row.percentage) > 0
+        )
         if has_progress:
             poison_pill = _suppress_empty_progress_response(
                 doc_id,
-                float(kosync_doc.percentage),
-                kosync_doc.progress,
+                float(progress_row.percentage),
+                progress_row.progress,
             )
             if poison_pill is not None:
                 return poison_pill
             response_data = {
-                "device": kosync_doc.device or "",
-                "device_id": kosync_doc.device_id or "",
-                "document": kosync_doc.document_hash,
-                "percentage": float(kosync_doc.percentage) if kosync_doc.percentage else 0,
-                "progress": kosync_doc.progress or "",
-                "timestamp": int(kosync_doc.timestamp.timestamp()) if kosync_doc.timestamp else 0
+                "device": progress_row.device or "",
+                "device_id": progress_row.device_id or "",
+                "document": doc_id,
+                "percentage": float(progress_row.percentage),
+                "progress": progress_row.progress or "",
+                "timestamp": int(progress_row.timestamp.timestamp()) if progress_row.timestamp else 0
             }
             response_data.update(
                 _recent_external_kosync_put_metadata(
-                    kosync_doc.document_hash,
+                    doc_id,
                     response_data["percentage"],
+                    request_user_id,
                 )
             )
             return jsonify(response_data), 200
@@ -1160,31 +1172,34 @@ def kosync_put_progress():
     # 1. Force flag is set (e.g. from SyncManager)
     # 2. Update comes from the SAME device (user moved slider back)
     # 3. Update is internal (sync-bot) — must reach debounce-clear logic below
-    same_device = (kosync_doc and kosync_doc.device_id == device_id)
-    kosync_doc_user_id = getattr(kosync_doc, "user_id", None) if kosync_doc else None
-    same_user_or_legacy_doc = (
-        request_user_id is None
-        or kosync_doc_user_id is None
-        or kosync_doc_user_id == request_user_id
-    )
+    # Furthest-wins compares against THIS user's own last position
+    # (kosync_user_progress), so one user's rewind is never judged against
+    # another user's further position on the same shared hash. Falls back to the
+    # shared row only for a single-user-no-accounts install (no per-user row).
+    user_prog = _database_service.get_user_kosync_progress(doc_hash, request_user_id)
+    baseline = user_prog
+    if baseline is None and kosync_doc is not None:
+        # Pre-migration / first PUT: use the shared row as baseline only when it
+        # is this user's own or unstamped (legacy), never another user's.
+        doc_user_id = getattr(kosync_doc, "user_id", None)
+        if request_user_id is None or doc_user_id in (None, request_user_id):
+            baseline = kosync_doc
+    baseline_pct = float(baseline.percentage) if baseline and baseline.percentage else 0
+    same_device = bool(baseline and baseline.device_id and baseline.device_id == device_id)
 
     if (
         furthest_wins
-        and same_user_or_legacy_doc
-        and kosync_doc
-        and kosync_doc.percentage
+        and baseline_pct
         and not force_update
         and not same_device
         and not is_internal
     ):
-        existing_pct = float(kosync_doc.percentage)
         new_pct = float(percentage)
-
-        if new_pct < existing_pct - 0.0001:
-            logger.info(f"KOSync: Ignored progress from '{device}' for doc {doc_hash} (server has higher: {existing_pct:.2f}% vs new {new_pct:.2f}%)")
+        if new_pct < baseline_pct - 0.0001:
+            logger.info(f"KOSync: Ignored progress from '{device}' for doc {doc_hash} (user has higher: {baseline_pct:.2f}% vs new {new_pct:.2f}%)")
             return jsonify({
                 "document": doc_hash,
-                "timestamp": int(kosync_doc.timestamp.timestamp()) if kosync_doc.timestamp else int(now.timestamp())
+                "timestamp": int(baseline.timestamp.timestamp()) if baseline and baseline.timestamp else int(now.timestamp())
             }), 200
 
     if kosync_doc is None:
@@ -1224,7 +1239,13 @@ def kosync_put_progress():
 
     _database_service.save_kosync_document(kosync_doc)
     if not is_internal:
-        _record_recent_external_kosync_put(doc_hash, device, device_id, percentage, now_ts)
+        _record_recent_external_kosync_put(doc_hash, device, device_id, percentage, now_ts, request_user_id)
+        # Per-user device progress: the durable per-user record for unlinked docs
+        # and the furthest-wins / sibling-GET source (no-op for no-accounts installs).
+        _database_service.upsert_user_kosync_progress(
+            doc_hash, percentage, progress=progress, device=device,
+            device_id=device_id, timestamp=now, user_id=request_user_id,
+        )
 
     # Update linked book if exists
     linked_book = None
@@ -2159,15 +2180,21 @@ def _respond_from_book_states(doc_id, book):
     # (set by kosync_auth_required), so states are already user-scoped.
     states = _database_service.get_states_for_book(book.abs_id)
 
-    # Also check sibling kosync_documents for device-specific progress — but only
-    # this user's documents, so one user's reading position can't leak to another
-    # reading the same shared title.
+    # Also check this user's per-user progress across the book's hashes — so a
+    # device position that advanced past the synced State (e.g. a different EPUB
+    # build of the same title) is honored, without leaking another user's
+    # position on the same shared title.
     user_id = getattr(g, "kosync_user_id", None)
-    sibling_docs = _database_service.get_kosync_documents_for_book(book.abs_id)
-    if user_id is not None:
-        sibling_docs = [d for d in sibling_docs if getattr(d, "user_id", None) in (None, user_id)]
+    progress_rows = _database_service.get_user_kosync_progress_for_book(book.abs_id, user_id)
+    if not progress_rows:
+        # Fallback: shared sibling docs (legacy / pre-migration), scoped to this
+        # user's own or unstamped (legacy) rows so no cross-user position leaks.
+        sibling_docs = _database_service.get_kosync_documents_for_book(book.abs_id)
+        if user_id is not None:
+            sibling_docs = [d for d in sibling_docs if getattr(d, "user_id", None) in (None, user_id)]
+        progress_rows = sibling_docs
     docs_with_progress = [
-        d for d in sibling_docs
+        d for d in progress_rows
         if d.percentage and float(d.percentage) > 0 and (d.progress or "").strip()
     ]
     if docs_with_progress:
@@ -2188,6 +2215,7 @@ def _respond_from_book_states(doc_id, book):
             _recent_external_kosync_put_metadata(
                 best_doc.document_hash,
                 response_data["percentage"],
+                user_id,
             )
         )
         return jsonify(response_data), 200

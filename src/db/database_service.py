@@ -22,6 +22,7 @@ from .models import (
     StorygraphDetails,
     Setting,
     KosyncDocument,
+    KosyncUserProgress,
     PendingSuggestion,
     BookloreBook,
     ReadingSession,
@@ -1168,6 +1169,89 @@ class DatabaseService:
             if doc:
                 session.expunge(doc)
             return doc
+
+    # ---- Per-user KoSync progress (kosync_user_progress) ----
+    # KosyncDocument holds the SHARED hash cache + hash->book link; device
+    # PROGRESS is per-user and lives here keyed by (document_hash, user_id).
+
+    def get_user_kosync_progress(self, document_hash: str, user_id: int = None) -> Optional[KosyncUserProgress]:
+        """Return the per-user device-progress row for a hash, or None.
+
+        ``user_id`` resolves through the ambient context / default user like the
+        rest of the state layer; returns None when no user can be resolved (a
+        single-user install with no accounts, which keeps using the shared row)."""
+        uid = self._resolve_uid(user_id)
+        if uid is None or not document_hash:
+            return None
+        with self.get_session() as session:
+            row = session.query(KosyncUserProgress).filter(
+                KosyncUserProgress.document_hash == document_hash,
+                KosyncUserProgress.user_id == uid,
+            ).first()
+            if row:
+                session.expunge(row)
+            return row
+
+    def upsert_user_kosync_progress(self, document_hash: str, percentage, progress=None,
+                                    device=None, device_id=None, timestamp=None,
+                                    user_id: int = None) -> Optional[KosyncUserProgress]:
+        """Create or update a user's device-progress row for a hash.
+
+        No-op (returns None) when no user resolves, so a single-user-no-accounts
+        install transparently falls back to the legacy shared KosyncDocument row."""
+        uid = self._resolve_uid(user_id)
+        if uid is None or not document_hash:
+            return None
+        with self.get_session() as session:
+            row = session.query(KosyncUserProgress).filter(
+                KosyncUserProgress.document_hash == document_hash,
+                KosyncUserProgress.user_id == uid,
+            ).first()
+            if row is None:
+                row = KosyncUserProgress(
+                    document_hash=document_hash,
+                    user_id=uid,
+                    progress=progress,
+                    percentage=percentage,
+                    device=device,
+                    device_id=device_id,
+                    timestamp=timestamp,
+                )
+                session.add(row)
+            else:
+                row.progress = progress
+                row.percentage = percentage
+                row.device = device
+                row.device_id = device_id
+                row.timestamp = timestamp
+                row.last_updated = utcnow()
+            session.flush()
+            session.refresh(row)
+            session.expunge(row)
+            return row
+
+    def get_user_kosync_progress_for_book(self, abs_id: str, user_id: int = None) -> List[KosyncUserProgress]:
+        """Return this user's progress rows across every hash linked to ``abs_id``.
+
+        Joins the shared hash->book link (KosyncDocument.linked_abs_id) to the
+        per-user progress so a linked-book GET can pick the furthest position this
+        user has reached on any of the book's EPUB builds."""
+        uid = self._resolve_uid(user_id)
+        if uid is None:
+            return []
+        with self.get_session() as session:
+            rows = (
+                session.query(KosyncUserProgress)
+                .join(KosyncDocument, KosyncDocument.document_hash == KosyncUserProgress.document_hash)
+                .filter(
+                    KosyncDocument.linked_abs_id == abs_id,
+                    KosyncUserProgress.user_id == uid,
+                )
+                .all()
+            )
+            for row in rows:
+                session.expunge(row)
+            return rows
 
 
     # PendingSuggestion operations

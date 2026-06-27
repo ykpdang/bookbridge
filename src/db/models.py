@@ -73,6 +73,45 @@ class KosyncDocument(Base):
         return f"<KosyncDocument(hash='{self.document_hash}', pct={self.percentage})>"
 
 
+class KosyncUserProgress(Base):
+    """Per-user KOReader device progress for a document hash.
+
+    ``KosyncDocument`` is keyed by ``document_hash`` alone and carries the SHARED
+    facts (filename/md5 cache + hash->book link). Device PROGRESS is per-user, so
+    it lives here keyed by ``(document_hash, user_id)``. For LINKED books the
+    authoritative per-user progress is in ``State``; this table is the per-user
+    progress store for UNLINKED documents synced device-to-device, and the
+    per-user source for furthest-wins and sibling-hash GET resolution — so two
+    users reading the same EPUB (identical md5) no longer overwrite each other.
+    """
+    __tablename__ = 'kosync_user_progress'
+
+    document_hash = Column(String(32), primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), primary_key=True)
+    progress = Column(String(512), nullable=True)         # XPath / CFI
+    percentage = Column(Numeric(10, 6), default=0)        # Decimal precision
+    device = Column(String(128), nullable=True)
+    device_id = Column(String(64), nullable=True)
+    timestamp = Column(DateTime, nullable=True)
+    last_updated = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    def __init__(self, document_hash: str, user_id: int, progress: str = None,
+                 percentage: float = 0, device: str = None, device_id: str = None,
+                 timestamp: datetime = None):
+        self.document_hash = document_hash
+        self.user_id = user_id
+        self.progress = progress
+        self.percentage = percentage
+        self.device = device
+        self.device_id = device_id
+        self.timestamp = timestamp
+        self.last_updated = utcnow()
+
+    def __repr__(self):
+        return (f"<KosyncUserProgress(hash='{self.document_hash}', "
+                f"user_id={self.user_id}, pct={self.percentage})>")
+
+
 class Book(Base):
     """
     Book model storing book metadata and mapping information.

@@ -471,6 +471,78 @@ class TestKosyncEndpoints(unittest.TestCase):
         self.assertAlmostEqual(reader_b_get.get_json()["percentage"], 0.20)
         self.assertEqual(reader_b_get.get_json()["progress"], "/body/reader-b")
 
+    def _make_second_kosync_user(self, label):
+        """Create a second BookBridge user with their own KOSync creds + headers."""
+        from src import web_server
+        import hashlib
+        svc = web_server.database_service
+        suffix = str(int(time.time() * 1000000))
+        kosync_user = f"{label}-{suffix}"
+        user = svc.create_user(f"{label}_{suffix}", "pw", role="user")
+        svc.set_user_credential(user.id, "KOSYNC_USER", kosync_user)
+        svc.set_user_credential(user.id, "KOSYNC_KEY", f"{label}-pass")
+        headers = {
+            "x-auth-user": kosync_user,
+            "x-auth-key": hashlib.md5(f"{label}-pass".encode()).hexdigest(),
+            "Content-Type": "application/json",
+        }
+        return user, headers
+
+    def test_unlinked_same_hash_two_users_keep_separate_progress(self):
+        """Two users PUTting the same UNLINKED hash each read back their OWN
+        position — neither overwrites the other (per-user progress fix)."""
+        _reader_b, reader_b_headers = self._make_second_kosync_user("unlinked_reader_b")
+        doc_hash = "u" * 32  # never linked to a Book
+
+        self.assertEqual(self.client.put("/syncs/progress", headers=self.auth_headers, json={
+            "document": doc_hash, "progress": "/body/admin", "percentage": 0.80,
+            "device": "KoboA", "device_id": "A",
+        }).status_code, 200)
+        self.assertEqual(self.client.put("/syncs/progress", headers=reader_b_headers, json={
+            "document": doc_hash, "progress": "/body/reader-b", "percentage": 0.20,
+            "device": "KoboB", "device_id": "B",
+        }).status_code, 200)
+
+        admin_get = self.client.get(f"/syncs/progress/{doc_hash}", headers=self.auth_headers)
+        reader_b_get = self.client.get(f"/syncs/progress/{doc_hash}", headers=reader_b_headers)
+        self.assertEqual(admin_get.status_code, 200)
+        self.assertEqual(reader_b_get.status_code, 200)
+        # Each user reads their own position back, not the other's last write.
+        self.assertAlmostEqual(admin_get.get_json()["percentage"], 0.80)
+        self.assertEqual(admin_get.get_json()["progress"], "/body/admin")
+        self.assertAlmostEqual(reader_b_get.get_json()["percentage"], 0.20)
+        self.assertEqual(reader_b_get.get_json()["progress"], "/body/reader-b")
+
+    def test_unlinked_furthest_wins_is_per_user(self):
+        """Furthest-wins is judged against the SAME user's last position: user B's
+        lower PUT is accepted (A's 80% doesn't gate it), but A's own backward move
+        from a different device is still rejected."""
+        _reader_b, reader_b_headers = self._make_second_kosync_user("fw_reader_b")
+        doc_hash = "w" * 32
+
+        self.client.put("/syncs/progress", headers=self.auth_headers, json={
+            "document": doc_hash, "progress": "/body/a1", "percentage": 0.80,
+            "device": "KoboA", "device_id": "A1",
+        })
+        # B's lower PUT must NOT be gated by A's 80% (different user baseline).
+        self.client.put("/syncs/progress", headers=reader_b_headers, json={
+            "document": doc_hash, "progress": "/body/b1", "percentage": 0.20,
+            "device": "KoboB", "device_id": "B1",
+        })
+        self.assertAlmostEqual(
+            self.client.get(f"/syncs/progress/{doc_hash}", headers=reader_b_headers).get_json()["percentage"],
+            0.20,
+        )
+        # A's own backward move from a NEW device is rejected by furthest-wins.
+        self.client.put("/syncs/progress", headers=self.auth_headers, json={
+            "document": doc_hash, "progress": "/body/a2", "percentage": 0.50,
+            "device": "KoboA2", "device_id": "A2",
+        })
+        self.assertAlmostEqual(
+            self.client.get(f"/syncs/progress/{doc_hash}", headers=self.auth_headers).get_json()["percentage"],
+            0.80,
+        )
+
     def test_get_progress_returns_502_when_direct_hash_has_pct_but_empty_progress(self):
         self.client.put(
             '/syncs/progress',

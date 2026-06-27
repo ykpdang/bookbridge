@@ -264,6 +264,7 @@ class TestKosyncPutInstantSync(unittest.TestCase):
         from src.db.models import KosyncDocument
 
         mock_db = MagicMock()
+        mock_db.get_user_kosync_progress.return_value = None
         original_db = ks._database_service
         ks._database_service = mock_db
         original_manager = ks._manager
@@ -306,6 +307,7 @@ class TestKosyncPutInstantSync(unittest.TestCase):
 
         os.environ['INSTANT_SYNC_ENABLED'] = 'false'
         mock_db = MagicMock()
+        mock_db.get_user_kosync_progress.return_value = None
         original_db = ks._database_service
         ks._database_service = mock_db
         original_manager = ks._manager
@@ -343,6 +345,7 @@ class TestKosyncPutInstantSync(unittest.TestCase):
         import src.api.kosync_server as ks
 
         mock_db = MagicMock()
+        mock_db.get_user_kosync_progress.return_value = None
         original_db = ks._database_service
         ks._database_service = mock_db
         original_manager = ks._manager
@@ -379,6 +382,7 @@ class TestKosyncPutInstantSync(unittest.TestCase):
         from src.db.models import KosyncDocument
 
         mock_db = MagicMock()
+        mock_db.get_user_kosync_progress.return_value = None
         original_db = ks._database_service
         ks._database_service = mock_db
         original_manager = ks._manager
