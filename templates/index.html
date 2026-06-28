@@ -314,11 +314,11 @@
                         title="Mark Complete">✅</button>
                     <form method="POST" action="/clear-progress/{{ mapping.abs_id }}">
                         <button type="submit" class="action-btn warning" aria-label="Clear Progress"
-                            onclick="return confirm('Clear all progress for this book?')">🔄</button>
+                            title="Clear progress" onclick="return confirm('Clear all progress for this book?')">🔄</button>
                     </form>
                     <form method="POST" action="/delete/{{ mapping.abs_id }}">
                         <button type="submit" class="action-btn danger" aria-label="Delete Mapping"
-                            onclick="return confirm('Delete this mapping?')">🗑️</button>
+                            title="Delete mapping" onclick="return confirm('Delete this mapping?')">🗑️</button>
                     </form>
                 </div>
             </div>
