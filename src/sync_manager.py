@@ -2218,6 +2218,40 @@ class SyncManager:
                 
         return leader, leader_pct
 
+    @staticmethod
+    def _locator_collapsed_to_start(locator, leader_pct, epsilon: float = 0.005) -> bool:
+        """True when a resolved locator points at the very start of the book (0%)
+        even though the leader is materially ahead — i.e. the locator/XPath
+        resolution failed and silently fell through to char 0 (a no-longer-resolving
+        KoSync XPath, or an out-of-range alignment timestamp mapping back to the
+        start). Pushing that 0% to the other clients would wipe real progress, so
+        the caller should skip the cross-client write. A genuine "reset to start"
+        keeps leader_pct near 0 and returns False."""
+        if locator is None or leader_pct is None:
+            return False
+        pct = locator.percentage
+        if pct is None:
+            return False
+        return pct <= epsilon < leader_pct
+
+    def _persist_state_snapshot(self, book, client_name: str, state_current: dict, current_time: float) -> None:
+        """Save a single client's current position to the DB without running a
+        cross-client sync. Used to record a leader's own (unchanged) value so a
+        static/stale source — e.g. a manual-link sibling-hash resolution that never
+        receives a new PUT — is not re-detected as a fresh change every cycle."""
+        try:
+            self.database_service.save_state(State(
+                abs_id=book.abs_id,
+                client_name=client_name.lower(),
+                last_updated=current_time,
+                percentage=state_current.get('pct'),
+                timestamp=state_current.get('ts'),
+                xpath=state_current.get('xpath'),
+                cfi=state_current.get('cfi'),
+            ))
+        except Exception as e:
+            logger.debug(f"Could not persist state snapshot for '{client_name}': {e}")
+
     def sync_cycle(self, target_abs_id=None, user_id=None):
         """
         Run a sync cycle.
@@ -2764,6 +2798,27 @@ class SyncManager:
                     f"epub='{sanitize_log_data(epub)}' "
                     f"original_epub='{sanitize_log_data(getattr(book, 'original_ebook_filename', None))}'"
                 )
+
+                # Guard: never write a start-of-book (0%) reset that came from a
+                # FAILED locator resolution. When the leader is materially ahead but
+                # the resolved locator collapsed to ~0% — e.g. a KoSync XPath that no
+                # longer resolves in this EPUB, or an out-of-range alignment timestamp
+                # mapping back to char 0 — pushing that 0% to ABS/the other clients
+                # silently wipes real progress (issue #290 follow-up). A genuine reset
+                # keeps leader_pct ~0 and is unaffected.
+                if self._locator_collapsed_to_start(locator, leader_pct):
+                    logger.warning(
+                        f"⚠️ '{abs_id}' '{title_snip}' Resolved locator collapsed to "
+                        f"start-of-book (0%) while leader '{leader}' is at "
+                        f"{leader_formatter(leader_pct)} (source={locator_source or 'unknown'}) "
+                        f"— treating as a failed locator resolution; skipping cross-client "
+                        f"write to preserve existing progress"
+                    )
+                    # Record the leader's own (static) value so this unchanged
+                    # position is not re-detected as a fresh change every cycle —
+                    # a stale sibling-hash resolution must not perpetually re-trigger.
+                    self._persist_state_snapshot(book, leader, leader_state.current, time.time())
+                    continue
 
                 # Update all other clients and store results.
                 # When an audiobook companion (Storyteller) is the leader, its forward
