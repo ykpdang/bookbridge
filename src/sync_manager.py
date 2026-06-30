@@ -1004,6 +1004,8 @@ class SyncManager:
             pending = sorted(self._pending_sync_books)
             self._pending_sync_books.clear()
 
+        if pending:
+            logger.info(f"⚡ Replaying {len(pending)} queued instant sync(s) deferred during the busy cycle")
         for user_id, abs_id in pending:
             logger.info(f"⚡ Replaying queued instant sync for '{abs_id}'")
             kwargs = {'target_abs_id': abs_id}
@@ -2292,11 +2294,15 @@ class SyncManager:
             acquired = False
             if target_abs_id:
                  # Instant Sync: Block and wait for lock (up to 10s)
+                 lock_wait_t0 = time.monotonic()
                  acquired = self._sync_lock.acquire(timeout=10)
+                 lock_wait = time.monotonic() - lock_wait_t0
                  if not acquired:
                      self._queue_pending_sync(target_abs_id, user_id=user_id)
-                     logger.warning(f"⚠️ Sync lock timeout for '{target_abs_id}' - queued follow-up sync")
+                     logger.warning(f"⚠️ Sync lock timeout for '{target_abs_id}' after {lock_wait:.1f}s - queued follow-up sync")
                      return
+                 if lock_wait > 1.0:
+                     logger.info(f"⏳ Instant sync for '{target_abs_id}' waited {lock_wait:.1f}s for the sync lock")
             else:
                  # Daemon: Non-blocking attempt
                  acquired = self._sync_lock.acquire(blocking=False)
@@ -2518,7 +2524,10 @@ class SyncManager:
                 self.check_for_suggestions(bulk_states_per_client['ABS'], active_books)
                 
         # Main sync loop - process each active book
+        cycle_t0 = time.monotonic()
+        book_durations = []
         for book in active_books:
+            book_t0 = time.monotonic()
             abs_id = book.abs_id
             logger.info(f"🔄 '{abs_id}' Syncing '{sanitize_log_data(book.abs_title or 'Unknown')}'")
             title_snip = sanitize_log_data(book.abs_title or 'Unknown')
@@ -2942,7 +2951,22 @@ class SyncManager:
             except Exception as e:
                 logger.error(traceback.format_exc())
                 logger.error(f"❌ Sync error: {e}")
+            finally:
+                book_durations.append((time.monotonic() - book_t0, title_snip))
 
+        cycle_elapsed = time.monotonic() - cycle_t0
+        n_books = len(book_durations)
+        if n_books:
+            slowest_dur, slowest_title = max(book_durations)
+            avg_ms = (cycle_elapsed / n_books) * 1000
+            summary = (
+                f"⏱️ Sync cycle finished: {n_books} book(s) in {cycle_elapsed:.1f}s "
+                f"(avg {avg_ms:.0f}ms/book, slowest {slowest_dur:.1f}s '{slowest_title}')"
+            )
+            if target_abs_id:
+                logger.debug(summary)
+            else:
+                logger.info(summary)
         logger.debug("End of sync cycle for active books")
 
     def _compute_session_duration(
