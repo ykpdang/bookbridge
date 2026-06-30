@@ -66,6 +66,7 @@
         .source-badge.localfile { background: rgba(156,39,176,0.2); color: #ce93d8; }
         .source-badge.unknown { background: rgba(255,255,255,0.14); color: rgba(255,255,255,0.85); }
         .source-badge.transcript { background: rgba(167,139,250,0.2); color: #a78bfa; }
+        .source-badge.samefolder { background: rgba(45,212,191,0.18); color: #5eead4; }
         .score { display: inline-block; margin-bottom: 4px; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; color: #7ec8ff; background: rgba(126,200,255,0.12); border: 1px solid rgba(126,200,255,0.32); }
         .card-actions { margin-top: 8px; width: 100%; display: flex; gap: 8px; justify-content: flex-start; flex-wrap: wrap; }
         .card-actions .btn { opacity: 1; border-width: 1px; font-weight: 700; }
@@ -302,6 +303,7 @@
                             <input type="hidden" name="ebook_display_name" id="selected_ebook_display_name" value="">
                             <input type="hidden" name="ebook_source" id="selected_ebook_source" value="">
                             <input type="hidden" name="ebook_source_id" id="selected_ebook_source_id" value="">
+                            <input type="hidden" name="ebook_source_path" id="selected_ebook_source_path" value="">
                             <input type="hidden" name="storyteller_uuid" id="selected_storyteller_uuid" value="">
                             <label class="field-label" for="storytellerCardGrid">Storyteller (Preferred)</label>
                             <p class="field-hint">Optional. Choose this to create a tri-link.</p>
@@ -497,12 +499,13 @@
                 });
         }
 
-        function setSelectedEbook(filename, displayName, source = '', sourceId = '') {
+        function setSelectedEbook(filename, displayName, source = '', sourceId = '', sourcePath = '') {
             const hasSelection = !!filename;
             document.getElementById('selected_ebook_filename').value = hasSelection ? filename : '';
             document.getElementById('selected_ebook_display_name').value = hasSelection ? (displayName || filename) : '';
             document.getElementById('selected_ebook_source').value = hasSelection ? (source || '') : '';
             document.getElementById('selected_ebook_source_id').value = hasSelection ? (sourceId || '') : '';
+            document.getElementById('selected_ebook_source_path').value = hasSelection ? (sourcePath || '') : '';
             updateAddButton();
         }
 
@@ -510,10 +513,10 @@
             document.querySelectorAll('#ebookCardGrid .ebook-card').forEach((card) => card.classList.remove('selected'));
         }
 
-        function selectEbookCard(element, filename, displayName, source, sourceId) {
+        function selectEbookCard(element, filename, displayName, source, sourceId, sourcePath) {
             clearSelectedEbookCards();
             if (element) element.classList.add('selected');
-            setSelectedEbook(filename, displayName, source, sourceId);
+            setSelectedEbook(filename, displayName, source, sourceId, sourcePath);
         }
 
         function updateAddButton() {
@@ -749,6 +752,8 @@
                 const displayName = match.display_name || ebookFilename;
                 const source = match.source || inferSourceFromFilename(ebookFilename);
                 const sourceId = match.source_id || '';
+                const sourcePath = match.source_path || match.path || '';
+                const matchReason = match.match_reason || '';
                 const author = match.author || '';
                 const score = Math.round(match.score || 0);
 
@@ -758,7 +763,15 @@
                 card.dataset.displayName = displayName;
                 card.dataset.source = source || '';
                 card.dataset.sourceId = sourceId || '';
-                card.onclick = () => selectEbookCard(card, ebookFilename, displayName, source, sourceId);
+                card.dataset.sourcePath = sourcePath || '';
+                card.onclick = () => selectEbookCard(
+                    card,
+                    ebookFilename,
+                    displayName,
+                    source,
+                    sourceId,
+                    sourcePath
+                );
 
                 const icon = document.createElement('div');
                 icon.className = 'ebook-icon';
@@ -791,6 +804,13 @@
                     card.appendChild(badge);
                 }
 
+                if (matchReason === 'same_folder' || matchReason === 'same_folder_ambiguous') {
+                    const folderBadge = document.createElement('span');
+                    folderBadge.className = 'source-badge samefolder';
+                    folderBadge.textContent = matchReason === 'same_folder' ? 'Same folder' : 'Same folder?';
+                    card.appendChild(folderBadge);
+                }
+
                 grid.appendChild(card);
             });
 
@@ -804,6 +824,7 @@
                         firstCard.dataset.displayName || '',
                         firstCard.dataset.source || '',
                         firstCard.dataset.sourceId || '',
+                        firstCard.dataset.sourcePath || '',
                     );
                 }
             } else {

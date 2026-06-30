@@ -145,6 +145,10 @@ You can start in either of these ways:
 4. Add the good ones to the queue.
 5. Click **Process All**.
 
+If your audiobook and ebook services point at the same mounted `/books` tree,
+sibling audio and ebook files in the same title folder appear as high-confidence
+same-folder matches.
+
 ### Add Book
 
 1. Open **Add Book**.

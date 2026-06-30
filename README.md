@@ -30,6 +30,8 @@
 - **Smart Alignment Sources**: Uses Storyteller forced-alignment transcripts when available, then SMIL, then Whisper fallback.
 - **Web UI**: Full management dashboard for tracking syncs and matching books.
 - **Library Suggestions Page**: Scan your library for likely audiobook + ebook pairs, review them, and queue matches in bulk.
+- **Same-Folder Matching**: Treat sibling audiobook and ebook files in the same
+  title folder as high-confidence matches.
 - **Guided Settings Workflow**: Check your service settings from the UI and save everything in one place.
 - **Optional Bridge Sync Plugin Collections**: If you install the Bridge Sync KOReader plugin, Grimmory shelves can be used to shape KOReader collections.
 - **Split-Port Security**: Expose only the sync API to the internet while keeping the dashboard on your LAN.

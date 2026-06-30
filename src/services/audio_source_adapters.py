@@ -25,6 +25,7 @@ class AudioResult:
     display_name: str = ""
     provider_book_id: Optional[str] = None
     provider_file_id: Optional[str] = None
+    path: str = ""
 
 
 class AudioSourceAdapter:
@@ -105,6 +106,45 @@ class ABSAudioSourceAdapter(AudioSourceAdapter):
         metadata = media.get("metadata", {}) or item.get("metadata", {}) or {}
         return metadata.get("authorName") or ""
 
+    @staticmethod
+    def _extract_item_path(item: dict) -> str:
+        media = item.get("media", {}) or {}
+        metadata = media.get("metadata", {}) or item.get("metadata", {}) or {}
+        candidates = [
+            item.get("path"),
+            item.get("folderPath"),
+            item.get("relPath"),
+            media.get("path"),
+            media.get("folderPath"),
+            media.get("relPath"),
+            metadata.get("path"),
+            metadata.get("folderPath"),
+        ]
+
+        for library_file in item.get("libraryFiles", []) or []:
+            file_metadata = library_file.get("metadata", {}) or {}
+            candidates.extend([
+                library_file.get("path"),
+                library_file.get("relPath"),
+                file_metadata.get("path"),
+                file_metadata.get("relPath"),
+            ])
+
+        for audio_file in media.get("audioFiles", []) or []:
+            file_metadata = audio_file.get("metadata", {}) or {}
+            candidates.extend([
+                audio_file.get("path"),
+                audio_file.get("relPath"),
+                file_metadata.get("path"),
+                file_metadata.get("relPath"),
+            ])
+
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if text:
+                return text
+        return ""
+
     def search(self, query: str) -> list[AudioResult]:
         library_scope = self._parse_library_scope()
         query_mode = bool(query)
@@ -145,6 +185,7 @@ class ABSAudioSourceAdapter(AudioSourceAdapter):
                     duration=float(duration) if duration is not None else None,
                     display_name=title,
                     provider_book_id=item_id,
+                    path=self._extract_item_path(item),
                 )
             )
         return results
@@ -255,6 +296,35 @@ class BookLoreAudioSourceAdapter(AudioSourceAdapter):
                     return seconds
         return None
 
+    @staticmethod
+    def _extract_book_path(book: dict) -> str:
+        info = book.get("audiobookInfo") or {}
+        primary_file = book.get("primaryFile") or {}
+        candidates = [
+            info.get("filePath"),
+            info.get("filepath"),
+            info.get("path"),
+            primary_file.get("filePath"),
+            primary_file.get("filepath"),
+            primary_file.get("path"),
+            book.get("filePath"),
+            book.get("filepath"),
+            book.get("path"),
+        ]
+
+        for track in info.get("tracks", []) or []:
+            candidates.extend([
+                track.get("filePath"),
+                track.get("filepath"),
+                track.get("path"),
+            ])
+
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if text:
+                return text
+        return ""
+
     def search(self, query: str) -> list[AudioResult]:
         results: list[AudioResult] = []
         include_info = bool(query and query.strip())
@@ -278,6 +348,7 @@ class BookLoreAudioSourceAdapter(AudioSourceAdapter):
                     display_name=title,
                     provider_book_id=str(book_id),
                     provider_file_id=str(provider_file_id) if provider_file_id is not None else None,
+                    path=self._extract_book_path(book),
                 )
             )
         return results

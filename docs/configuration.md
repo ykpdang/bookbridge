@@ -268,6 +268,9 @@ Suggestions notes:
 - A normal scan reuses cached results so repeat scans are faster.
 - **Full Refresh** rescans the whole unmatched library from scratch.
 - Suggestions can queue ABS-backed links, Grimmory-audio links, ebook-only links, and Storyteller-only links.
+- If your audio and ebook providers expose the same mounted `/books` tree,
+  sibling files in the same title folder are treated as same-folder matches
+  before fuzzy or Ollama scoring.
 
 ### Transcription Settings
 

@@ -2188,6 +2188,7 @@ def get_suggestion_audiobooks():
                 "audio_author": author,
                 "audio_duration": item.duration,
                 "audio_cover_url": item.cover_url or "",
+                "audio_path": item.path or "",
                 "audio_provider_book_id": str(item.provider_book_id or source_id),
                 "audio_provider_file_id": str(item.provider_file_id or ""),
                 # Legacy aliases maintained for compatibility with existing templates/session keys.
@@ -2258,6 +2259,7 @@ def get_searchable_ebooks(search_term):
                             subtitle=b.get('subtitle'),
                             authors=b.get('authors'),
                             booklore_id=b.get('id'),
+                            path=b.get('filePath') or b.get('filepath') or b.get('path'),
                             source='Grimmory'
                         ))
         except Exception as e:
@@ -2290,6 +2292,7 @@ def get_searchable_ebooks(search_term):
                     name=fname,
                     title=b.get('title'),
                     authors=b.get('authors'),
+                    path=b.get('filePath') or b.get('filepath') or b.get('path'),
                     source='BookOrbit',
                     source_id=b.get('id'),
                 ))

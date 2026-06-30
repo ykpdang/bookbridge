@@ -249,6 +249,7 @@ class ShelfWatchService:
             'title': (grimmory_book.get('title') or '').strip(),
             'authors': self._extract_author(grimmory_book),
             'grimmory_id': grimmory_id,
+            'path': grimmory_book.get('filePath') or grimmory_book.get('filepath') or grimmory_book.get('path') or '',
         }
 
         scan_result = self._get_suggestions_service()._scan_single_ebook(ebook_anchor, candidate_pool)
