@@ -72,6 +72,11 @@ SUGGESTIONS_STATE_LOCK = threading.Lock()
 SUGGESTIONS_STATE_TTL_SECONDS = 86400
 SUGGESTIONS_CACHE_FILE_NAME = "suggestions_scan_cache.json"
 SUGGESTIONS_CACHE_LOCK = threading.Lock()
+# Batch-match queue lives on disk (under DATA_DIR) instead of the Flask session cookie:
+# the cookie caps at ~4KB (~a dozen items) and is per-browser; the file store is
+# unbounded, survives container rebuilds, and is shared across the admin's tabs.
+MATCH_QUEUE_FILE_NAME = "match_queue.json"
+MATCH_QUEUE_LOCK = threading.RLock()
 STATS_CACHE = {}
 STATS_CACHE_LOCK = threading.Lock()
 STATS_CACHE_TTL_SECONDS = 60
@@ -5084,7 +5089,6 @@ def _add_book_view(template_name, self_endpoint):
     if request.method == 'POST':
         action = request.form.get('action')
         if action == 'add_to_queue':
-            session.setdefault('queue', [])
             abs_id = request.form.get('audiobook_id')
             audio_source = (request.form.get('audio_source') or ('ABS' if abs_id else '')).strip() or None
             audio_source_id = (request.form.get('audio_source_id') or abs_id or '').strip() or None
@@ -5140,50 +5144,40 @@ def _add_book_view(template_name, self_endpoint):
                     }
 
             if selected_audio and (ebook_filename or storyteller_uuid):
-                if not any(item['bridge_key'] == selected_audio['bridge_key'] for item in session['queue']):
-                    session['queue'].append({
-                        **selected_audio,
-                        "abs_id": selected_audio['bridge_key'],
-                        "abs_title": selected_audio['audio_title'],
-                        "ebook_filename": ebook_filename,
-                        "ebook_display_name": ebook_display_name,
-                        "ebook_source": ebook_source,
-                        "ebook_source_id": ebook_source_id,
-                        "ebook_source_path": ebook_source_path,
-                        "storyteller_uuid": storyteller_uuid,
-                        "duration": selected_audio['audio_duration'],
-                        "cover_url": selected_audio['audio_cover_url'],
-                    })
-                    session.modified = True
+                _match_queue_add({
+                    **selected_audio,
+                    "abs_id": selected_audio['bridge_key'],
+                    "abs_title": selected_audio['audio_title'],
+                    "ebook_filename": ebook_filename,
+                    "ebook_display_name": ebook_display_name,
+                    "ebook_source": ebook_source,
+                    "ebook_source_id": ebook_source_id,
+                    "ebook_source_path": ebook_source_path,
+                    "storyteller_uuid": storyteller_uuid,
+                    "duration": selected_audio['audio_duration'],
+                    "cover_url": selected_audio['audio_cover_url'],
+                })
             return redirect(url_for(self_endpoint, search=request.form.get('search', '')))
         elif action == 'remove_from_queue':
             abs_id = request.form.get('abs_id')
-            session['queue'] = [item for item in session.get('queue', []) if item['abs_id'] != abs_id]
-            session.modified = True
+            _match_queue_remove(abs_id)
             return redirect(url_for(self_endpoint))
         elif action == 'clear_queue':
-            session['queue'] = []
-            session.modified = True
+            _match_queue_clear()
             return redirect(url_for(self_endpoint))
         elif action == 'forge_and_match_queue':
-            _queue_items = list(session.get('queue', []))
-            session['queue'] = []
-            session.modified = True
+            _queue_items = _match_queue_drain()
             _spawn_user_background(_process_forge_match_queue, _queue_items, label="batch-forge-match")
             flash(f"Forging + matching {len(_queue_items)} book(s) in the background…", "info")
             return redirect(url_for('index'))
         elif action == 'forge_only_queue':
-            _queue_items = list(session.get('queue', []))
-            session['queue'] = []
-            session.modified = True
+            _queue_items = _match_queue_drain()
             forge_stage_mode = (request.form.get('forge_stage_mode') or '').strip() or None
             _spawn_user_background(_process_forge_only_queue, _queue_items, forge_stage_mode, label="add-book-forge-only")
             flash(f"Forging {len(_queue_items)} edition(s) in the background…", "info")
             return redirect(url_for('index'))
         elif action == 'process_queue':
-            _queue_items = list(session.get('queue', []))
-            session['queue'] = []
-            session.modified = True
+            _queue_items = _match_queue_drain()
             _spawn_user_background(_process_batch_queue, _queue_items, label="batch-match-process")
             flash(f"Processing {len(_queue_items)} book(s) in the background…", "info")
             return redirect(url_for('index'))
@@ -5206,7 +5200,7 @@ def _add_book_view(template_name, self_endpoint):
                 logger.warning(f"⚠️ Storyteller search failed in batch_match route: {e}")
 
     return render_template(template_name, audiobooks=audiobooks, ebooks=ebooks, storyteller_books=storyteller_books,
-                           queue=session.get('queue', []), search=search, self_endpoint=self_endpoint)
+                           queue=_load_match_queue(), search=search, self_endpoint=self_endpoint)
 
 
 def batch_match():
@@ -5484,6 +5478,85 @@ def _save_persisted_suggestions_cache(payload):
                 pass
 
 
+def _match_queue_file_path():
+    return DATA_DIR / MATCH_QUEUE_FILE_NAME
+
+
+def _read_match_queue_unlocked() -> list:
+    queue_file = _match_queue_file_path()
+    if not queue_file.exists():
+        return []
+    try:
+        raw = json.loads(queue_file.read_text(encoding='utf-8'))
+    except Exception as e:
+        logger.warning(f"Could not read match queue file '{queue_file}': {e}")
+        return []
+    items = raw.get('items', []) if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _write_match_queue_unlocked(items: list) -> None:
+    queue_file = _match_queue_file_path()
+    queue_file.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"items": items if isinstance(items, list) else [], "updated_at": time.time()}
+    temp_file = queue_file.with_suffix('.tmp')
+    try:
+        temp_file.write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')
+        temp_file.replace(queue_file)
+    except Exception as e:
+        logger.warning(f"Could not persist match queue file '{queue_file}': {e}")
+        try:
+            if temp_file.exists():
+                temp_file.unlink()
+        except Exception:
+            pass
+
+
+def _load_match_queue() -> list:
+    """Return the persisted batch-match queue items."""
+    with MATCH_QUEUE_LOCK:
+        return _read_match_queue_unlocked()
+
+
+def _save_match_queue(items: list) -> None:
+    """Replace the persisted batch-match queue with the given items."""
+    with MATCH_QUEUE_LOCK:
+        _write_match_queue_unlocked(items)
+
+
+def _match_queue_add(item: dict) -> bool:
+    """Append an item unless its bridge_key is already queued. Returns True if added."""
+    with MATCH_QUEUE_LOCK:
+        items = _read_match_queue_unlocked()
+        bridge_key = item.get('bridge_key')
+        if bridge_key and any(existing.get('bridge_key') == bridge_key for existing in items):
+            return False
+        items.append(item)
+        _write_match_queue_unlocked(items)
+        return True
+
+
+def _match_queue_remove(abs_id) -> None:
+    with MATCH_QUEUE_LOCK:
+        items = [item for item in _read_match_queue_unlocked() if item.get('abs_id') != abs_id]
+        _write_match_queue_unlocked(items)
+
+
+def _match_queue_clear() -> None:
+    with MATCH_QUEUE_LOCK:
+        _write_match_queue_unlocked([])
+
+
+def _match_queue_drain() -> list:
+    """Return all queued items and clear the queue atomically."""
+    with MATCH_QUEUE_LOCK:
+        items = _read_match_queue_unlocked()
+        _write_match_queue_unlocked([])
+        return items
+
+
 def suggestions_page():
     _clear_legacy_suggestions_session_payload()
     state_id, suggestions_state = _get_suggestions_state(create=True)
@@ -5592,7 +5665,6 @@ def suggestions_page():
             return redirect(url_for('suggestions'))
 
         elif action == 'add_to_queue':
-            session.setdefault('queue', [])
             bridge_key = (request.form.get('audiobook_id') or '').strip()
             audio_source = (
                 request.form.get('audio_source')
@@ -5648,38 +5720,34 @@ def suggestions_page():
                 }
 
             if selected_audio and (ebook_filename or storyteller_uuid):
-                if not any(item.get('bridge_key') == selected_audio['bridge_key'] for item in session['queue']):
-                    session['queue'].append({
-                        **selected_audio,
-                        "abs_id": selected_audio['bridge_key'],
-                        "abs_title": selected_audio['audio_title'],
-                        "ebook_filename": ebook_filename,
-                        "ebook_display_name": ebook_display_name,
-                        "ebook_source": ebook_source,
-                        "ebook_source_id": ebook_source_id,
-                        "ebook_source_path": ebook_source_path,
-                        "storyteller_uuid": storyteller_uuid,
-                        "duration": selected_audio['audio_duration'],
-                        "cover_url": selected_audio['audio_cover_url'],
-                    })
-                    session.modified = True
+                _match_queue_add({
+                    **selected_audio,
+                    "abs_id": selected_audio['bridge_key'],
+                    "abs_title": selected_audio['audio_title'],
+                    "ebook_filename": ebook_filename,
+                    "ebook_display_name": ebook_display_name,
+                    "ebook_source": ebook_source,
+                    "ebook_source_id": ebook_source_id,
+                    "ebook_source_path": ebook_source_path,
+                    "storyteller_uuid": storyteller_uuid,
+                    "duration": selected_audio['audio_duration'],
+                    "cover_url": selected_audio['audio_cover_url'],
+                })
             return redirect(url_for('suggestions'))
 
         elif action == 'remove_from_queue':
             abs_id = request.form.get('abs_id')
-            session['queue'] = [item for item in session.get('queue', []) if item['abs_id'] != abs_id]
-            session.modified = True
+            _match_queue_remove(abs_id)
             return redirect(url_for('suggestions'))
 
         elif action == 'clear_queue':
-            session['queue'] = []
-            session.modified = True
+            _match_queue_clear()
             return redirect(url_for('suggestions'))
 
         elif action == 'process_queue':
             from src.db.models import Book
 
-            for item in session.get('queue', []):
+            for item in _load_match_queue():
                 audio_source = item.get('audio_source') or 'ABS'
                 if audio_source == 'BookLore':
                     saved_book, err_msg, _err_code = _create_or_update_booklore_audio_mapping(
@@ -5849,8 +5917,7 @@ def suggestions_page():
                 except Exception:
                     pass
 
-            session['queue'] = []
-            session.modified = True
+            _match_queue_clear()
             return redirect(url_for('index'))
 
     scan_in_progress = False
@@ -6014,7 +6081,7 @@ def suggestions_page():
     return render_template(
         'suggestions.html',
         suggestions=scan_results,
-        queue=session.get('queue', []),
+        queue=_load_match_queue(),
         scan_has_run=bool(suggestions_state.get('scan_has_run', False)),
         scan_in_progress=scan_in_progress,
         scan_error=scan_error,
