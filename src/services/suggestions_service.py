@@ -270,6 +270,13 @@ class SuggestionsService:
     _SUGGEST_FUZZY_FLOOR = 45.0
     _SUGGEST_TITLE_STRONG = 85.0
 
+    # A same-folder pair is auto-trusted (exact 100, pinned ahead of and skipping the
+    # Ollama judge) only when the titles ALSO loosely agree. Without this, a lone
+    # audiobook + ebook that merely share a *grouping* folder — e.g. a flat author
+    # folder holding two different books — would surface as a confident 100% match and
+    # bypass all fuzzy/Ollama verification. Below the floor the pair stays reviewable.
+    _SAME_FOLDER_TITLE_FLOOR = 45.0
+
     @staticmethod
     def _normalize_title_for_match(text: str) -> str:
         """Strip surface noise that wrecks fuzzy/embedding scoring: leading numbering
@@ -359,6 +366,19 @@ class SuggestionsService:
             cls._parent_dir_key(right_path),
         )
 
+    @classmethod
+    def _same_folder_tier(cls, same_folder_count: int, title_score: float) -> tuple[float, str]:
+        """Score/reason for a same-folder candidate.
+
+        Exact ('same_folder', 100) requires the folder to hold a single candidate AND the
+        titles to loosely agree, so a wrong pairing sharing a grouping folder can't be
+        auto-trusted past the judge. Everything else stays reviewable
+        ('same_folder_ambiguous', 94, surfaced with a 'Same folder?' badge).
+        """
+        if same_folder_count == 1 and title_score >= cls._SAME_FOLDER_TITLE_FLOOR:
+            return 100.0, "same_folder"
+        return 94.0, "same_folder_ambiguous"
+
     def _suggestion_shell(self, ab: dict, matches: List[dict]) -> dict:
         """Build the suggestion dict skeleton (audio metadata + matches)."""
         audio_source = self._audio_source(ab)
@@ -429,11 +449,10 @@ class SuggestionsService:
             norm_candidate_title = self._normalize_title_for_match(candidate_info["title"])
 
             if self._paths_share_parent(audio_path, candidate_info.get("path")):
-                score = 100.0 if same_folder_count == 1 else 94.0
+                title_score = float(fuzz.token_sort_ratio(norm_audio_title, norm_candidate_title))
+                score, match_reason = self._same_folder_tier(same_folder_count, title_score)
                 match = self._match_from_pool(candidate_info, score)
-                match["match_reason"] = (
-                    "same_folder" if same_folder_count == 1 else "same_folder_ambiguous"
-                )
+                match["match_reason"] = match_reason
                 matches.append(match)
                 continue
 
@@ -1083,7 +1102,8 @@ class SuggestionsService:
                 cand.get("audio_path") or cand.get("path"),
             )
             if same_folder:
-                score = 100.0 if same_folder_count == 1 else 94.0
+                title_score = float(fuzz.token_sort_ratio(ebook_title, cand_title))
+                score, match_reason = self._same_folder_tier(same_folder_count, title_score)
                 matches.append({
                     "audio_source": cand.get("audio_source", ""),
                     "audio_source_id": cand.get("audio_source_id", ""),
@@ -1095,11 +1115,7 @@ class SuggestionsService:
                     "audio_provider_book_id": cand.get("audio_provider_book_id", ""),
                     "audio_provider_file_id": cand.get("audio_provider_file_id", ""),
                     "score": score,
-                    "match_reason": (
-                        "same_folder"
-                        if same_folder_count == 1
-                        else "same_folder_ambiguous"
-                    ),
+                    "match_reason": match_reason,
                 })
                 if best_overall is None or score > best_overall[0]:
                     best_overall = (score, cand_title, cand_author)

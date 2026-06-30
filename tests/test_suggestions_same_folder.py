@@ -37,14 +37,14 @@ def _ebook(title: str, path: str) -> SimpleNamespace:
 def test_scan_single_audiobook_scores_same_folder_as_exact_match():
     svc = _build_service()
     candidate_pool = svc._prepare_candidate_pool([
-        _ebook("Unrelated Ebook Title", "/books/Alice/Series/Shared Folder/book.epub"),
+        _ebook("Shared Title Book", "/books/Alice/Series/Shared Folder/book.epub"),
     ])
 
     result = svc._scan_single_audiobook(
         {
             "audio_source": "ABS",
             "audio_source_id": "abs-1",
-            "audio_title": "Totally Different Audio Title",
+            "audio_title": "Shared Title Book",
             "audio_author": "Different Author",
             "audio_path": "/books/Alice/Series/Shared Folder/audio.m4b",
         },
@@ -54,6 +54,31 @@ def test_scan_single_audiobook_scores_same_folder_as_exact_match():
     assert result is not None
     assert result["matches"][0]["score"] == 100.0
     assert result["matches"][0]["match_reason"] == "same_folder"
+
+
+def test_same_folder_with_grossly_mismatched_titles_stays_reviewable():
+    # A lone audiobook + ebook sharing a folder but with unrelated titles (e.g. two
+    # different books in a flat author folder) must NOT be auto-trusted as an exact
+    # 100% match — it stays reviewable so the judge gate / user can vet it.
+    svc = _build_service()
+    candidate_pool = svc._prepare_candidate_pool([
+        _ebook("Warbreaker", "/books/Sanderson/warbreaker.epub"),
+    ])
+
+    result = svc._scan_single_audiobook(
+        {
+            "audio_source": "ABS",
+            "audio_source_id": "abs-1",
+            "audio_title": "Mistborn",
+            "audio_author": "Different Author",
+            "audio_path": "/books/Sanderson/audio.m4b",
+        },
+        candidate_pool,
+    )
+
+    assert result is not None
+    assert result["matches"][0]["score"] == 94.0
+    assert result["matches"][0]["match_reason"] == "same_folder_ambiguous"
 
 
 def test_candidate_path_is_json_serializable():
@@ -121,14 +146,14 @@ def test_exact_same_folder_match_skips_ollama_reranking(monkeypatch):
 def test_same_folder_match_allows_relative_suffix_paths():
     svc = _build_service()
     candidate_pool = svc._prepare_candidate_pool([
-        _ebook("Unrelated Ebook Title", "/books/Alice/Series/Shared Folder/book.epub"),
+        _ebook("Shared Title Book", "/books/Alice/Series/Shared Folder/book.epub"),
     ])
 
     result = svc._scan_single_audiobook(
         {
             "audio_source": "ABS",
             "audio_source_id": "abs-1",
-            "audio_title": "Totally Different Audio Title",
+            "audio_title": "Shared Title Book",
             "audio_author": "Different Author",
             "audio_path": "Alice/Series/Shared Folder",
         },
