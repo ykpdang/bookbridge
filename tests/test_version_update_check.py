@@ -1,8 +1,8 @@
 """Tests for the in-app update checker (src/version.py).
 
-Issue #290 Bug 3: the update check hardcoded `cporcellijr/bookbridge`, but that
-rename is still pending, so every check 404'd. It must hit the real repo
-(APP_REPO, defaulting to the current name) so the version comparison works.
+Issue #290 Bug 3: the update check must hit the configured repo (APP_REPO) so
+the version comparison works. As of the 2026-07-01 rename, APP_REPO defaults to
+`cporcellijr/bookbridge`.
 """
 
 import importlib
@@ -37,9 +37,9 @@ def test_update_check_queries_configured_repo():
     assert available is True  # 6.7.0 installed, 6.8 released
 
 
-def test_update_check_default_repo_is_not_the_pending_rename():
+def test_update_check_default_repo_is_the_renamed_repo():
     mod = _fresh_version_module({"APP_VERSION": "6.8"})
-    assert mod.APP_REPO == "cporcellijr/abs-kosync-bridge"
+    assert mod.APP_REPO == "cporcellijr/bookbridge"
 
 
 def test_dev_build_never_reports_update_available():
