@@ -851,6 +851,13 @@
                         <div class="help-text">Wait this many seconds after KoReader stops sending PUTs before running the sync cycle.</div>
                     </div>
                     <div class="checkbox-wrapper full-width">
+                        <input type="checkbox" id="koreader_annotation_sync" name="KOREADER_ANNOTATION_SYNC" {% if
+                            get_bool('KOREADER_ANNOTATION_SYNC') %}checked{% endif %}>
+                        <label for="koreader_annotation_sync">Sync highlights &amp; notes between devices</label>
+                        <div class="help-text">Relay KOReader highlights/notes between your devices through the bridge
+                            (BridgeSync plugin required on each device). Deletions and note edits propagate too.</div>
+                    </div>
+                    <div class="checkbox-wrapper full-width">
                         <input type="checkbox" id="kosync_pct" name="KOSYNC_USE_PERCENTAGE_FROM_SERVER" {% if
                             get_bool('KOSYNC_USE_PERCENTAGE_FROM_SERVER') %}checked{% endif %}>
                         <label for="kosync_pct">Use Percentage from Server (Ignore Text Matching)</label>
@@ -1105,6 +1112,19 @@
                                 value="{{ get_val('BOOKORBIT_SHELF_WATCH_RESCAN_HOURS', '24') }}">
                             <div class="help-text">Books on the watch collection with no audio candidate are re-scanned no more often than this.</div>
                         </div>
+                    </div>
+
+                    <!-- Annotation / highlight sync -->
+                    <div class="full-width" style="margin: 10px 0; border-top: 1px solid rgba(255,255,255,0.1);"></div>
+                    <h4 class="full-width" style="font-size: 14px; color: #fff; margin-bottom: -10px;">Highlight Sync</h4>
+                    <div class="form-group">
+                        <label>Highlight Sync Interval (minutes)</label>
+                        <input type="number" min="0" name="BOOKORBIT_ANNOTATION_SYNC_MINUTES"
+                            value="{{ get_val('BOOKORBIT_ANNOTATION_SYNC_MINUTES', '15') }}">
+                        <div class="help-text">Sync highlights/notes between your devices and BookOrbit's web reader
+                            every N minutes (0 disables). Each user also needs their BookOrbit <strong>KOReader sync</strong>
+                            username &amp; password set in Settings → Users → (user) → Integrations — the same
+                            credentials BookOrbit's own KOReader plugin uses.</div>
                     </div>
                 </div>
             </div>

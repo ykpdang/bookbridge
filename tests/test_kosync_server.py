@@ -1903,5 +1903,118 @@ class TestResolveLibraryEbookSource(unittest.TestCase):
             self.assertEqual(kosync_server._resolve_library_ebook_source("x.epub"), (None, None))
 
 
+class TestAnnotationExchangeEndpoints(unittest.TestCase):
+    """Device-facing annotation hub endpoints (exchange + ack)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import hashlib
+        cls.db_path = os.path.join(TEST_DIR, 'test_annotations.db')
+        from src import web_server
+        web_server.database_service = DatabaseService(cls.db_path)
+        from src.api import kosync_server
+        kosync_server._database_service = web_server.database_service
+        if not hasattr(web_server, 'app'):
+            web_server.app, _ = web_server.create_app()
+        cls.app = web_server.app
+        cls.client = cls.app.test_client()
+        cls.auth_headers = {
+            'x-auth-user': 'testuser',
+            'x-auth-key': hashlib.md5(b'testpass').hexdigest(),
+            'Content-Type': 'application/json',
+        }
+
+    def setUp(self):
+        from src import web_server
+        from src.db.models import KoreaderAnnotation, KoreaderAnnotationDeviceState
+        with web_server.database_service.get_session() as session:
+            session.query(KoreaderAnnotationDeviceState).delete()
+            session.query(KoreaderAnnotation).delete()
+        if web_server.database_service.count_users() == 0:
+            web_server.database_service.create_user("admin", "secret", role="admin")
+        os.environ.pop('KOREADER_ANNOTATION_SYNC', None)
+
+    @staticmethod
+    def _entry():
+        return {
+            "datetime": "2026-07-01 10:00:00",
+            "drawer": "lighten",
+            "posFormat": "xpointer",
+            "pos0": "/body/DocFragment[7]/p[3]/text().0",
+            "pos1": "/body/DocFragment[7]/p[3]/text().42",
+            "text": "endpoint highlight",
+        }
+
+    def test_exchange_requires_auth(self):
+        response = self.client.post(
+            '/koreader/device-sync/annotations/exchange',
+            headers={'x-auth-user': 'testuser', 'x-auth-key': 'wrong', 'Content-Type': 'application/json'},
+            json={"device": "A", "device_id": "A1", "books": [{"hash": "h" * 32, "keys": [], "keysComplete": True, "changes": []}]},
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_exchange_roundtrip_between_two_devices(self):
+        doc = "e" * 32
+        entry = self._entry()
+        upload = self.client.post(
+            '/koreader/device-sync/annotations/exchange',
+            headers=self.auth_headers,
+            json={"device": "KoboA", "device_id": "kobo-a",
+                  "books": [{"hash": doc, "keys": [], "keysComplete": False, "changes": [entry]}]},
+        )
+        self.assertEqual(upload.status_code, 200)
+        self.assertTrue(upload.get_json()["enabled"])
+
+        pull = self.client.post(
+            '/koreader/device-sync/annotations/exchange',
+            headers=self.auth_headers,
+            json={"device": "KindleB", "device_id": "kindle-b",
+                  "books": [{"hash": doc, "keys": [], "keysComplete": True, "changes": []}]},
+        )
+        self.assertEqual(pull.status_code, 200)
+        adds = pull.get_json()["books"][0]["toApply"]["add"]
+        self.assertEqual(len(adds), 1)
+        self.assertEqual(adds[0]["text"], "endpoint highlight")
+
+        ack = self.client.post(
+            '/koreader/device-sync/annotations/exchange-ack',
+            headers=self.auth_headers,
+            json={"device": "KindleB", "device_id": "kindle-b",
+                  "books": [{"hash": doc, "applied": [{"serverId": adds[0]["serverId"], "version": adds[0]["version"], "status": "applied"}], "deleted": []}]},
+        )
+        self.assertEqual(ack.status_code, 200)
+        self.assertEqual(ack.get_json()["acked"], 1)
+
+        again = self.client.post(
+            '/koreader/device-sync/annotations/exchange',
+            headers=self.auth_headers,
+            json={"device": "KindleB", "device_id": "kindle-b",
+                  "books": [{"hash": doc, "keys": [{"k": "0" * 32, "dt": entry["datetime"]}], "keysComplete": False, "changes": []}]},
+        )
+        self.assertEqual(again.get_json()["books"][0]["toApply"]["add"], [])
+
+    def test_exchange_disabled_by_setting(self):
+        os.environ['KOREADER_ANNOTATION_SYNC'] = 'false'
+        try:
+            response = self.client.post(
+                '/koreader/device-sync/annotations/exchange',
+                headers=self.auth_headers,
+                json={"device": "A", "device_id": "a", "books": [{"hash": "f" * 32, "keys": [], "keysComplete": True, "changes": []}]},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(response.get_json()["enabled"])
+        finally:
+            os.environ.pop('KOREADER_ANNOTATION_SYNC', None)
+
+    def test_exchange_rejects_oversized_book_list(self):
+        books = [{"hash": f"{i:032x}", "keys": [], "keysComplete": True, "changes": []} for i in range(21)]
+        response = self.client.post(
+            '/koreader/device-sync/annotations/exchange',
+            headers=self.auth_headers,
+            json={"device": "A", "device_id": "a", "books": books},
+        )
+        self.assertEqual(response.status_code, 400)
+
+
 if __name__ == '__main__':
     unittest.main()

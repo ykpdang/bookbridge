@@ -317,6 +317,37 @@ function APIClient:uploadStatistics(payload)
     })
 end
 
+function APIClient:exchangeAnnotations(payload)
+    local body = json.encode(payload)
+    local ok, code, resp_body = self:_requestJSON("POST", "/koreader/device-sync/annotations/exchange", body, {
+        block_timeout = 30,
+        total_timeout = 90,
+        attempts = 2,
+    })
+    if not ok then
+        return false, resp_body or ("HTTP " .. tostring(code))
+    end
+    local parsed, result = pcall(json.decode, resp_body or "{}")
+    if not parsed or type(result) ~= "table" then
+        logger.warn("Bridge Sync API: Invalid annotation exchange JSON")
+        return false, "Invalid annotation exchange response"
+    end
+    return true, result
+end
+
+function APIClient:ackAnnotations(payload)
+    local body = json.encode(payload)
+    local ok, code, resp_body = self:_requestJSON("POST", "/koreader/device-sync/annotations/exchange-ack", body, {
+        block_timeout = 20,
+        total_timeout = 60,
+        attempts = 2,
+    })
+    if not ok then
+        return false, resp_body or ("HTTP " .. tostring(code))
+    end
+    return true
+end
+
 local function _urlencode(value)
     return tostring(value or ""):gsub("[^%w%-%.%_%~]", function(char)
         return string.format("%%%02X", string.byte(char))

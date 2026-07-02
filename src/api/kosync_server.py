@@ -1640,6 +1640,95 @@ def koreader_merged_statistics():
     }), 200
 
 
+def _annotation_sync_enabled() -> bool:
+    return os.environ.get("KOREADER_ANNOTATION_SYNC", "true").strip().lower() in ("true", "1", "yes", "on")
+
+
+@kosync_sync_bp.route('/device-sync/annotations/exchange', methods=['POST'])
+@kosync_sync_bp.route('/koreader/device-sync/annotations/exchange', methods=['POST'])
+@kosync_auth_required
+def koreader_exchange_annotations():
+    """Two-way highlight/annotation exchange for one device.
+
+    Body mirrors the exchange convention the BookOrbit koplugin established:
+    ``{device, device_id, books: [{hash, keys: [{k, dt}], keysComplete,
+    changes: [...]}]}``. The response returns this device's pending delta per
+    book: ``{books: [{hash, toApply: {add, edit, delete}}]}``. The device
+    applies it and reports back via the exchange-ack endpoint.
+    """
+    if not _annotation_sync_enabled():
+        return jsonify({"enabled": False, "books": []}), 200
+
+    data = request.json
+    if not data or not isinstance(data, dict):
+        return jsonify({"error": "Expected JSON object"}), 400
+    books = data.get("books")
+    if not isinstance(books, list) or not books:
+        return jsonify({"error": "Expected non-empty 'books' array"}), 400
+    if len(books) > 20:
+        return jsonify({"error": "Too many books per exchange (max 20)"}), 400
+
+    device = str(data.get("device") or "").strip()
+    device_id = str(data.get("device_id") or "").strip()
+    device_key = (device_id or device).strip()
+    if not device_key:
+        return jsonify({"error": "Missing device identity"}), 400
+
+    if not _database_service:
+        return jsonify({"error": "Database service unavailable"}), 503
+
+    try:
+        result = _database_service.exchange_koreader_annotations(
+            user_id=g.kosync_user_id,
+            device_key=device_key,
+            books=books,
+        )
+    except Exception as e:
+        logger.error("KOReader annotation exchange failed for device '%s': %s", device_key, e)
+        return jsonify({"error": "Annotation exchange failed"}), 500
+
+    result["enabled"] = True
+    return jsonify(result), 200
+
+
+@kosync_sync_bp.route('/device-sync/annotations/exchange-ack', methods=['POST'])
+@kosync_sync_bp.route('/koreader/device-sync/annotations/exchange-ack', methods=['POST'])
+@kosync_auth_required
+def koreader_exchange_annotations_ack():
+    """Record which exchanged annotations the device actually applied/deleted."""
+    if not _annotation_sync_enabled():
+        return jsonify({"enabled": False, "acked": 0}), 200
+
+    data = request.json
+    if not data or not isinstance(data, dict):
+        return jsonify({"error": "Expected JSON object"}), 400
+    books = data.get("books")
+    if not isinstance(books, list):
+        return jsonify({"error": "Expected 'books' array"}), 400
+
+    device = str(data.get("device") or "").strip()
+    device_id = str(data.get("device_id") or "").strip()
+    device_key = (device_id or device).strip()
+    if not device_key:
+        return jsonify({"error": "Missing device identity"}), 400
+
+    if not _database_service:
+        return jsonify({"error": "Database service unavailable"}), 503
+
+    try:
+        result = _database_service.ack_koreader_annotations(
+            user_id=g.kosync_user_id,
+            device_key=device_key,
+            books=books,
+        )
+    except Exception as e:
+        logger.error("KOReader annotation ack failed for device '%s': %s", device_key, e)
+        return jsonify({"error": "Annotation ack failed"}), 500
+
+    result["enabled"] = True
+    return jsonify(result), 200
+
+
 @kosync_sync_bp.route('/device-sync/sessions', methods=['POST'])
 @kosync_sync_bp.route('/koreader/device-sync/sessions', methods=['POST'])
 @kosync_auth_required

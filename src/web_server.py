@@ -2725,6 +2725,7 @@ def settings():
         bool_keys = [
             'KOSYNC_USE_PERCENTAGE_FROM_SERVER',
             'KOSYNC_AUTO_MAP_ON_AGREEMENT',
+            'KOREADER_ANNOTATION_SYNC',
             'SYNC_ABS_EBOOK',
             'XPATH_FALLBACK_TO_PREVIOUS_SEGMENT',
             'KOSYNC_ENABLED',
@@ -8828,6 +8829,27 @@ if __name__ == '__main__':
     )
     poller_thread = threading.Thread(target=client_poller.start, daemon=True)
     poller_thread.start()
+
+    # Annotation hub — BookOrbit spoke: relay highlights between devices and
+    # BookOrbit's web reader for users with BOOKORBIT_KOSYNC_* creds configured.
+    try:
+        from src.services.annotation_sync_service import AnnotationSyncService, run_annotation_sync_daemon
+
+        def _annotation_sync_interval():
+            try:
+                return int(os.environ.get("BOOKORBIT_ANNOTATION_SYNC_MINUTES", "15") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        annotation_sync_service = AnnotationSyncService(database_service)
+        threading.Thread(
+            target=run_annotation_sync_daemon,
+            args=(annotation_sync_service, _annotation_sync_interval),
+            daemon=True,
+            name="annotation-sync",
+        ).start()
+    except Exception as exc:
+        logger.warning("Annotation sync daemon failed to start: %s", exc)
 
     # Re-attach Forge & Match completion watchers orphaned by a restart. The
     # banner/card survive in the DB (status='forging'), but the polling thread

@@ -890,6 +890,77 @@ class BookOrbitClient:
         return resp.content, resp.headers.get("Content-Type", "image/jpeg")
 
     # ------------------------------------------------------------------
+    # KOReader annotation exchange (kosync-style header auth, NOT JWT)
+    # ------------------------------------------------------------------
+
+    _KOSYNC_DEVICE_ID = "bookbridge-hub"
+    _KOSYNC_DEVICE_MODEL = "BookBridge"
+
+    @staticmethod
+    def normalize_kosync_key(value: str) -> str:
+        """BookOrbit's KOReader auth key is md5(sync password); accept either the
+        plain password or the already-hashed 32-hex key."""
+        import hashlib
+        value = str(value or "").strip()
+        if not value:
+            return ""
+        if len(value) == 32 and all(c in "0123456789abcdef" for c in value.lower()):
+            return value.lower()
+        return hashlib.md5(value.encode("utf-8")).hexdigest()
+
+    def _koreader_plugin_request(self, kosync_user: str, kosync_key: str,
+                                 path: str, payload: dict) -> Optional[dict]:
+        """POST to a BookOrbit /koreader/plugin endpoint with x-auth headers."""
+        if not kosync_user or not kosync_key:
+            return None
+        url = f"{self._get_base_url()}{path}"
+        headers = {
+            "x-auth-user": kosync_user,
+            "x-auth-key": kosync_key,
+            "Content-Type": "application/json",
+        }
+        try:
+            resp = self.session.post(url, headers=headers, json=payload, timeout=30)
+        except Exception as exc:
+            logger.error("BookOrbit koreader request failed (%s): %s", path, exc)
+            return None
+        if resp.status_code not in (200, 201):
+            logger.warning(
+                "BookOrbit koreader request %s returned %s: %s",
+                path, resp.status_code, (resp.text or "")[:200],
+            )
+            return None
+        return self._parse_json(resp) or {}
+
+    def _koreader_device_fields(self) -> dict:
+        from src.utils.time_utils import utcnow
+        return {
+            "deviceId": self._KOSYNC_DEVICE_ID,
+            "deviceModel": self._KOSYNC_DEVICE_MODEL,
+            "pluginVersion": "bridge-1.0",
+            "deviceTime": utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def koreader_exchange_annotations(self, kosync_user: str, kosync_key: str,
+                                      books: list) -> Optional[dict]:
+        """Two-way annotation exchange (the bridge acts as a KOReader device).
+
+        Returns ``{results: [{hash, toApply: {add, edit, delete}, more, ...}],
+        unmatched: [hash...]}`` or None on failure."""
+        payload = dict(self._koreader_device_fields(), books=books)
+        return self._koreader_plugin_request(
+            kosync_user, kosync_key, "/api/v1/koreader/plugin/annotations/exchange", payload
+        )
+
+    def koreader_exchange_annotations_ack(self, kosync_user: str, kosync_key: str,
+                                          books: list) -> bool:
+        payload = dict(self._koreader_device_fields(), books=books)
+        result = self._koreader_plugin_request(
+            kosync_user, kosync_key, "/api/v1/koreader/plugin/annotations/exchange-ack", payload
+        )
+        return result is not None
+
+    # ------------------------------------------------------------------
     # Reading sessions (per file)
     # ------------------------------------------------------------------
 

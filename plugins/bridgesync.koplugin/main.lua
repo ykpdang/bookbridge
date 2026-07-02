@@ -17,6 +17,7 @@ local buffer = require("string.buffer")
 local socket = require("socket")
 local json = require("json")
 local APIClient = require("bridge_api_client")
+local BridgeAnnotations = require("bridge_annotations")
 local SQ3
 do
     local ok, mod = pcall(require, "lua-ljsqlite3/init")
@@ -62,6 +63,12 @@ function BridgeSync:onDispatcherRegisterActions()
         title = _("Bridge Sync: Sync reading stats"),
         general = true,
     })
+    Dispatcher:registerAction("bridgesync_sync_annotations", {
+        category = "none",
+        event = "BridgeSyncSyncAnnotations",
+        title = _("Bridge Sync: Sync highlights"),
+        general = true,
+    })
 end
 
 function BridgeSync:init()
@@ -99,6 +106,12 @@ function BridgeSync:init()
         self.auto_sync_stats = true
     else
         self.auto_sync_stats = auto_sync_stats
+    end
+    local annotation_sync = self.settings:readSetting("annotation_sync_enabled")
+    if annotation_sync == nil then
+        self.annotation_sync_enabled = true
+    else
+        self.annotation_sync_enabled = annotation_sync
     end
     self.current_session = nil
     self.pending_sessions = self.state:readSetting("pending_sessions") or {}
@@ -167,6 +180,7 @@ function BridgeSync:_saveSettings()
     self.settings:saveSetting("session_tracking_enabled", self.session_tracking_enabled)
     self.settings:saveSetting("min_session_duration", self.min_session_duration)
     self.settings:saveSetting("auto_sync_stats", self.auto_sync_stats)
+    self.settings:saveSetting("annotation_sync_enabled", self.annotation_sync_enabled)
     self.settings:flush()
     self.api:init(self.server_url, self.username, self.key, function(level, message)
         self:_appendLog(level, message)
@@ -609,6 +623,72 @@ function BridgeSync:_maybeAutoSyncStats(reason)
         if ok then
             self.last_stats_sync_time = os.time()
         end
+        -- Highlights ride the same cadence: exchange after each stats round.
+        self:syncAnnotations(true)
+    end)
+    return true
+end
+
+function BridgeSync:syncAnnotations(silent)
+    if silent == nil then silent = false end
+    if not self.is_enabled or not self.annotation_sync_enabled then
+        if not silent then
+            self:_showMessage(_("Highlight sync is disabled"), 3)
+        end
+        return false
+    end
+    if not self.server_url or self.server_url == "" or
+       not self.username or self.username == "" or
+       not self.key or self.key == "" then
+        if not silent then
+            self:_showMessage(_("Bridge Sync is not configured"), 3)
+        end
+        return false
+    end
+    if self.annotation_sync_in_flight then
+        return false
+    end
+    self.annotation_sync_in_flight = true
+
+    local ok, result, err = pcall(BridgeAnnotations.run, self)
+    self.annotation_sync_in_flight = false
+
+    if not ok then
+        self:logErr("Highlight sync crashed:", tostring(result))
+        if not silent then
+            self:_showMessage(T(_("Highlight sync failed: %1"), tostring(result)), 5)
+        end
+        return false
+    end
+    if result == nil then
+        self:logWarn("Highlight sync failed:", tostring(err))
+        if not silent then
+            self:_showMessage(T(_("Highlight sync failed: %1"), tostring(err or "Unknown error")), 5)
+        end
+        return false
+    end
+
+    self:logInfo("Highlight sync:", tostring(result.books), "book(s),",
+        tostring(result.uploaded), "uploaded,", tostring(result.applied), "applied,",
+        tostring(result.deleted), "deleted")
+    if not silent then
+        if result.disabled then
+            self:_showMessage(_("Highlight sync is disabled on the bridge"), 4)
+        elseif (result.books or 0) == 0 then
+            self:_showMessage(_("No books with highlights to sync."), 3)
+        else
+            self:_showMessage(T(
+                _("Highlights synced.\nBooks: %1\nUploaded: %2\nApplied from other devices: %3\nDeleted: %4"),
+                result.books or 0, result.uploaded or 0, result.applied or 0, result.deleted or 0
+            ), 4)
+        end
+    end
+    return true
+end
+
+function BridgeSync:onBridgeSyncSyncAnnotations()
+    Trapper:wrap(function()
+        self:syncAnnotations(false)
     end)
     return true
 end
@@ -2017,6 +2097,14 @@ function BridgeSync:addToMainMenu(menu_items)
                 end,
             },
             {
+                text = _("Sync Highlights"),
+                callback = function()
+                    Trapper:wrap(function()
+                        self:syncAnnotations(false)
+                    end)
+                end,
+            },
+            {
                 text = _("Manual Only"),
                 keep_menu_open = true,
                 checked_func = function()
@@ -2099,6 +2187,18 @@ function BridgeSync:addToMainMenu(menu_items)
                 end,
                 callback = function(touchmenu_instance)
                     self.auto_sync_stats = not self.auto_sync_stats
+                    self:_saveSettings()
+                    self:_refreshMenu(touchmenu_instance)
+                end,
+            },
+            {
+                text = _("Sync Highlights & Notes"),
+                keep_menu_open = true,
+                checked_func = function()
+                    return self.annotation_sync_enabled
+                end,
+                callback = function(touchmenu_instance)
+                    self.annotation_sync_enabled = not self.annotation_sync_enabled
                     self:_saveSettings()
                     self:_refreshMenu(touchmenu_instance)
                 end,
