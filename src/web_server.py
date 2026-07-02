@@ -5261,7 +5261,9 @@ def _add_book_view(template_name, self_endpoint):
                     "duration": selected_audio['audio_duration'],
                     "cover_url": selected_audio['audio_cover_url'],
                 })
-            return redirect(url_for(self_endpoint, search=request.form.get('search', '')))
+            # Clear the search box + results after queueing so the user starts the
+            # next book from a clean search (drop the preserved `search` term).
+            return redirect(url_for(self_endpoint))
         elif action == 'remove_from_queue':
             abs_id = request.form.get('abs_id')
             _match_queue_remove(abs_id)
