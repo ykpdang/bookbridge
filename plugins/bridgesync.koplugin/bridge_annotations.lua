@@ -71,20 +71,28 @@ function BridgeAnnotations.normalizeEntry(a)
     return entry
 end
 
+-- Server entries arrive as decoded JSON, where an absent optional field is a
+-- null sentinel (a function/userdata in KOReader's json lib), NOT nil. Passing
+-- that straight into a KOReader annotation crashes the bookmark list ("attempt
+-- to concatenate field 'note' (a function value)"). Coerce every field to its
+-- expected type or nil.
+local function _s(v) return type(v) == "string" and v or nil end
+local function _n(v) return type(v) == "number" and v or nil end
+
 -- A server entry mapped back into KOReader's sidecar annotation shape.
 local function toSidecarEntry(entry)
     return {
-        datetime = entry.datetime,
-        datetime_updated = entry.datetimeUpdated,
-        drawer = entry.drawer or "lighten",
-        color = entry.color,
-        text = entry.text,
-        note = entry.note,
-        chapter = entry.chapter,
-        pageno = entry.pageno,
-        page = entry.pos0,
-        pos0 = entry.pos0,
-        pos1 = entry.pos1,
+        datetime = _s(entry.datetime),
+        datetime_updated = _s(entry.datetimeUpdated),
+        drawer = _s(entry.drawer) or "lighten",
+        color = _s(entry.color),
+        text = _s(entry.text),
+        note = _s(entry.note),
+        chapter = _s(entry.chapter),
+        pageno = _n(entry.pageno),
+        page = _s(entry.pos0),
+        pos0 = _s(entry.pos0),
+        pos1 = _s(entry.pos1),
     }
 end
 
@@ -301,12 +309,12 @@ function BridgeAnnotations.applyToSidecar(book, to_apply)
             local existing = findByDatetime(annotations, entry.datetime)
             if existing then
                 local target = annotations[existing]
-                target.drawer = entry.drawer or target.drawer
-                target.color = entry.color or target.color
-                if entry.text and entry.text ~= "" then target.text = entry.text end
-                target.note = entry.note
-                if entry.chapter then target.chapter = entry.chapter end
-                if entry.datetimeUpdated then target.datetime_updated = entry.datetimeUpdated end
+                target.drawer = _s(entry.drawer) or target.drawer
+                target.color = _s(entry.color) or target.color
+                if _s(entry.text) then target.text = entry.text end
+                target.note = _s(entry.note)
+                if _s(entry.chapter) then target.chapter = entry.chapter end
+                if _s(entry.datetimeUpdated) then target.datetime_updated = entry.datetimeUpdated end
             else
                 table.insert(annotations, toSidecarEntry(entry))
             end
@@ -375,18 +383,7 @@ function BridgeAnnotations.applyLive(to_apply)
         if findByDatetime(annotations, entry.datetime) then
             table.insert(applied, { serverId = entry.serverId, version = entry.version, status = "applied" })
         elseif entry.posFormat == "xpointer" and resolves(entry.pos0) then
-            local item = {
-                datetime = entry.datetime,
-                datetime_updated = entry.datetimeUpdated,
-                drawer = entry.drawer or "lighten",
-                color = entry.color,
-                text = entry.text,
-                note = entry.note,
-                chapter = entry.chapter,
-                page = entry.pos0,
-                pos0 = entry.pos0,
-                pos1 = entry.pos1,
-            }
+            local item = toSidecarEntry(entry)  -- type-guarded (no JSON-null sentinels)
             local ok_add = pcall(function() ui.annotation:addItem(item) end)
             if ok_add then
                 pcall(function()
@@ -403,12 +400,12 @@ function BridgeAnnotations.applyLive(to_apply)
         local idx = findByDatetime(annotations, entry.datetime)
         if idx then
             local a = annotations[idx]
-            a.drawer = entry.drawer or a.drawer
-            a.color = entry.color or a.color
-            if entry.text and entry.text ~= "" then a.text = entry.text end
-            a.note = entry.note
-            if entry.chapter then a.chapter = entry.chapter end
-            if entry.datetimeUpdated then a.datetime_updated = entry.datetimeUpdated end
+            a.drawer = _s(entry.drawer) or a.drawer
+            a.color = _s(entry.color) or a.color
+            if _s(entry.text) then a.text = entry.text end
+            a.note = _s(entry.note)
+            if _s(entry.chapter) then a.chapter = entry.chapter end
+            if _s(entry.datetimeUpdated) then a.datetime_updated = entry.datetimeUpdated end
             pcall(function()
                 ui:handleEvent(Event:new("AnnotationsModified", { a, index_modified = idx }))
             end)
