@@ -30,8 +30,20 @@ local function deviceNow()
     return os.date("%Y-%m-%d %H:%M:%S")
 end
 
+-- Canonicalize an xpointer so the identity key survives crengine's
+-- re-serialization (a trailing `.0` text offset and `[1]` sibling indexes come
+-- and go between the authoring device and a receiving device for the SAME
+-- highlight). MUST match the bridge's _normalize_xpointer_for_key. The raw
+-- pos0 is still sent separately for positioning — this only feeds the key.
+function BridgeAnnotations.normalizeXPointer(pos0)
+    if type(pos0) ~= "string" then return "" end
+    pos0 = pos0:gsub("%[1%]", "")
+    pos0 = pos0:gsub("%.0$", "")
+    return pos0
+end
+
 function BridgeAnnotations.buildKey(datetime, pos0)
-    return md5(tostring(datetime) .. "|" .. tostring(pos0))
+    return md5(tostring(datetime) .. "|" .. BridgeAnnotations.normalizeXPointer(pos0))
 end
 
 -- Normalize a sidecar annotation entry into the wire format. Returns nil for
@@ -223,7 +235,10 @@ function BridgeAnnotations.collectBooks(watermarks)
 end
 
 -- Build one book's exchange payload: full key list + changes since watermark.
-function BridgeAnnotations.buildBookPayload(book, watermark)
+-- keys_complete=false marks the key list as non-authoritative for deletion
+-- detection (the sweep uses this — a backfill must never delete server data
+-- just because a sidecar was momentarily empty/partial).
+function BridgeAnnotations.buildBookPayload(book, watermark, keys_complete)
     local keys, changes = {}, {}
     local max_seen = ""
     for _, raw in ipairs(book.annotations or {}) do
@@ -240,7 +255,7 @@ function BridgeAnnotations.buildBookPayload(book, watermark)
     return {
         hash = book.hash,
         keys = keys,
-        keysComplete = true,
+        keysComplete = keys_complete ~= false,
         changes = changes,
     }, max_seen
 end
@@ -328,7 +343,12 @@ end
 -- logInfo/logWarn/logErr, and _currentDeviceIdentity().
 -- `books` is a list of {file, hash, annotations (sidecar-shaped list), live}.
 -- Shared by the periodic sync, the on-close snapshot, and the full sweep.
-function BridgeAnnotations.exchangeBooks(bridge, books)
+-- opts.keys_complete=false makes the key lists non-authoritative for deletion
+-- (the sweep passes this so a backfill never deletes server data).
+function BridgeAnnotations.exchangeBooks(bridge, books, opts)
+    opts = opts or {}
+    local keys_complete = opts.keys_complete
+    if keys_complete == nil then keys_complete = true end
     local device, device_id = bridge:_currentDeviceIdentity()
     local watermarks = bridge.state:readSetting("annotation_watermarks") or {}
 
@@ -344,7 +364,7 @@ function BridgeAnnotations.exchangeBooks(bridge, books)
         -- future watermark would swallow every new highlight forever.
         local watermark = watermarks[book.hash] or ""
         if watermark > deviceNow() then watermark = "" end
-        local book_payload, max_seen = BridgeAnnotations.buildBookPayload(book, watermark)
+        local book_payload, max_seen = BridgeAnnotations.buildBookPayload(book, watermark, keys_complete)
         max_seen_by_hash[book.hash] = max_seen
         uploaded = uploaded + #book_payload.changes
         table.insert(payload_books, book_payload)

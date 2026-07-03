@@ -1794,8 +1794,43 @@ class DatabaseService:
     _ANNOTATION_APPLY_CAP = 200  # per book per exchange round; devices loop rounds
 
     @staticmethod
+    def _normalize_xpointer_for_key(pos0) -> str:
+        """Canonicalize a KOReader xpointer so the identity key is stable across
+        the create -> transmit -> apply -> re-read cycle.
+
+        crengine re-serializes xpointers when it re-validates an externally
+        applied annotation (dropping a trailing ``.0`` text offset, adding or
+        stripping ``[1]`` sibling indexes), so the raw pos0 differs between the
+        authoring device and a receiving device for the SAME highlight. Keying
+        identity on the raw pos0 makes a receiving device's re-serialized copy
+        look like a different (missing) annotation, which the deletion detector
+        then tombstones. Normalizing identically on the device AND the bridge
+        keeps the key stable. Mirrors the KOReader convention used by the
+        Grimmory plugin. The RAW pos0 is preserved separately for positioning —
+        this is used ONLY for the identity hash.
+        """
+        if not pos0:
+            return ""
+        text = str(pos0).replace("[1]", "")
+        if text.endswith(".0"):
+            text = text[:-2]
+        return text
+
+    @staticmethod
     def compute_annotation_key(datetime_str: str, pos0: str) -> str:
-        """Exchange dedupe key: md5('<datetime>|<pos0>') — matches the device convention."""
+        """Stable identity key: md5('<datetime>|<normalized-pos0>'). Both the
+        device and the bridge normalize identically so the key survives
+        crengine's xpointer re-serialization."""
+        import hashlib
+        raw = f"{datetime_str or ''}|{DatabaseService._normalize_xpointer_for_key(pos0)}"
+        return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _bookorbit_annotation_key(datetime_str: str, pos0: str) -> str:
+        """Key in BookOrbit's koplugin convention: md5('<datetime>|<raw-pos0>'),
+        NO normalization. BookOrbit hashes the exact pos0 the bridge uploaded,
+        so the key list the bridge sends it must use the raw pos0 too — the
+        internal normalized identity would not match BookOrbit's side."""
         import hashlib
         raw = f"{datetime_str or ''}|{pos0 or ''}"
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
@@ -2110,7 +2145,8 @@ class DatabaseService:
                     if not (state is not None and state.ack_deleted):
                         pending_delete_acks.append(row.id)
                     continue
-                keys.append({"k": row.ann_key, "dt": row.datetime})
+                # BookOrbit hashes the raw pos0 it received; send its convention.
+                keys.append({"k": self._bookorbit_annotation_key(row.datetime, row.pos0), "dt": row.datetime})
                 if acked < int(row.version or 1):
                     entry = self._annotation_response_entry(row)
                     entry["_id"] = row.id  # internal: for post-upload ack bookkeeping

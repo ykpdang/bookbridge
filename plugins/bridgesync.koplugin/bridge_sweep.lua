@@ -79,9 +79,11 @@ local function sweepOneBook(bridge, file)
 
     local result, err
     local ok_call, pcall_err = pcall(function()
+        -- keys_complete=false: a full-library backfill must never be read as a
+        -- deletion, even if a book's sidecar is momentarily empty or partial.
         result, err = BridgeAnnotations.exchangeBooks(bridge, {
             { file = file, hash = hash, annotations = annotations, live = false },
-        })
+        }, { keys_complete = false })
     end)
     if not ok_call then
         return nil, tostring(pcall_err)

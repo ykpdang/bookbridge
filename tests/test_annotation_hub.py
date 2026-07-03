@@ -206,6 +206,55 @@ class TestDeviceExchange(AnnotationHubBase):
         other = self.db.exchange_koreader_annotations(user_id=2, device_key="kindle", books=[_book()])
         self.assertEqual(other["books"][0]["toApply"]["add"], [])
 
+    def test_key_is_stable_across_xpointer_reserialization(self):
+        """The reported data-loss bug: crengine re-serializes xpointers (drops a
+        trailing .0, strips [1]) when a receiving device re-reads an applied
+        highlight, so the identity key must normalize both forms to one."""
+        dt = "2026-07-01 10:00:00"
+        base = "/body/DocFragment[12]/body/section/p[5]/text()"
+        self.assertEqual(
+            self.db.compute_annotation_key(dt, base + ".0"),
+            self.db.compute_annotation_key(dt, base),
+        )
+        self.assertEqual(
+            self.db.compute_annotation_key(dt, "/body/DocFragment[12]/body/section/p[1]/text().0"),
+            self.db.compute_annotation_key(dt, "/body/DocFragment[12]/body/section/p/text()"),
+        )
+        # A genuine text offset is preserved (distinct highlights stay distinct).
+        self.assertNotEqual(
+            self.db.compute_annotation_key(dt, base + ".331"),
+            self.db.compute_annotation_key(dt, base + ".187"),
+        )
+
+    def test_received_highlight_not_deleted_after_reserialization(self):
+        """Full two-device reproduction: A creates a highlight (pos0 ends .0);
+        B receives + acks it, then re-syncs with the re-serialized pos0 (no .0)
+        in its complete key list. Pre-fix this tombstoned it (and propagated the
+        deletion back to A); with normalization the keys match and it survives."""
+        created = _entry(pos0="/body/DocFragment[9]/body/p[4]/text().0",
+                         pos1="/body/DocFragment[9]/body/p[4]/text().40")
+        self.db.exchange_koreader_annotations(
+            user_id=None, device_key="deviceA",
+            books=[_book(changes=[created], keys=_keys_for(self.db, [created]))],
+        )
+        pull = self.db.exchange_koreader_annotations(user_id=None, device_key="deviceB", books=[_book()])
+        add = pull["books"][0]["toApply"]["add"][0]
+        self.db.ack_koreader_annotations(
+            user_id=None, device_key="deviceB",
+            books=[{"hash": DOC, "applied": [{"serverId": add["serverId"], "version": add["version"], "status": "applied"}], "deleted": []}],
+        )
+        # B re-syncs: its sidecar reserialized pos0 to the no-".0" form.
+        reserialized = dict(created, pos0="/body/DocFragment[9]/body/p[4]/text()")
+        again = self.db.exchange_koreader_annotations(
+            user_id=None, device_key="deviceB",
+            books=[_book(keys=_keys_for(self.db, [reserialized]), keys_complete=True)],
+        )
+        # Not deleted, and B is told nothing to delete.
+        rows = self.db.get_user_annotations_for_book(None, DOC, include_deleted=True)
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0].deleted)
+        self.assertEqual(again["books"][0]["toApply"]["delete"], [])
+
 
 class TestBookOrbitSpokeDb(AnnotationHubBase):
     def test_apply_spoke_add_flows_to_devices(self):
