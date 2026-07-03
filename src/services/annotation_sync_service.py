@@ -59,6 +59,50 @@ class AnnotationSyncService:
     # Cycle driver
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _norm_account(value) -> str:
+        return str(value or "").strip().lower()
+
+    def _annotation_owner_matches(self, user_id, creds: dict, kosync_user: str) -> bool:
+        """Guard against relaying a user's highlights into another BookOrbit account.
+
+        BookOrbit's KOReader sync username can be a separate row from the web
+        username, and the public KOReader auth endpoint does not disclose the
+        owning web user. To keep ownership explicit, allow the relay only when
+        the KOReader username matches BOOKORBIT_USER, or when
+        BOOKORBIT_KOSYNC_OWNER explicitly names that same BookOrbit user.
+        """
+        bookorbit_user = str(resolve_setting(creds, "BOOKORBIT_USER", "") or "").strip()
+        if not bookorbit_user:
+            logger.warning(
+                "Annotation sync skipped for user %s: BOOKORBIT_USER is required "
+                "so highlights cannot be written to an unknown BookOrbit account",
+                user_id,
+            )
+            return False
+
+        asserted_owner = str(resolve_setting(creds, "BOOKORBIT_KOSYNC_OWNER", "") or "").strip()
+        effective_owner = asserted_owner or kosync_user
+        if self._norm_account(effective_owner) == self._norm_account(bookorbit_user):
+            return True
+
+        if asserted_owner:
+            logger.warning(
+                "Annotation sync skipped for user %s: BOOKORBIT_KOSYNC_OWNER=%r "
+                "does not match BOOKORBIT_USER=%r",
+                user_id, asserted_owner, bookorbit_user,
+            )
+        else:
+            logger.warning(
+                "Annotation sync skipped for user %s: BOOKORBIT_KOSYNC_USER=%r "
+                "does not match BOOKORBIT_USER=%r. Use KOReader sync credentials "
+                "owned by this BookOrbit user, or set BOOKORBIT_KOSYNC_OWNER to "
+                "the same BookOrbit username after verifying the KOReader account "
+                "belongs to it.",
+                user_id, kosync_user, bookorbit_user,
+            )
+        return False
+
     def run_cycle(self) -> dict:
         """Sync every configured user's annotations with BookOrbit once."""
         if not self._lock.acquire(blocking=False):
@@ -73,6 +117,8 @@ class AnnotationSyncService:
                     resolve_setting(creds, "BOOKORBIT_KOSYNC_KEY", "")
                 )
                 if not kosync_user or not kosync_key:
+                    continue
+                if not self._annotation_owner_matches(user_id, creds, kosync_user):
                     continue
                 client = BookOrbitClient(credentials=creds)
                 if not str(resolve_setting(creds, "BOOKORBIT_SERVER", "") or "").strip():

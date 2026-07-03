@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -350,6 +351,58 @@ class TestAnnotationSyncService(unittest.TestCase):
         db.apply_spoke_annotations.assert_called_once()
         db.mark_spoke_annotations_uploaded.assert_called_once()
         client.koreader_exchange_annotations_ack.assert_called_once()
+
+    def test_run_cycle_skips_mismatched_bookorbit_owner(self):
+        db = MagicMock()
+        db.list_users.return_value = [SimpleNamespace(id=1, active=1, is_admin=False)]
+        db.get_user_credentials.return_value = {
+            "BOOKORBIT_SERVER": "http://bookorbit",
+            "BOOKORBIT_USER": "Cporcellijr",
+            "BOOKORBIT_KOSYNC_USER": "bridgesync",
+            "BOOKORBIT_KOSYNC_KEY": "secret",
+        }
+
+        service = self._service_with_db(db)
+        service.sync_user = MagicMock()
+        result = service.run_cycle()
+
+        self.assertEqual(result["users"], 0)
+        service.sync_user.assert_not_called()
+
+    def test_run_cycle_allows_explicit_matching_bookorbit_owner(self):
+        db = MagicMock()
+        db.list_users.return_value = [SimpleNamespace(id=1, active=1, is_admin=False)]
+        db.get_user_credentials.return_value = {
+            "BOOKORBIT_SERVER": "http://bookorbit",
+            "BOOKORBIT_USER": "Cporcellijr",
+            "BOOKORBIT_KOSYNC_USER": "bridgesync",
+            "BOOKORBIT_KOSYNC_KEY": "secret",
+            "BOOKORBIT_KOSYNC_OWNER": "cporcellijr",
+        }
+
+        service = self._service_with_db(db)
+        service.sync_user = MagicMock()
+        result = service.run_cycle()
+
+        self.assertEqual(result["users"], 1)
+        service.sync_user.assert_called_once()
+
+    def test_run_cycle_allows_same_kosync_and_bookorbit_username(self):
+        db = MagicMock()
+        db.list_users.return_value = [SimpleNamespace(id=1, active=1, is_admin=False)]
+        db.get_user_credentials.return_value = {
+            "BOOKORBIT_SERVER": "http://bookorbit",
+            "BOOKORBIT_USER": "reader",
+            "BOOKORBIT_KOSYNC_USER": "Reader",
+            "BOOKORBIT_KOSYNC_KEY": "secret",
+        }
+
+        service = self._service_with_db(db)
+        service.sync_user = MagicMock()
+        result = service.run_cycle()
+
+        self.assertEqual(result["users"], 1)
+        service.sync_user.assert_called_once()
 
     def test_unmatched_hash_is_skipped_afterwards(self):
         db = MagicMock()

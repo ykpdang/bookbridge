@@ -30,7 +30,7 @@ PER_USER_CREDENTIAL_KEYS = frozenset({
     "BOOKORBIT_USER", "BOOKORBIT_PASSWORD", "BOOKORBIT_ENABLED",
     "BOOKORBIT_SHELF_NAME",
     # BookOrbit KOReader-sync account (annotation hub spoke; kosync-style creds)
-    "BOOKORBIT_KOSYNC_USER", "BOOKORBIT_KOSYNC_KEY",
+    "BOOKORBIT_KOSYNC_USER", "BOOKORBIT_KOSYNC_KEY", "BOOKORBIT_KOSYNC_OWNER",
     # Grimmory / BookLore (account + the user's own shelf/library)
     "BOOKLORE_USER", "BOOKLORE_PASSWORD", "BOOKLORE_ENABLED",
     "BOOKLORE_SHELF_NAME", "BOOKLORE_LIBRARY_ID",
@@ -72,6 +72,7 @@ PER_USER_FIELD_GROUPS = [
         ("BOOKORBIT_SHELF_NAME", "Collection name (synced books moved here)", "text"),
         ("BOOKORBIT_KOSYNC_USER", "KOReader sync username (highlight sync)", "text"),
         ("BOOKORBIT_KOSYNC_KEY", "KOReader sync password (highlight sync)", "secret"),
+        ("BOOKORBIT_KOSYNC_OWNER", "KOReader sync owner (must match BookOrbit username)", "text"),
     ]),
     ("Grimmory / BookLore", [
         ("BOOKLORE_ENABLED", "Enabled", "bool"),
