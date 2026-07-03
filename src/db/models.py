@@ -300,13 +300,22 @@ class State(Base):
     timestamp = Column(Float)
     xpath = Column(Text)
     cfi = Column(Text)
+    # Rich progress metadata (capture-only; see src/utils/progress_metadata.py).
+    # service_updated_at = when the REMOTE SERVICE says the position changed
+    # (epoch seconds), not when the bridge observed it.
+    service_updated_at = Column(Float, nullable=True)
+    status = Column(String(32), nullable=True)
+    locator_source = Column(String(32), nullable=True)
+    locator_json = Column(Text, nullable=True)
 
     # Relationship
     book = relationship("Book", back_populates="states")
 
     def __init__(self, abs_id: str, client_name: str, last_updated: float = None,
                  percentage: float = None, timestamp: float = None,
-                 xpath: str = None, cfi: str = None, user_id: int = None):
+                 xpath: str = None, cfi: str = None, user_id: int = None,
+                 service_updated_at: float = None, status: str = None,
+                 locator_source: str = None, locator_json: str = None):
         self.abs_id = abs_id
         self.client_name = client_name
         self.user_id = user_id
@@ -315,6 +324,10 @@ class State(Base):
         self.timestamp = timestamp
         self.xpath = xpath
         self.cfi = cfi
+        self.service_updated_at = service_updated_at
+        self.status = status
+        self.locator_source = locator_source
+        self.locator_json = locator_json
 
     def __repr__(self):
         return f"<State(abs_id='{self.abs_id}', client='{self.client_name}', pct={self.percentage})>"

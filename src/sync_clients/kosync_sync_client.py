@@ -6,6 +6,7 @@ import re
 from src.api.api_clients import KoSyncClient
 from src.db.models import Book, State
 from src.utils.ebook_utils import EbookParser
+from src.utils.progress_metadata import parse_service_timestamp
 from src.sync_clients.sync_client_interface import SyncClient, SyncResult, UpdateProgressRequest, ServiceState
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,11 @@ class KoSyncSyncClient(SyncClient):
         delta = abs(ko_pct - prev_kosync_pct)
 
         current = {"pct": ko_pct, "xpath": ko_xpath}
+        # The KoSync GET response carries the stored device-PUT timestamp —
+        # the service's own "position last changed" signal (0 = never).
+        service_updated_at = parse_service_timestamp(ko_metadata.get("timestamp"))
+        if service_updated_at is not None:
+            current["service_updated_at"] = service_updated_at
         if ko_metadata.get("_bridge_recent_external_put"):
             current["_kosync_recent_external_put"] = True
             current["_kosync_last_put_device"] = ko_metadata.get("_bridge_recent_external_put_device") or ""

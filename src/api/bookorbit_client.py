@@ -662,21 +662,34 @@ class BookOrbitClient:
     # ------------------------------------------------------------------
 
     def get_ebook_progress(self, book_id) -> tuple:
-        """Returns (pct_fraction 0-1, cfi). (None, None) only on a real failure.
+        """Returns (pct_fraction 0-1, cfi). (None, None) only on a real failure."""
+        rich = self.get_ebook_progress_rich(book_id)
+        if rich is None:
+            return None, None
+        return rich["pct"], rich["cfi"]
+
+    def get_ebook_progress_rich(self, book_id) -> Optional[dict]:
+        """Ebook progress plus BookOrbit's own metadata, or None on failure.
 
         GET /books/:id/progress returns a LIST of per-file entries
-        ``[{fileId, cfi, pageNumber, percentage, updatedAt}]`` (percentage 0-100).
-        An unstarted book returns one entry at percentage 0 — that must read as
-        0.0 (a writable follower), NOT None (which would drop BookOrbit from sync
-        and deadlock its first write).
+        ``[{fileId, cfi, pageNumber, percentage, updatedAt, koreaderProgress,
+        koboLocation*}]`` (percentage 0-100; updatedAt null until started;
+        koreaderProgress is a native KOReader xpointer when the book syncs via
+        BookOrbit's own kosync — all verified live 2026-07-02). An unstarted
+        book must read as the 0.0 baseline (a writable follower), NOT None
+        (which would drop BookOrbit from sync and deadlock its first write).
         """
+        baseline = {
+            "pct": 0.0, "cfi": None, "updated_at": None,
+            "file_id": None, "page_number": None, "koreader_progress": None,
+        }
         resp = self._make_request("GET", f"/api/v1/books/{book_id}/progress")
         if not resp:
-            return None, None
+            return None
         if resp.status_code == 204:
-            return 0.0, None
+            return dict(baseline)
         if resp.status_code != 200:
-            return None, None
+            return None
         data = self._parse_json(resp)
         if isinstance(data, dict):
             entries = [data]
@@ -685,7 +698,7 @@ class BookOrbitClient:
         else:
             entries = []
         if not entries:
-            return 0.0, None
+            return dict(baseline)
 
         if len(entries) == 1:
             chosen = entries[0]
@@ -696,7 +709,14 @@ class BookOrbitClient:
 
         raw_pct = chosen.get("percentage")
         pct = self._to_pct_fraction(raw_pct) if raw_pct is not None else 0.0
-        return (pct if pct is not None else 0.0), chosen.get("cfi")
+        return {
+            "pct": pct if pct is not None else 0.0,
+            "cfi": chosen.get("cfi"),
+            "updated_at": chosen.get("updatedAt"),
+            "file_id": chosen.get("fileId"),
+            "page_number": chosen.get("pageNumber"),
+            "koreader_progress": chosen.get("koreaderProgress"),
+        }
 
     def update_ebook_progress(
         self, book_info: dict, percentage: float, locator: Optional[LocatorResult] = None
@@ -778,7 +798,8 @@ class BookOrbitClient:
 
     # Unstarted-audiobook baseline: a writable follower at 0, NOT None (None would
     # drop BookOrbit from sync and deadlock its first write — mirrors get_ebook_progress).
-    _AUDIO_UNSTARTED = {"pct": 0.0, "position_seconds": 0.0, "current_file_id": None}
+    _AUDIO_UNSTARTED = {"pct": 0.0, "position_seconds": 0.0, "current_file_id": None,
+                        "updated_at": None}
 
     def get_audiobook_progress(self, book_id) -> Optional[dict]:
         """Returns {'pct': 0-1, 'position_seconds': float, 'current_file_id': int} or None.
@@ -807,6 +828,7 @@ class BookOrbitClient:
             "pct": pct,
             "position_seconds": position_seconds,
             "current_file_id": data.get("currentFileId"),
+            "updated_at": data.get("updatedAt"),
         }
 
     def update_audiobook_progress(

@@ -1766,6 +1766,41 @@ class BookloreClient:
             return None, None
         return self._get_progress_by_book_id(book['id'])
 
+    def get_progress_rich(self, ebook_filename):
+        """Progress plus Grimmory's own metadata for a filename, or None.
+
+        Returns ``{pct, cfi, href, last_read_time, status, content_source_pct}``
+        — lastReadTime is Grimmory's ISO timestamp of the last position change
+        and readStatus its reading status (verified live 2026-07-02). EPUB books
+        carry cfi/href from epubProgress; PDF/CBX fall back to percentage-only.
+        """
+        book = self.find_book_by_filename(ebook_filename)
+        if not book:
+            return None
+        response = self._make_request("GET", f"/api/v1/books/{book['id']}")
+        if not response or response.status_code != 200:
+            return None
+        data = self._parse_json_response(response, f"Grimmory rich progress for book {book['id']}")
+        if not isinstance(data, dict):
+            return None
+
+        book_type = str(
+            data.get('primaryFile', {}).get('bookType')
+            or data.get('bookType')
+            or ''
+        ).upper()
+        progress_key = {'EPUB': 'epubProgress', 'PDF': 'pdfProgress', 'CBX': 'cbxProgress'}.get(book_type)
+        progress = (data.get(progress_key) or {}) if progress_key else {}
+
+        return {
+            "pct": self._to_progress_fraction(progress.get('percentage', 0)),
+            "cfi": progress.get('cfi') if book_type == 'EPUB' else None,
+            "href": progress.get('href') if book_type == 'EPUB' else None,
+            "last_read_time": data.get('lastReadTime'),
+            "status": data.get('readStatus'),
+            "content_source_pct": progress.get('contentSourceProgressPercent'),
+        }
+
     def get_audiobook_cover_bytes(self, book_id):
         response = self._make_request("GET", f"/api/v1/audiobooks/{book_id}/cover")
         if not response or response.status_code != 200:

@@ -45,6 +45,7 @@ from src.utils.user_context import (
 from src.utils.storyteller_transcript import StorytellerTranscript
 # Logging utilities (placed at top to ensure availability during sync)
 from src.utils.logging_utils import sanitize_log_data
+from src.utils.progress_metadata import state_metadata_kwargs
 
 # [NEW] Service Imports
 from src.services.alignment_service import AlignmentService, ingest_storyteller_transcripts
@@ -2274,6 +2275,7 @@ class SyncManager:
                 timestamp=state_current.get('ts'),
                 xpath=state_current.get('xpath'),
                 cfi=state_current.get('cfi'),
+                **state_metadata_kwargs(state_current),
             ))
         except Exception as e:
             logger.debug(f"Could not persist state snapshot for '{client_name}': {e}")
@@ -2905,7 +2907,8 @@ class SyncManager:
                     percentage=leader_state_data.get('pct'),
                     timestamp=leader_state_data.get('ts'),
                     xpath=leader_state_data.get('xpath'),
-                    cfi=leader_state_data.get('cfi')
+                    cfi=leader_state_data.get('cfi'),
+                    **state_metadata_kwargs(leader_state_data),
                 )
                 self.database_service.save_state(leader_state_model)
 
@@ -2922,7 +2925,8 @@ class SyncManager:
                             percentage=state_data.get('pct'),
                             timestamp=state_data.get('ts'),
                             xpath=state_data.get('xpath'),
-                            cfi=state_data.get('cfi')
+                            cfi=state_data.get('cfi'),
+                            **state_metadata_kwargs(state_data),
                         )
                         self.database_service.save_state(client_state_model)
 

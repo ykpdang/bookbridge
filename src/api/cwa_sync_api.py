@@ -93,6 +93,11 @@ class CWASyncApi:
                 "status": status,
                 "href": location.get("Source"),
                 "frag": location.get("Value"),
+                # Position freshness. Deliberately CurrentBookmark.LastModified:
+                # the entry-level LastModified/PriorityTimestamp also move on
+                # status changes and on the bridge's own writes (verified live),
+                # so they would manufacture false "fresh position" signals.
+                "bookmark_last_modified": bookmark.get("LastModified"),
             }
 
         except Exception as e:

@@ -780,7 +780,8 @@ class DatabaseService:
 
             if existing:
                 # Update existing state
-                for attr in ['last_updated', 'percentage', 'timestamp', 'xpath', 'cfi']:
+                for attr in ['last_updated', 'percentage', 'timestamp', 'xpath', 'cfi',
+                             'service_updated_at', 'status', 'locator_source', 'locator_json']:
                     if hasattr(state, attr):
                         setattr(existing, attr, getattr(state, attr))
                 session.flush()

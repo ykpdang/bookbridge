@@ -6,6 +6,7 @@ from src.api.bookorbit_client import BookOrbitClient
 from src.db.models import Book, State
 from src.sync_clients.sync_client_interface import SyncClient, SyncResult, UpdateProgressRequest, ServiceState
 from src.utils.ebook_utils import EbookParser
+from src.utils.progress_metadata import parse_service_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -164,8 +165,13 @@ class BookOrbitAudioSyncClient(SyncClient):
         prev_pct = prev_state.percentage if prev_state and prev_state.percentage is not None else 0.0
         delta = abs((current_ts or 0.0) - prev_ts)
 
+        current = {"pct": current_pct, "ts": current_ts}
+        service_updated_at = parse_service_timestamp(progress.get("updated_at"))
+        if service_updated_at is not None:
+            current["service_updated_at"] = service_updated_at
+
         return ServiceState(
-            current={"pct": current_pct, "ts": current_ts},
+            current=current,
             previous_pct=prev_pct,
             delta=delta,
             threshold=self.delta_abs_thresh,

@@ -5,6 +5,7 @@ from typing import Optional
 from src.api.bookorbit_client import BookOrbitClient
 from src.db.models import Book, State
 from src.utils.ebook_utils import EbookParser
+from src.utils.progress_metadata import parse_service_timestamp
 from src.sync_clients.sync_client_interface import (
     SyncClient,
     SyncResult,
@@ -85,13 +86,36 @@ class BookOrbitSyncClient(SyncClient):
         if not info:
             return None
 
-        pct, cfi = self.client.get_ebook_progress(info["id"])
+        # Rich read when available; non-dict results (mocked/legacy clients)
+        # fall back to the classic (pct, cfi) tuple.
+        rich = None
+        if hasattr(self.client, "get_ebook_progress_rich"):
+            candidate = self.client.get_ebook_progress_rich(info["id"])
+            if isinstance(candidate, dict):
+                rich = candidate
+        if rich is not None:
+            pct, cfi = rich.get("pct"), rich.get("cfi")
+        else:
+            pct, cfi = self.client.get_ebook_progress(info["id"])
         if pct is None:
             return None
 
+        current = {"pct": pct, "cfi": cfi}
+        if rich is not None:
+            service_updated_at = parse_service_timestamp(rich.get("updated_at"))
+            if service_updated_at is not None:
+                current["service_updated_at"] = service_updated_at
+            for source_key, target_key in (
+                ("file_id", "file_id"),
+                ("page_number", "page"),
+                ("koreader_progress", "koreader_progress"),
+            ):
+                if rich.get(source_key) is not None:
+                    current[target_key] = rich[source_key]
+
         prev_pct = prev_state.percentage if prev_state else 0.0
         return ServiceState(
-            current={"pct": pct, "cfi": cfi},
+            current=current,
             previous_pct=prev_pct,
             delta=abs(pct - prev_pct),
             threshold=self.delta_thresh,
