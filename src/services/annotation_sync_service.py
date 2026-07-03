@@ -24,24 +24,59 @@ next probe instead of staying skipped until a bridge restart.
 """
 
 import logging
+import os
+import re
 import threading
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
+from src.api.booklore_client import BookloreClient
 from src.api.bookorbit_client import BookOrbitClient
+from src.utils.grimmory_cfi import GrimmoryCFIResolver
 from src.utils.user_config import resolve_setting, _ALLOW_GLOBAL_FALLBACK_KEY
 
 logger = logging.getLogger(__name__)
 
 SPOKE_KEY = "@bookorbit"
+BOOKLORE_SPOKE_KEY = "@booklore"
 _MAX_BOOKS_PER_CALL = 20
 _MAX_CHANGES_PER_BOOK = 50
 _MAX_PULL_ROUNDS = 5
 _UNMATCHED_RECHECK_SECONDS = 6 * 3600
 
+KOREADER_TO_GRIMMORY_COLOR = {
+    "yellow": "#FFC107",
+    "green": "#4ADE80",
+    "cyan": "#38BDF8",
+    "pink": "#F472B6",
+    "orange": "#FB923C",
+    "red": "#FB523C",
+    "purple": "#F452FC",
+    "blue": "#0248F8",
+    "gray": "#AAAAAA",
+    "white": "#FAFAFA",
+}
+GRIMMORY_TO_KOREADER_COLOR = {value: key for key, value in KOREADER_TO_GRIMMORY_COLOR.items()}
+KOREADER_TO_GRIMMORY_STYLE = {
+    "lighten": "highlight",
+    "underscore": "underline",
+    "strikeout": "strikethrough",
+}
+GRIMMORY_TO_KOREADER_STYLE = {value: key for key, value in KOREADER_TO_GRIMMORY_STYLE.items()}
+DEFAULT_KOREADER_COLOR = "yellow"
+DEFAULT_KOREADER_STYLE = "lighten"
+DEFAULT_GRIMMORY_COLOR = KOREADER_TO_GRIMMORY_COLOR[DEFAULT_KOREADER_COLOR]
+DEFAULT_GRIMMORY_STYLE = KOREADER_TO_GRIMMORY_STYLE[DEFAULT_KOREADER_STYLE]
+
 
 class AnnotationSyncService:
-    def __init__(self, database_service):
+    def __init__(self, database_service, ebook_parser=None, epub_cache_dir=None):
         self.database_service = database_service
+        self.ebook_parser = ebook_parser
+        self.epub_cache_dir = Path(epub_cache_dir) if epub_cache_dir is not None else Path(
+            os.environ.get("DATA_DIR", "/data")
+        ) / "epub_cache"
         # {(user_id, md5): last_checked_epoch} — re-probed after the TTL.
         self._unmatched: dict[tuple[int | None, str], float] = {}
         self._lock = threading.Lock()
@@ -62,6 +97,55 @@ class AnnotationSyncService:
     @staticmethod
     def _norm_account(value) -> str:
         return str(value or "").strip().lower()
+
+    @staticmethod
+    def _truthy(value, default: bool = False) -> bool:
+        if value in (None, ""):
+            return default
+        return str(value).strip().lower() in {"true", "1", "yes", "on"}
+
+    @staticmethod
+    def _ko_datetime_from_iso(value) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        normalized = text.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            match = re.match(r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})", text)
+            if match:
+                return f"{match.group(1)} {match.group(2)}"
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _booklore_color_from_koreader(value) -> str:
+        return KOREADER_TO_GRIMMORY_COLOR.get(str(value or "").strip().lower(), DEFAULT_GRIMMORY_COLOR)
+
+    @staticmethod
+    def _koreader_color_from_booklore(value) -> str:
+        return GRIMMORY_TO_KOREADER_COLOR.get(str(value or "").strip().upper(), DEFAULT_KOREADER_COLOR)
+
+    @staticmethod
+    def _booklore_style_from_koreader(value) -> str:
+        return KOREADER_TO_GRIMMORY_STYLE.get(str(value or "").strip().lower(), DEFAULT_GRIMMORY_STYLE)
+
+    @staticmethod
+    def _koreader_style_from_booklore(value) -> str:
+        return GRIMMORY_TO_KOREADER_STYLE.get(str(value or "").strip().lower(), DEFAULT_KOREADER_STYLE)
+
+    @staticmethod
+    def _same_remote_anchor(payload: dict, remote: dict | None) -> bool:
+        if not remote:
+            return False
+        return (
+            str(payload.get("cfi") or "") == str(remote.get("cfi") or "")
+            and str(payload.get("text") or "") == str(remote.get("text") or "")
+            and str(payload.get("chapterTitle") or "") == str(remote.get("chapterTitle") or "")
+        )
 
     def _annotation_owner_matches(self, user_id, creds: dict, kosync_user: str) -> bool:
         """Guard against relaying a user's highlights into another BookOrbit account.
@@ -112,22 +196,31 @@ class AnnotationSyncService:
             users = self._enumerate_users()
             synced_users = 0
             for user_id, creds in users:
+                synced_this_user = False
                 kosync_user = str(resolve_setting(creds, "BOOKORBIT_KOSYNC_USER", "") or "").strip()
                 kosync_key = BookOrbitClient.normalize_kosync_key(
                     resolve_setting(creds, "BOOKORBIT_KOSYNC_KEY", "")
                 )
-                if not kosync_user or not kosync_key:
-                    continue
-                if not self._annotation_owner_matches(user_id, creds, kosync_user):
-                    continue
-                client = BookOrbitClient(credentials=creds)
-                if not str(resolve_setting(creds, "BOOKORBIT_SERVER", "") or "").strip():
-                    continue
-                try:
-                    self.sync_user(user_id, client, kosync_user, kosync_key)
+                if kosync_user and kosync_key and self._annotation_owner_matches(user_id, creds, kosync_user):
+                    client = BookOrbitClient(credentials=creds)
+                    if str(resolve_setting(creds, "BOOKORBIT_SERVER", "") or "").strip():
+                        try:
+                            self.sync_user(user_id, client, kosync_user, kosync_key)
+                            synced_this_user = True
+                        except Exception as e:
+                            logger.error("BookOrbit annotation sync failed for user %s: %s", user_id, e, exc_info=True)
+
+                if self._truthy(resolve_setting(creds, "BOOKLORE_ANNOTATION_SYNC", "false")):
+                    client = BookloreClient(database_service=self.database_service, credentials=creds)
+                    if client.is_configured():
+                        try:
+                            if self.sync_booklore_user(user_id, client):
+                                synced_this_user = True
+                        except Exception as e:
+                            logger.error("Grimmory annotation sync failed for user %s: %s", user_id, e, exc_info=True)
+
+                if synced_this_user:
                     synced_users += 1
-                except Exception as e:
-                    logger.error("Annotation sync failed for user %s: %s", user_id, e, exc_info=True)
             return {"users": synced_users}
         finally:
             self._lock.release()
@@ -192,6 +285,8 @@ class AnnotationSyncService:
                 tombstone_ids_by_hash[doc_md5] = state["pending_delete_acks"]
                 for change in changes:
                     # BookOrbit's DTO rejects unknown/null-required fields.
+                    change.pop("_spoke_server_id", None)
+                    change.pop("_spoke_version", None)
                     change.pop("serverId", None)
                     change.pop("version", None)
                     for key in list(change.keys()):
@@ -255,6 +350,249 @@ class AnnotationSyncService:
                 )
             if not more:
                 return
+
+    # ------------------------------------------------------------------
+    # Grimmory / BookLore spoke
+    # ------------------------------------------------------------------
+
+    def _candidate_booklore_books(self, user_id) -> list[dict]:
+        candidates = []
+        try:
+            linked = None
+            if hasattr(self.database_service, "get_linked_abs_ids"):
+                linked = self.database_service.get_linked_abs_ids(user_id)
+                linked = set(linked) if linked is not None else None
+            for book in self.database_service.get_books_by_status("active") or []:
+                if linked is not None and book.abs_id not in linked:
+                    continue
+                source = str(getattr(book, "ebook_source", "") or "").strip().lower()
+                if source not in {"booklore", "grimmory"}:
+                    continue
+                doc_hash = str(getattr(book, "kosync_doc_id", "") or "").strip().lower()
+                book_id = str(getattr(book, "ebook_source_id", "") or "").strip()
+                if not (doc_hash and len(doc_hash) == 32 and book_id):
+                    continue
+                candidates.append({
+                    "doc_md5": doc_hash,
+                    "book_id": book_id,
+                    "filename": (
+                        str(getattr(book, "original_ebook_filename", "") or "").strip()
+                        or str(getattr(book, "ebook_filename", "") or "").strip()
+                        or f"booklore_{book_id}.epub"
+                    ),
+                    "title": str(getattr(book, "abs_title", "") or "").strip(),
+                })
+        except Exception as e:
+            logger.debug("Grimmory annotation book enumeration failed for user %s: %s", user_id, e)
+        return candidates
+
+    def _resolve_booklore_epub_path(self, client: BookloreClient, candidate: dict) -> Path | None:
+        if self.ebook_parser is None:
+            logger.warning("Grimmory annotation sync skipped: ebook parser is not configured")
+            return None
+
+        filename = candidate["filename"]
+        try:
+            return Path(self.ebook_parser.resolve_book_path(filename))
+        except Exception:
+            pass
+
+        self.epub_cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = self.epub_cache_dir / filename
+        if cache_path.exists() and cache_path.stat().st_size > 0:
+            return cache_path
+
+        content = client.download_book(candidate["book_id"])
+        if not content:
+            logger.warning(
+                "Grimmory annotation sync could not download EPUB for book %s",
+                candidate["book_id"],
+            )
+            return None
+        try:
+            cache_path.write_bytes(content)
+        except Exception as e:
+            logger.warning("Grimmory annotation sync could not cache EPUB %s: %s", filename, e)
+            return None
+        return cache_path if cache_path.exists() and cache_path.stat().st_size > 0 else None
+
+    def _booklore_payload_from_change(self, resolver: GrimmoryCFIResolver, book_id: str, change: dict) -> dict:
+        return {
+            "bookId": int(book_id),
+            "cfi": resolver.xpointer_range_to_cfi(change.get("pos0"), change.get("pos1")),
+            "chapterTitle": change.get("chapter"),
+            "text": change.get("text") or "",
+            "color": self._booklore_color_from_koreader(change.get("color")),
+            "style": self._booklore_style_from_koreader(change.get("drawer")),
+            "note": change.get("note"),
+        }
+
+    def _entry_from_booklore_annotation(self, resolver: GrimmoryCFIResolver, annotation: dict) -> dict | None:
+        try:
+            pos0, pos1 = resolver.cfi_range_to_xpointers(annotation.get("cfi"))
+        except Exception as e:
+            logger.warning("Grimmory annotation CFI conversion failed for id %s: %s", annotation.get("id"), e)
+            return None
+        created = self._ko_datetime_from_iso(annotation.get("createdAt"))
+        updated = self._ko_datetime_from_iso(annotation.get("updatedAt")) if annotation.get("updatedAt") else None
+        return {
+            "serverId": int(annotation["id"]),
+            "version": 1,
+            "datetime": created,
+            "datetimeUpdated": updated,
+            "posFormat": "xpointer",
+            "pos0": pos0,
+            "pos1": pos1,
+            "drawer": self._koreader_style_from_booklore(annotation.get("style")),
+            "color": self._koreader_color_from_booklore(annotation.get("color")),
+            "text": annotation.get("text"),
+            "note": annotation.get("note"),
+            "chapter": annotation.get("chapterTitle"),
+            "pageno": None,
+        }
+
+    def sync_booklore_user(self, user_id, client: BookloreClient) -> bool:
+        did_work = False
+        for candidate in self._candidate_booklore_books(user_id):
+            if self.sync_booklore_book(user_id, client, candidate):
+                did_work = True
+        return did_work
+
+    def sync_booklore_book(self, user_id, client: BookloreClient, candidate: dict) -> bool:
+        book_path = self._resolve_booklore_epub_path(client, candidate)
+        if not book_path:
+            return False
+
+        try:
+            resolver = GrimmoryCFIResolver(self.ebook_parser, book_path)
+        except Exception as e:
+            logger.warning("Grimmory annotation resolver failed for %s: %s", candidate["filename"], e)
+            return False
+
+        doc_md5 = candidate["doc_md5"]
+        book_id = candidate["book_id"]
+        remote_annotations = client.get_annotations(book_id)
+        if remote_annotations is None:
+            return False
+        remote_by_id = {
+            int(item["id"]): item
+            for item in remote_annotations
+            if item.get("id") is not None
+        }
+
+        state = self.database_service.get_annotation_spoke_state(
+            user_id,
+            doc_md5,
+            BOOKLORE_SPOKE_KEY,
+            server_id_field="booklore_server_id",
+            version_field="booklore_version",
+        )
+
+        tombstone_acks = []
+        for pending in state.get("pending_deletes") or []:
+            remote_id = pending.get("serverId")
+            if remote_id is not None and client.delete_annotation(remote_id):
+                tombstone_acks.append(pending["_id"])
+
+        uploaded_ids = []
+        server_ids_by_annotation_id = {}
+        for raw_change in (state.get("changes") or [])[:_MAX_CHANGES_PER_BOOK]:
+            change = dict(raw_change)
+            annotation_id = change.pop("_id", None)
+            remote_id = change.pop("_spoke_server_id", None)
+            change.pop("_spoke_version", None)
+            if not annotation_id:
+                continue
+
+            try:
+                payload = self._booklore_payload_from_change(resolver, book_id, change)
+            except Exception as e:
+                logger.warning("Grimmory annotation xpointer conversion failed for local id %s: %s", annotation_id, e)
+                continue
+
+            remote_id = int(remote_id) if remote_id is not None else None
+            if remote_id is None:
+                created = client.create_annotation(
+                    book_id,
+                    payload["cfi"],
+                    payload["chapterTitle"],
+                    payload["text"],
+                    payload["color"],
+                    payload["style"],
+                    payload["note"],
+                )
+                if created and created.get("id") is not None:
+                    uploaded_ids.append(annotation_id)
+                    server_ids_by_annotation_id[str(annotation_id)] = int(created["id"])
+                continue
+
+            if self._same_remote_anchor(payload, remote_by_id.get(remote_id)):
+                if client.update_annotation(remote_id, payload["color"], payload["style"], payload["note"]):
+                    uploaded_ids.append(annotation_id)
+                    server_ids_by_annotation_id[str(annotation_id)] = remote_id
+                continue
+
+            if client.delete_annotation(remote_id):
+                created = client.create_annotation(
+                    book_id,
+                    payload["cfi"],
+                    payload["chapterTitle"],
+                    payload["text"],
+                    payload["color"],
+                    payload["style"],
+                    payload["note"],
+                )
+                if created and created.get("id") is not None:
+                    uploaded_ids.append(annotation_id)
+                    server_ids_by_annotation_id[str(annotation_id)] = int(created["id"])
+
+        if uploaded_ids or tombstone_acks:
+            self.database_service.mark_spoke_annotations_uploaded(
+                user_id,
+                BOOKLORE_SPOKE_KEY,
+                annotation_ids=uploaded_ids,
+                tombstone_ids=tombstone_acks,
+                server_id_field="booklore_server_id",
+                version_field="booklore_version",
+                synced_at_field="booklore_synced_at",
+                server_ids_by_annotation_id=server_ids_by_annotation_id,
+            )
+
+        # Pull after push so Grimmory reflects local changes before merging.
+        remote_annotations = client.get_annotations(book_id)
+        if remote_annotations is None:
+            return bool(uploaded_ids or tombstone_acks)
+
+        adds = []
+        remote_ids = set()
+        for annotation in remote_annotations:
+            if annotation.get("id") is None:
+                continue
+            remote_ids.add(int(annotation["id"]))
+            entry = self._entry_from_booklore_annotation(resolver, annotation)
+            if entry:
+                adds.append(entry)
+
+        known_ids = set(self.database_service.get_spoke_server_ids_for_book(
+            user_id,
+            doc_md5,
+            server_id_field="booklore_server_id",
+        ))
+        deletes = [{"serverId": remote_id} for remote_id in sorted(known_ids - remote_ids)]
+
+        if adds or deletes:
+            self.database_service.apply_spoke_annotations(
+                user_id,
+                doc_md5,
+                BOOKLORE_SPOKE_KEY,
+                adds=adds,
+                edits=[],
+                deletes=deletes,
+                server_id_field="booklore_server_id",
+                version_field="booklore_version",
+                synced_at_field="booklore_synced_at",
+            )
+        return bool(uploaded_ids or tombstone_acks or adds or deletes)
 
 
 def run_annotation_sync_daemon(service: AnnotationSyncService, interval_getter) -> None:

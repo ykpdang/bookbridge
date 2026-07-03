@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -347,6 +347,8 @@ class TestAnnotationSyncService(unittest.TestCase):
         self.assertTrue(sent_books[0]["keysComplete"])
         # internal _id + null fields stripped from the wire payload
         self.assertNotIn("_id", sent_books[0]["changes"][0])
+        self.assertNotIn("_spoke_server_id", sent_books[0]["changes"][0])
+        self.assertNotIn("_spoke_version", sent_books[0]["changes"][0])
         self.assertNotIn("serverId", sent_books[0]["changes"][0])
         db.apply_spoke_annotations.assert_called_once()
         db.mark_spoke_annotations_uploaded.assert_called_once()
@@ -446,6 +448,152 @@ class TestAnnotationSyncService(unittest.TestCase):
             hashlib.md5(b"hunter2").hexdigest(),
         )
         self.assertEqual(BookOrbitClient.normalize_kosync_key(""), "")
+
+
+class TestGrimmoryAnnotationSyncService(unittest.TestCase):
+    def _service_with_db(self, db):
+        from src.services.annotation_sync_service import AnnotationSyncService
+        return AnnotationSyncService(db, ebook_parser=MagicMock(), epub_cache_dir=Path("test_data"))
+
+    def test_booklore_pushes_local_add_then_pulls_remote(self):
+        db = MagicMock()
+        db.get_annotation_spoke_state.return_value = {
+            "keys": [],
+            "changes": [dict(_entry(), _id=5, _spoke_server_id=None, _spoke_version=None, color="yellow")],
+            "pending_delete_acks": [],
+            "pending_deletes": [],
+        }
+        db.get_spoke_server_ids_for_book.return_value = [101]
+        client = MagicMock()
+        client.download_book.return_value = b"epub"
+        client.get_annotations.side_effect = [
+            [],
+            [{
+                "id": 101,
+                "bookId": 22,
+                "createdAt": "2026-07-01T10:00:00Z",
+                "updatedAt": "2026-07-01T10:00:00Z",
+                "cfi": "remote-cfi",
+                "text": "web words",
+                "note": "web note",
+                "chapterTitle": "Chapter",
+                "color": "#FFC107",
+                "style": "highlight",
+            }],
+        ]
+        client.create_annotation.return_value = {"id": 101}
+
+        resolver = MagicMock()
+        resolver.xpointer_range_to_cfi.return_value = "local-cfi"
+        resolver.cfi_range_to_xpointers.return_value = ("xp0", "xp1")
+
+        service = self._service_with_db(db)
+        service._resolve_booklore_epub_path = MagicMock(return_value=Path("book.epub"))
+        with patch("src.services.annotation_sync_service.GrimmoryCFIResolver", return_value=resolver):
+            did_work = service.sync_booklore_book(
+                7,
+                client,
+                {"doc_md5": DOC, "book_id": "22", "filename": "book.epub", "title": "Book"},
+            )
+
+        self.assertTrue(did_work)
+        client.create_annotation.assert_called_once_with(
+            "22", "local-cfi", None, "highlighted words", "#FFC107", "highlight", None
+        )
+        db.mark_spoke_annotations_uploaded.assert_called_once()
+        db.apply_spoke_annotations.assert_called_once()
+        applied = db.apply_spoke_annotations.call_args.kwargs["adds"]
+        self.assertEqual(applied[0]["serverId"], 101)
+        self.assertEqual(applied[0]["pos0"], "xp0")
+        self.assertEqual(applied[0]["drawer"], "lighten")
+
+    def test_booklore_remote_missing_id_tombstones_local(self):
+        db = MagicMock()
+        db.get_annotation_spoke_state.return_value = {
+            "keys": [],
+            "changes": [],
+            "pending_delete_acks": [],
+            "pending_deletes": [],
+        }
+        db.get_spoke_server_ids_for_book.return_value = [101, 102]
+        client = MagicMock()
+        client.get_annotations.return_value = [{
+            "id": 101,
+            "createdAt": "2026-07-01T10:00:00Z",
+            "updatedAt": None,
+            "cfi": "remote-cfi",
+            "text": "web words",
+            "note": None,
+            "chapterTitle": None,
+            "color": "#4ADE80",
+            "style": "underline",
+        }]
+        resolver = MagicMock()
+        resolver.cfi_range_to_xpointers.return_value = ("xp0", "xp1")
+
+        service = self._service_with_db(db)
+        service._resolve_booklore_epub_path = MagicMock(return_value=Path("book.epub"))
+        with patch("src.services.annotation_sync_service.GrimmoryCFIResolver", return_value=resolver):
+            service.sync_booklore_book(
+                7,
+                client,
+                {"doc_md5": DOC, "book_id": "22", "filename": "book.epub", "title": "Book"},
+            )
+
+        deletes = db.apply_spoke_annotations.call_args.kwargs["deletes"]
+        self.assertEqual(deletes, [{"serverId": 102}])
+
+
+class TestGrimmoryCFIResolver(unittest.TestCase):
+    def test_simple_xpointer_cfi_round_trip(self):
+        from lxml import html
+        from src.utils.grimmory_cfi import GrimmoryCFIResolver
+
+        class Parser:
+            def extract_text_and_map(self, path):
+                return "Hello world", [{
+                    "spine_index": 1,
+                    "content": b"<html><body><p>Hello world</p></body></html>",
+                    "start": 0,
+                    "end": 11,
+                }]
+
+            def _split_xpath_char_offset(self, relative_path):
+                return self._split(relative_path)
+
+            @staticmethod
+            def _split(relative_path):
+                import re
+                match = re.search(r"\.(\d+)$", relative_path)
+                offset = int(match.group(1)) if match else 0
+                clean = re.sub(r"(?:/text\(\)(?:\[\d+\])?)?\.\d+$", "", relative_path)
+                return clean, offset
+
+            def _resolve_xpath_target_node(self, filename, spine_map, reported_spine_index, clean_xpath):
+                item = spine_map[0]
+                tree = html.fromstring(item["content"])
+                return item, tree, tree.xpath(clean_xpath)[0]
+
+            def _build_xpath(self, element):
+                parts = []
+                current = element
+                while current is not None and current.tag != "html":
+                    parts.insert(0, current.tag)
+                    current = current.getparent()
+                return "/".join(parts)
+
+        resolver = GrimmoryCFIResolver(Parser(), Path("book.epub"))
+        cfi = resolver.xpointer_range_to_cfi(
+            "/body/DocFragment[1]/body/p/text().0",
+            "/body/DocFragment[1]/body/p/text().5",
+        )
+        self.assertEqual(
+            resolver.cfi_range_to_xpointers(cfi),
+            (
+                "/body/DocFragment[1]/body/p/text().0",
+                "/body/DocFragment[1]/body/p/text().5",
+            ),
+        )
 
 
 if __name__ == '__main__':

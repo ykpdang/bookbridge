@@ -4,6 +4,28 @@
 
 All notable changes to ABS-KoSync Enhanced will be documented in this file.
 
+## [7.1.0]
+
+The headline is **highlights and notes**: what you highlight and annotate now follows you across your readers, the same way your reading position already does.
+
+### What's New
+
+- **Highlights and notes sync across your devices.** Highlights and margin notes made in KOReader now travel between your devices — and to Grimmory and BookOrbit web readers — through the bridge. Each reader keeps their own annotations, so household members don't see each other's. A new **Sync Highlights** action pushes and pulls on demand, a **Sweep All Highlights** menu item back-fills everything a device already has, and closing a book quietly captures anything new.
+
+- **BookOrbit audiobooks now sync.** Listening progress on audiobooks hosted in BookOrbit is tracked and kept in step with the same book's ebook and audiobook positions everywhere else.
+
+- **Smarter about which position wins.** The bridge now records when each service itself last moved a position, and uses that to keep a stale or backwards position from overwriting a newer one — so a device that's been asleep no longer drags your progress back.
+
+### What Changed
+
+- **Add Book clears after queueing.** The search box now empties when you add a book to the queue, so you can go straight into your next search.
+
+### Fixed
+
+- **Connection tests live where the credentials do.** The test buttons on the general settings gave inconsistent results because logins are now per-reader — they've been removed, and you test each connection from that reader's Integrations, where its credentials actually are.
+
+- **Audiobookshelf listeners recover on their own.** A dropped Audiobookshelf connection now revives itself instead of quietly going silent until the next restart.
+
 ## [7.0.0]
 
 The headline change is **user accounts**: the bridge now supports more than one reader, each with their own sign-in, their own progress, and their own view of the library. This is a bigger release than usual — if you are upgrading from an earlier version, please read the upgrade note below.

@@ -651,6 +651,10 @@ class KoreaderAnnotation(Base):
     bookorbit_server_id = Column(Integer, nullable=True, index=True)
     bookorbit_version = Column(Integer, nullable=True)
     bookorbit_synced_at = Column(DateTime, nullable=True)
+    # Grimmory / BookLore spoke bookkeeping
+    booklore_server_id = Column(Integer, nullable=True, index=True)
+    booklore_version = Column(Integer, nullable=True)
+    booklore_synced_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, index=True)
 
@@ -660,7 +664,8 @@ class KoreaderAnnotation(Base):
                  drawer: str = None, color: str = None, text: str = None,
                  note: str = None, chapter: str = None, pageno: int = None,
                  source_device: str = None, version: int = 1,
-                 bookorbit_server_id: int = None, bookorbit_version: int = None):
+                 bookorbit_server_id: int = None, bookorbit_version: int = None,
+                 booklore_server_id: int = None, booklore_version: int = None):
         self.md5 = md5
         self.user_id = user_id
         self.ann_key = ann_key
@@ -680,6 +685,8 @@ class KoreaderAnnotation(Base):
         self.deleted = False
         self.bookorbit_server_id = bookorbit_server_id
         self.bookorbit_version = bookorbit_version
+        self.booklore_server_id = booklore_server_id
+        self.booklore_version = booklore_version
         self.created_at = utcnow()
         self.updated_at = utcnow()
 

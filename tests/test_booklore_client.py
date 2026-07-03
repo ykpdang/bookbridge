@@ -73,6 +73,57 @@ def make_detail(book_id, title=None, filename=None, library_id="lib-1", authors=
     }
 
 
+def test_annotation_client_methods_use_grimmory_payloads(booklore_client):
+    responses = {
+        ("GET", "/api/v1/annotations/book/22"): MockResponse([{
+            "id": 101,
+            "bookId": 22,
+            "createdAt": "2026-07-01T10:00:00Z",
+            "updatedAt": "2026-07-01T10:01:00Z",
+            "cfi": "epubcfi(/6/2!/4/2,/1:0,/1:5)",
+            "text": "words",
+            "note": "note",
+            "chapterTitle": "Chapter",
+            "color": "#FFC107",
+            "style": "highlight",
+        }]),
+        ("POST", "/api/v1/annotations"): MockResponse({"id": 102, "bookId": 22}),
+        ("PUT", "/api/v1/annotations/102"): MockResponse({}, 204),
+        ("DELETE", "/api/v1/annotations/102"): MockResponse({}, 404),
+    }
+    calls = []
+
+    def fake_request(method, endpoint, json_data=None, timeout=None):
+        calls.append((method, endpoint, json_data))
+        return responses[(method, endpoint)]
+
+    booklore_client._make_request = fake_request
+
+    annotations = booklore_client.get_annotations(22)
+    assert annotations[0]["id"] == 101
+    created = booklore_client.create_annotation(
+        22,
+        "epubcfi(/6/2!/4/2,/1:0,/1:5)",
+        "Chapter",
+        "words",
+        "#FFC107",
+        "highlight",
+        "note",
+    )
+    assert created["id"] == 102
+    assert booklore_client.update_annotation(102, "#FFC107", "highlight", "note") is True
+    assert booklore_client.delete_annotation(102) is True
+    assert calls[1] == ("POST", "/api/v1/annotations", {
+        "bookId": 22,
+        "cfi": "epubcfi(/6/2!/4/2,/1:0,/1:5)",
+        "chapterTitle": "Chapter",
+        "text": "words",
+        "color": "#FFC107",
+        "style": "highlight",
+        "note": "note",
+    })
+
+
 def paginated_responses(books, batch_size=200):
     responses = []
     for start in range(0, len(books), batch_size):

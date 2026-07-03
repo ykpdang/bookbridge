@@ -262,10 +262,15 @@ class BookloreClient:
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         url = f"{self.base_url}{endpoint}"
         try:
-            if method.upper() == "GET":
+            method_upper = method.upper()
+            if method_upper == "GET":
                 response = self.session.get(url, headers=headers, timeout=request_timeout)
-            elif method.upper() == "POST":
+            elif method_upper == "POST":
                 response = self.session.post(url, headers=headers, json=json_data, timeout=request_timeout)
+            elif method_upper == "PUT":
+                response = self.session.put(url, headers=headers, json=json_data, timeout=request_timeout)
+            elif method_upper == "DELETE":
+                response = self.session.delete(url, headers=headers, timeout=request_timeout)
             else: return None
 
             if response.status_code == 401:
@@ -277,10 +282,14 @@ class BookloreClient:
                     logger.warning(f"Grimmory: _make_request returning None after 401 retry (no token) for {method} {endpoint}")
                     return None
                 headers["Authorization"] = f"Bearer {token}"
-                if method.upper() == "GET":
+                if method_upper == "GET":
                     response = self.session.get(url, headers=headers, timeout=request_timeout)
-                else:
+                elif method_upper == "POST":
                     response = self.session.post(url, headers=headers, json=json_data, timeout=request_timeout)
+                elif method_upper == "PUT":
+                    response = self.session.put(url, headers=headers, json=json_data, timeout=request_timeout)
+                elif method_upper == "DELETE":
+                    response = self.session.delete(url, headers=headers, timeout=request_timeout)
             return response
         except Exception as e:
             logger.error(f"âŒ Grimmory API request failed: {e}")
@@ -1656,6 +1665,88 @@ class BookloreClient:
         except Exception as e:
             logger.error(f"âŒ Download error: {e}")
             return None
+
+    @staticmethod
+    def _normalize_annotation(raw_annotation):
+        if not isinstance(raw_annotation, dict):
+            return None
+        return {
+            "id": raw_annotation.get("id"),
+            "bookId": raw_annotation.get("bookId"),
+            "createdAt": raw_annotation.get("createdAt"),
+            "updatedAt": raw_annotation.get("updatedAt"),
+            "cfi": raw_annotation.get("cfi"),
+            "text": raw_annotation.get("text"),
+            "note": raw_annotation.get("note"),
+            "chapterTitle": raw_annotation.get("chapterTitle"),
+            "color": raw_annotation.get("color"),
+            "style": raw_annotation.get("style"),
+        }
+
+    def get_annotations(self, book_id):
+        """Return Grimmory reader annotations for one book, scoped by auth user."""
+        response = self._make_request("GET", f"/api/v1/annotations/book/{book_id}")
+        if response is None or response.status_code != 200:
+            logger.warning(
+                "Grimmory: annotation list failed for book %s status=%s body=%s",
+                book_id,
+                response.status_code if response is not None else "no-response",
+                self._response_text_preview(response, 300) if response is not None else "<unavailable>",
+            )
+            return None
+        data = self._parse_json_response(response, f"Grimmory annotations for book {book_id}")
+        if not isinstance(data, list):
+            return []
+        return [ann for ann in (self._normalize_annotation(item) for item in data) if ann]
+
+    def create_annotation(self, book_id, cfi, chapter_title, text, color, style, note=None):
+        payload = {
+            "bookId": int(book_id),
+            "cfi": cfi,
+            "chapterTitle": chapter_title,
+            "text": text,
+            "color": color,
+            "style": style,
+            "note": note,
+        }
+        response = self._make_request("POST", "/api/v1/annotations", payload)
+        if response is None or response.status_code not in (200, 201):
+            logger.warning(
+                "Grimmory: annotation create failed for book %s status=%s body=%s",
+                book_id,
+                response.status_code if response is not None else "no-response",
+                self._response_text_preview(response, 300) if response is not None else "<unavailable>",
+            )
+            return None
+        data = self._parse_json_response(response, f"Grimmory create annotation for book {book_id}")
+        return self._normalize_annotation(data) or data
+
+    def update_annotation(self, annotation_id, color, style, note=None):
+        payload = {"color": color, "style": style, "note": note}
+        response = self._make_request("PUT", f"/api/v1/annotations/{annotation_id}", payload)
+        if response is None or response.status_code not in (200, 204):
+            logger.warning(
+                "Grimmory: annotation update failed for id %s status=%s body=%s",
+                annotation_id,
+                response.status_code if response is not None else "no-response",
+                self._response_text_preview(response, 300) if response is not None else "<unavailable>",
+            )
+            return False
+        return True
+
+    def delete_annotation(self, annotation_id):
+        response = self._make_request("DELETE", f"/api/v1/annotations/{annotation_id}")
+        if response is None:
+            return False
+        if response.status_code in (200, 204, 404):
+            return True
+        logger.warning(
+            "Grimmory: annotation delete failed for id %s status=%s body=%s",
+            annotation_id,
+            response.status_code,
+            self._response_text_preview(response, 300),
+        )
+        return False
 
     @staticmethod
     def _to_progress_fraction(raw_pct):

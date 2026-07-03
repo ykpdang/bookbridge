@@ -8837,12 +8837,26 @@ if __name__ == '__main__':
         from src.services.annotation_sync_service import AnnotationSyncService, run_annotation_sync_daemon
 
         def _annotation_sync_interval():
+            intervals = []
             try:
-                return int(os.environ.get("BOOKORBIT_ANNOTATION_SYNC_MINUTES", "15") or 0)
+                bookorbit_interval = int(os.environ.get("BOOKORBIT_ANNOTATION_SYNC_MINUTES", "15") or 0)
+                if bookorbit_interval > 0:
+                    intervals.append(bookorbit_interval)
             except (TypeError, ValueError):
-                return 0
+                pass
+            try:
+                booklore_interval = int(os.environ.get("BOOKLORE_ANNOTATION_SYNC_MINUTES", "15") or 0)
+                if booklore_interval > 0:
+                    intervals.append(booklore_interval)
+            except (TypeError, ValueError):
+                pass
+            return min(intervals) if intervals else 0
 
-        annotation_sync_service = AnnotationSyncService(database_service)
+        annotation_sync_service = AnnotationSyncService(
+            database_service,
+            ebook_parser=container.ebook_parser(),
+            epub_cache_dir=container.epub_cache_dir(),
+        )
         threading.Thread(
             target=run_annotation_sync_daemon,
             args=(annotation_sync_service, _annotation_sync_interval),

@@ -2121,7 +2121,9 @@ class DatabaseService:
             )
             return [r[0] for r in rows]
 
-    def get_annotation_spoke_state(self, user_id, doc_md5: str, spoke_key: str) -> dict:
+    def get_annotation_spoke_state(self, user_id, doc_md5: str, spoke_key: str,
+                                   server_id_field: str = "bookorbit_server_id",
+                                   version_field: str = "bookorbit_version") -> dict:
         """Everything the spoke needs to build one exchange call for one book:
         alive keys, changed entries (version above the spoke's ack), and the
         spoke's pending tombstone acks."""
@@ -2135,7 +2137,7 @@ class DatabaseService:
                 )
                 .all()
             )
-            keys, changes, pending_delete_acks = [], [], []
+            keys, changes, pending_delete_acks, pending_deletes = [], [], [], []
             for row in rows:
                 state = self._get_device_state(session, row.id, spoke_key)
                 acked = int(state.acked_version or 0) if state is not None else 0
@@ -2144,19 +2146,30 @@ class DatabaseService:
                     # rows whose tombstone the spoke hasn't processed yet.
                     if not (state is not None and state.ack_deleted):
                         pending_delete_acks.append(row.id)
+                        spoke_id = getattr(row, server_id_field, None)
+                        if spoke_id is not None:
+                            pending_deletes.append({"_id": row.id, "serverId": int(spoke_id)})
                     continue
                 # BookOrbit hashes the raw pos0 it received; send its convention.
                 keys.append({"k": self._bookorbit_annotation_key(row.datetime, row.pos0), "dt": row.datetime})
                 if acked < int(row.version or 1):
                     entry = self._annotation_response_entry(row)
                     entry["_id"] = row.id  # internal: for post-upload ack bookkeeping
+                    entry["_spoke_server_id"] = getattr(row, server_id_field, None)
+                    entry["_spoke_version"] = getattr(row, version_field, None)
                     changes.append(entry)
-            return {"keys": keys, "changes": changes, "pending_delete_acks": pending_delete_acks}
+            return {
+                "keys": keys,
+                "changes": changes,
+                "pending_delete_acks": pending_delete_acks,
+                "pending_deletes": pending_deletes,
+            }
 
     def apply_spoke_annotations(self, user_id, doc_md5: str, spoke_key: str,
                                 adds: list[dict], edits: list[dict], deletes: list[dict],
                                 server_id_field: str = "bookorbit_server_id",
-                                version_field: str = "bookorbit_version") -> dict:
+                                version_field: str = "bookorbit_version",
+                                synced_at_field: str = "bookorbit_synced_at") -> dict:
         """Apply a spoke's (e.g. BookOrbit's) toApply delta into the canonical store.
 
         Returns the ack payload data: applied [{serverId, version}] and deleted
@@ -2204,7 +2217,7 @@ class DatabaseService:
                     setattr(row, server_id_field, int(spoke_id))
                     if spoke_version is not None:
                         setattr(row, version_field, int(spoke_version))
-                    row.bookorbit_synced_at = utcnow()
+                    setattr(row, synced_at_field, utcnow())
                     session.add(row)
                     session.flush()
                     self._set_device_state(session, row.id, spoke_key, acked_version=row.version)
@@ -2212,7 +2225,7 @@ class DatabaseService:
                     setattr(row, server_id_field, int(spoke_id))
                     if spoke_version is not None:
                         setattr(row, version_field, int(spoke_version))
-                    row.bookorbit_synced_at = utcnow()
+                    setattr(row, synced_at_field, utcnow())
                     if row.deleted:
                         row.deleted = False
                         row.deleted_at = None
@@ -2257,7 +2270,12 @@ class DatabaseService:
 
     def mark_spoke_annotations_uploaded(self, user_id, spoke_key: str,
                                         annotation_ids: list[int],
-                                        tombstone_ids: list[int] = None) -> None:
+                                        tombstone_ids: list[int] = None,
+                                        server_id_field: str = "bookorbit_server_id",
+                                        version_field: str = "bookorbit_version",
+                                        synced_at_field: str = "bookorbit_synced_at",
+                                        server_ids_by_annotation_id: dict = None,
+                                        versions_by_annotation_id: dict = None) -> None:
         """Record that the spoke accepted our uploaded changes / processed our
         key-omission deletions, so they are not re-sent every cycle."""
         with self.get_session() as session:
@@ -2267,8 +2285,19 @@ class DatabaseService:
                     KoreaderAnnotation.user_id == user_id,
                 ).first()
                 if row is not None:
+                    ann_key = str(ann_id)
+                    server_ids = server_ids_by_annotation_id or {}
+                    versions = versions_by_annotation_id or {}
+                    if ann_key in server_ids and server_ids[ann_key] is not None:
+                        setattr(row, server_id_field, int(server_ids[ann_key]))
+                    elif ann_id in server_ids and server_ids[ann_id] is not None:
+                        setattr(row, server_id_field, int(server_ids[ann_id]))
+                    if ann_key in versions and versions[ann_key] is not None:
+                        setattr(row, version_field, int(versions[ann_key]))
+                    elif ann_id in versions and versions[ann_id] is not None:
+                        setattr(row, version_field, int(versions[ann_id]))
                     self._set_device_state(session, row.id, spoke_key, acked_version=row.version)
-                    row.bookorbit_synced_at = utcnow()
+                    setattr(row, synced_at_field, utcnow())
             for ann_id in tombstone_ids or []:
                 row = session.query(KoreaderAnnotation).filter(
                     KoreaderAnnotation.id == int(ann_id),
@@ -2277,6 +2306,23 @@ class DatabaseService:
                 if row is not None:
                     self._set_device_state(session, row.id, spoke_key, ack_deleted=True)
             session.commit()
+
+    def get_spoke_server_ids_for_book(self, user_id, doc_md5: str,
+                                      server_id_field: str = "bookorbit_server_id") -> list[int]:
+        """Known remote annotation ids for a spoke/book, excluding local tombstones."""
+        doc_md5 = str(doc_md5 or "").strip().lower()
+        with self.get_session() as session:
+            rows = (
+                session.query(getattr(KoreaderAnnotation, server_id_field))
+                .filter(
+                    KoreaderAnnotation.md5 == doc_md5,
+                    KoreaderAnnotation.user_id == user_id,
+                    KoreaderAnnotation.deleted == False,  # noqa: E712
+                    getattr(KoreaderAnnotation, server_id_field).isnot(None),
+                )
+                .all()
+            )
+            return [int(r[0]) for r in rows if r[0] is not None]
 
     def get_user_annotations_for_book(self, user_id, doc_md5: str, include_deleted: bool = False) -> list:
         """All annotation rows for a (user, document) — dashboard/tests helper."""
