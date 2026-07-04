@@ -94,6 +94,31 @@ def test_kosync_id_skips_bookorbit_when_local_file_present():
     bookorbit.download_book.assert_not_called()
 
 
+def test_kosync_id_prefers_selected_source_path_before_filename_glob():
+    """Approved Suggestions should hash the selected ebook file, not the first basename match."""
+    bookorbit = MagicMock()
+    bookorbit.is_configured.return_value = False
+
+    with tempfile.TemporaryDirectory() as tmp:
+        selected = Path(tmp) / "selected" / _EBOOK
+        first_basename_match = Path(tmp) / "other" / _EBOOK
+        selected.parent.mkdir()
+        first_basename_match.parent.mkdir()
+        selected.write_bytes(b"SELECTED")
+        first_basename_match.write_bytes(b"OTHER")
+
+        container, parser = _container(tmp, "unused")
+        parser.get_kosync_id.return_value = "selectedhash"
+        with patch.object(web_server, "uc", return_value=_clients(bookorbit)), \
+             patch.object(web_server, "container", container), \
+             patch.object(web_server, "find_ebook_file", wraps=web_server.find_ebook_file):
+            result = web_server.get_kosync_id_for_ebook(_EBOOK, source_path=str(selected))
+
+    assert result == "selectedhash"
+    parser.get_kosync_id.assert_called_once_with(selected)
+    bookorbit.download_book.assert_not_called()
+
+
 def test_kosync_id_none_when_bookorbit_has_no_match():
     """No local file, BookOrbit configured but the book isn't found -> None."""
     bookorbit = MagicMock()

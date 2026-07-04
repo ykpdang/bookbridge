@@ -164,6 +164,53 @@ def test_same_folder_match_allows_relative_suffix_paths():
     assert result["matches"][0]["score"] == 100.0
 
 
+def test_same_folder_match_treats_equivalent_library_mount_roots_as_same_parent():
+    svc = _build_service()
+    candidate_pool = svc._prepare_candidate_pool([
+        _ebook(
+            "The Ministry for the Future",
+            "/books/Kim Stanley Robinson/The Ministry for the Future (2020)/The Ministry for the Future.epub",
+        ),
+    ])
+
+    result = svc._scan_single_audiobook(
+        {
+            "audio_source": "ABS",
+            "audio_source_id": "abs-1",
+            "audio_title": "The Ministry for the Future",
+            "audio_author": "Kim Stanley Robinson",
+            "audio_path": "/audiobooks/Kim Stanley Robinson/The Ministry for the Future (2020)",
+        },
+        candidate_pool,
+    )
+
+    assert result is not None
+    assert result["matches"][0]["score"] == 100.0
+    assert result["matches"][0]["match_reason"] == "same_folder"
+
+
+def test_split_mount_same_folder_still_requires_title_agreement_for_exact_match():
+    svc = _build_service()
+    candidate_pool = svc._prepare_candidate_pool([
+        _ebook("Warbreaker", "/books/Sanderson/Shared Folder/warbreaker.epub"),
+    ])
+
+    result = svc._scan_single_audiobook(
+        {
+            "audio_source": "ABS",
+            "audio_source_id": "abs-1",
+            "audio_title": "Mistborn",
+            "audio_author": "Brandon Sanderson",
+            "audio_path": "/audiobooks/Sanderson/Shared Folder/audio.m4b",
+        },
+        candidate_pool,
+    )
+
+    assert result is not None
+    assert result["matches"][0]["score"] == 94.0
+    assert result["matches"][0]["match_reason"] == "same_folder_ambiguous"
+
+
 def test_same_folder_match_ignores_bare_filenames_and_shared_roots():
     svc = _build_service()
 

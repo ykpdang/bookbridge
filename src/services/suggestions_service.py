@@ -318,6 +318,13 @@ class SuggestionsService:
         ".epub", ".pdf", ".mobi", ".azw", ".azw3", ".cbz", ".cbr",
         ".m4b", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wav",
     })
+    _EQUIVALENT_LIBRARY_ROOTS = frozenset({
+        "books",
+        "ebooks",
+        "audiobooks",
+        "linker_books",
+        "storyteller_library",
+    })
 
     @classmethod
     def _parent_dir_key(cls, raw_path: Any) -> str:
@@ -345,13 +352,24 @@ class SuggestionsService:
             return ""
         return "/".join(part.lower() for part in parts)
 
-    @staticmethod
-    def _same_directory_key(left_key: str, right_key: str) -> bool:
+    @classmethod
+    def _drop_equivalent_library_root(cls, parts: List[str]) -> List[str]:
+        if parts and parts[0] in cls._EQUIVALENT_LIBRARY_ROOTS:
+            return parts[1:]
+        return parts
+
+    @classmethod
+    def _same_directory_key(cls, left_key: str, right_key: str) -> bool:
         if not left_key or not right_key:
             return False
         left_parts = left_key.split("/")
         right_parts = right_key.split("/")
         if left_key == right_key:
+            return min(len(left_parts), len(right_parts)) >= 2
+
+        left_parts = cls._drop_equivalent_library_root(left_parts)
+        right_parts = cls._drop_equivalent_library_root(right_parts)
+        if left_parts == right_parts:
             return min(len(left_parts), len(right_parts)) >= 2
 
         shorter_len = min(len(left_parts), len(right_parts))

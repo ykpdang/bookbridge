@@ -1391,7 +1391,7 @@ def find_ebook_file(filename):
 
 
 def get_kosync_id_for_ebook(ebook_filename, booklore_id=None, original_filename=None,
-                            bookorbit_id=None):
+                            bookorbit_id=None, source_path=None):
     """Get KOSync document ID for an ebook.
     Tries Grimmory API first (if configured and booklore_id provided),
     falls back to filesystem, then BookOrbit / ABS / CWA on-demand downloads.
@@ -1410,8 +1410,21 @@ def get_kosync_id_for_ebook(ebook_filename, booklore_id=None, original_filename=
         except Exception as e:
             logger.warning(f"⚠️ Failed to get KOSync ID from Grimmory, falling back to filesystem: {e}")
 
-    # Fall back to filesystem
-    ebook_path = find_ebook_file(ebook_filename)
+    # Fall back to filesystem. When a queue item carries the selected local source path,
+    # prefer it over filename-only globbing so duplicate basenames do not hash the wrong book.
+    ebook_path = None
+    source_path_text = str(source_path or "").strip()
+    if source_path_text and "://" not in source_path_text:
+        try:
+            selected_path = Path(source_path_text)
+            if selected_path.exists() and selected_path.is_file():
+                ebook_path = selected_path
+            else:
+                logger.debug(f"Selected ebook source path not found, falling back to filename search: '{source_path_text}'")
+        except Exception as e:
+            logger.debug(f"Selected ebook source path could not be used, falling back to filename search: {e}")
+    if not ebook_path:
+        ebook_path = find_ebook_file(ebook_filename)
     if not ebook_path and original_filename:
         # [Tri-Link] Fallback to original filename if Storyteller file not found/relevant
         logger.debug(f"Primary file '{ebook_filename}' not found, checking original '{original_filename}'")
@@ -2541,6 +2554,7 @@ def _create_or_update_library_audio_mapping(
     ebook_source,
     ebook_source_id,
     storyteller_uuid,
+    ebook_source_path=None,
 ):
     """Create/refresh a mapping whose audio lives on a library provider
     (Grimmory or BookOrbit) instead of ABS."""
@@ -2590,6 +2604,7 @@ def _create_or_update_library_audio_mapping(
             resolved_ebook_filename,
             booklore_ebook_id,
             bookorbit_id=ebook_source_id if ebook_source == "BookOrbit" else None,
+            source_path=ebook_source_path,
         )
 
     if existing_book and existing_book.kosync_doc_id:
@@ -4227,6 +4242,7 @@ def match():
         selected_filename = (request.form.get('ebook_filename') or '').strip() or None
         ebook_source = (request.form.get('ebook_source') or request.form.get('source_type') or '').strip() or None
         ebook_source_id = (request.form.get('ebook_source_id') or request.form.get('source_id') or '').strip() or None
+        source_path = (request.form.get('ebook_source_path') or request.form.get('source_path') or '').strip() or None
         storyteller_uuid = (request.form.get('storyteller_uuid') or '').strip() or None
         forge_stage_mode = (request.form.get('forge_stage_mode') or '').strip() or None
         ebook_filename = selected_filename
@@ -4254,6 +4270,7 @@ def match():
                 ebook_source=ebook_source,
                 ebook_source_id=ebook_source_id,
                 storyteller_uuid=storyteller_uuid,
+                ebook_source_path=source_path,
             )
             if err_msg:
                 return err_msg, err_code
@@ -4314,7 +4331,7 @@ def match():
                 return "Original ebook filename required for forge match", 400
 
             source_type = request.form.get('source_type')
-            source_path = request.form.get('source_path')
+            source_path = request.form.get('source_path') or source_path
             source_id = request.form.get('source_id')
             text_item = _build_forge_text_item(source_type, source_id, source_path, original_filename)
             normalized_source_type = text_item.get("source")
@@ -4324,6 +4341,7 @@ def match():
                 original_filename,
                 initial_booklore_id,
                 bookorbit_id=source_id if normalized_source_type == 'BookOrbit' else None,
+                source_path=source_path,
             )
 
             if not kosync_doc_id:
@@ -4449,6 +4467,7 @@ def match():
                 ebook_filename,
                 booklore_id,
                 bookorbit_id=ebook_source_id if ebook_source == 'BookOrbit' else None,
+                source_path=source_path,
             )
 
         if not kosync_doc_id:
@@ -4761,6 +4780,7 @@ def _process_batch_queue(queue_items):
                 ebook_source=item.get('ebook_source'),
                 ebook_source_id=item.get('ebook_source_id'),
                 storyteller_uuid=item.get('storyteller_uuid'),
+                ebook_source_path=item.get('ebook_source_path'),
             )
             if err_msg:
                 logger.warning(
@@ -4818,6 +4838,7 @@ def _process_batch_queue(queue_items):
                 ebook_filename,
                 booklore_id,
                 bookorbit_id=item.get('ebook_source_id') if _item_ebook_source == 'BookOrbit' else None,
+                source_path=item.get('ebook_source_path'),
             )
 
         if not kosync_doc_id:
@@ -4921,6 +4942,7 @@ def _process_forge_match_queue(queue_items):
                     ebook_source=item.get('ebook_source'),
                     ebook_source_id=item.get('ebook_source_id'),
                     storyteller_uuid=storyteller_uuid,
+                    ebook_source_path=item.get('ebook_source_path'),
                 )
                 if err_msg:
                     logger.warning(
@@ -5080,6 +5102,7 @@ def _process_forge_match_queue(queue_items):
             original_filename,
             initial_booklore_id,
             bookorbit_id=source_id if text_item.get('source') == 'BookOrbit' else None,
+            source_path=source_path,
         )
         if not kosync_doc_id:
             logger.warning(
@@ -5935,6 +5958,7 @@ def suggestions_page():
                         ebook_source=item.get('ebook_source'),
                         ebook_source_id=item.get('ebook_source_id'),
                         storyteller_uuid=item.get('storyteller_uuid'),
+                        ebook_source_path=item.get('ebook_source_path'),
                     )
                     if err_msg:
                         logger.warning(
@@ -6003,7 +6027,11 @@ def suggestions_page():
                         if book:
                             booklore_id = book.get('id')
 
-                    kosync_doc_id = get_kosync_id_for_ebook(ebook_filename, booklore_id)
+                    kosync_doc_id = get_kosync_id_for_ebook(
+                        ebook_filename,
+                        booklore_id,
+                        source_path=item.get('ebook_source_path'),
+                    )
 
                 if not kosync_doc_id:
                     logger.warning(f"Could not compute KOSync ID for {sanitize_log_data(ebook_filename)}, skipping")
