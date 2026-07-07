@@ -1466,6 +1466,14 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
         self.assertIn('Reader Documents', add_book_html)
         self.assertIn('/api/me/kosync-documents', add_book_html)
 
+    def test_kosync_link_panel_suggests_filename_matches(self):
+        add_book_html = self._read_template_source('add_book.html')
+
+        self.assertIn('function kosyncMatchScore(', add_book_html)
+        self.assertIn('KOSYNC_LIKELY_MATCH_THRESHOLD', add_book_html)
+        self.assertIn('likely match', add_book_html)
+        self.assertIn('`File: ${doc.filename}`', add_book_html)
+
     def test_batch_match_template_has_submit_feedback_hooks(self):
         html = self._read_template_source('batch_match.html')
 

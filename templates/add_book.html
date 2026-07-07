@@ -1385,7 +1385,10 @@
                             <button type="button" id="kosync-show-all" class="kosync-show-toggle hidden">Show All</button>
                         </div>
                         <div class="kosync-note">
-                            Old unlinked reader documents are usually just history; link one only when a current book is failing to sync.
+                            Books your e-reader has reported to the sync server, identified by file hash. BookBridge
+                            links them to your books automatically; if a device copy doesn't match any library file
+                            (progress not syncing), link it to the right book here. Old unlinked documents are usually
+                            just history — link one only when a current book is failing to sync.
                         </div>
                         <div id="kosync-doc-status" class="kosync-empty">Loading...</div>
                         <div id="kosync-doc-list" class="kosync-doc-list"></div>
@@ -1839,6 +1842,7 @@
             meta.className = 'kosync-meta';
             [
                 doc.linked_book_title ? `Book: ${doc.linked_book_title}` : null,
+                doc.filename ? `File: ${doc.filename}` : null,
                 doc.device ? `Device: ${doc.device}` : null,
                 doc.device_id ? `Device ID: ${doc.device_id}` : null,
                 `Progress: ${formatKosyncPercent(doc.percentage)}`,
@@ -1883,6 +1887,33 @@
             return row;
         }
 
+        const KOSYNC_EXTENSION_TOKENS = new Set(['epub', 'kepub', 'pdf', 'mobi', 'azw', 'azw3', 'fb2', 'cbz', 'txt']);
+        const KOSYNC_LIKELY_MATCH_THRESHOLD = 0.5;
+
+        function kosyncNameTokens(value) {
+            if (!value) return [];
+            return [...new Set(
+                String(value).toLowerCase().split(/[^a-z0-9]+/)
+                    .filter(tok => tok && !KOSYNC_EXTENSION_TOKENS.has(tok))
+            )];
+        }
+
+        function kosyncDiceScore(tokensA, tokensB) {
+            if (!tokensA.length || !tokensB.length) return 0;
+            const setB = new Set(tokensB);
+            const shared = tokensA.filter(tok => setB.has(tok)).length;
+            return (2 * shared) / (tokensA.length + tokensB.length);
+        }
+
+        function kosyncMatchScore(doc, book) {
+            const docTokens = kosyncNameTokens(doc.filename);
+            if (!docTokens.length) return 0;
+            return Math.max(
+                kosyncDiceScore(docTokens, kosyncNameTokens(book.ebook_filename)),
+                kosyncDiceScore(docTokens, kosyncNameTokens(book.title))
+            );
+        }
+
         function showKosyncLinkPanel(row, doc) {
             const existing = row.querySelector('.kosync-link-panel');
             if (existing) {
@@ -1897,12 +1928,20 @@
             placeholder.value = '';
             placeholder.textContent = kosyncDocsState.books.length ? 'Select a book' : 'No books available';
             select.appendChild(placeholder);
-            kosyncDocsState.books.forEach(book => {
+            const scored = kosyncDocsState.books.map(book => ({ book, score: kosyncMatchScore(doc, book) }));
+            const likely = scored.filter(entry => entry.score >= KOSYNC_LIKELY_MATCH_THRESHOLD)
+                .sort((a, b) => b.score - a.score);
+            const rest = scored.filter(entry => entry.score < KOSYNC_LIKELY_MATCH_THRESHOLD);
+            likely.concat(rest).forEach(({ book, score }) => {
                 const option = document.createElement('option');
                 option.value = book.abs_id;
-                option.textContent = book.title || book.ebook_filename || book.abs_id;
+                const label = book.title || book.ebook_filename || book.abs_id;
+                option.textContent = score >= KOSYNC_LIKELY_MATCH_THRESHOLD ? `★ ${label} — likely match` : label;
                 select.appendChild(option);
             });
+            if (likely.length && (likely.length === 1 || likely[0].score > likely[1].score)) {
+                select.value = likely[0].book.abs_id;
+            }
             const confirmBtn = document.createElement('button');
             confirmBtn.type = 'button';
             confirmBtn.textContent = 'Link';
