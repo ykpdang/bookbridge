@@ -3382,10 +3382,21 @@ class SyncManager:
                 locator = LocatorResult(percentage=0.0)
                 request = UpdateProgressRequest(locator_result=locator, txt="", previous_location=None)
 
+                def _client_is_configured(client) -> bool:
+                    is_configured = getattr(client, "is_configured", None)
+                    if not callable(is_configured):
+                        return True
+                    try:
+                        return bool(is_configured())
+                    except Exception as e:
+                        logger.debug("Skipping progress reset for client with failed configuration check: %s", e)
+                        return False
+
                 applicable_clients = {
                     name: client for name, client in clients.items()
                     if (
-                        ('ebook' if getattr(book, 'sync_mode', 'audiobook') == 'ebook_only' else 'audiobook') in client.get_supported_sync_types()
+                        _client_is_configured(client)
+                        and ('ebook' if getattr(book, 'sync_mode', 'audiobook') == 'ebook_only' else 'audiobook') in client.get_supported_sync_types()
                         and client.supports_book(book)
                     )
                 }

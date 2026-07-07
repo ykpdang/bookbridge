@@ -131,6 +131,60 @@ class TestSuggestionsFeature(unittest.TestCase):
         # Should proceed to call DB
         self.mock_container.mock_database_service.get_all_books.assert_called()
 
+    def test_suggestions_cache_path_is_user_scoped(self):
+        import src.web_server as web_server
+        from src.utils.user_context import set_current_user_id, reset_current_user_id
+
+        global_path = web_server._suggestions_cache_file_path()
+        token = set_current_user_id(42)
+        try:
+            user_path = web_server._suggestions_cache_file_path()
+        finally:
+            reset_current_user_id(token)
+
+        self.assertEqual(global_path.name, 'suggestions_scan_cache.json')
+        self.assertEqual(user_path.name, 'suggestions_scan_cache_user_42.json')
+        self.assertNotEqual(global_path, user_path)
+
+    def test_suggestions_scan_job_keeps_active_user_context(self):
+        import src.web_server as web_server
+        from src.utils.user_context import (
+            get_current_user_credentials,
+            get_current_user_id,
+            set_current_user_credentials,
+            set_current_user_id,
+            reset_current_user_credentials,
+            reset_current_user_id,
+        )
+
+        bundle = Mock()
+        captured = {}
+        original_run = web_server._run_suggestions_scan_job
+        original_sync = web_server._BACKGROUND_TASKS_SYNCHRONOUS
+
+        def fake_run(_job_id, _cached, _no_match):
+            captured['bundle'] = web_server.uc()
+            captured['user_id'] = get_current_user_id()
+            captured['credentials'] = dict(get_current_user_credentials() or {})
+
+        token_bundle = web_server._active_bundle.set(bundle)
+        token_user = set_current_user_id(42)
+        token_creds = set_current_user_credentials({"CWA_ENABLED": "false"})
+        try:
+            web_server._run_suggestions_scan_job = fake_run
+            web_server._BACKGROUND_TASKS_SYNCHRONOUS = True
+            web_server._start_suggestions_scan_job({}, [])
+        finally:
+            web_server._BACKGROUND_TASKS_SYNCHRONOUS = original_sync
+            web_server._run_suggestions_scan_job = original_run
+            reset_current_user_credentials(token_creds)
+            reset_current_user_id(token_user)
+            web_server._active_bundle.reset(token_bundle)
+
+        self.assertIs(captured['bundle'], bundle)
+        self.assertEqual(captured['user_id'], 42)
+        self.assertEqual(captured['credentials'].get("CWA_ENABLED"), "false")
+
     def test_auto_dismiss_on_match(self):
         """Test that /match endpoint calls dismiss_suggestion."""
         # Mock dependencies for match

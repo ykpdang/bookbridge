@@ -3209,7 +3209,7 @@ def _get_storyteller_display_metadata(storyteller_uuid):
     if not storyteller_uuid:
         return {}
     try:
-        st_client = container.storyteller_client()
+        st_client = uc().storyteller_client
         if not st_client or not st_client.is_configured() or not hasattr(st_client, "get_book_details"):
             return {}
         details = st_client.get_book_details(storyteller_uuid) or {}
@@ -3402,16 +3402,17 @@ def _shelf_watch_clients_for(meta: dict):
     """Resolve (library_client, watch_shelf, kobo_shelf) for a shelf-watch
     suggestion based on its origin source (Grimmory vs BookOrbit)."""
     source = (meta or {}).get('source_name') or 'BookLore'
+    clients = uc()
     if source == 'BookOrbit':
         return (
-            container.bookorbit_client(),
+            clients.bookorbit_client,
             os.environ.get('BOOKORBIT_SHELF_WATCH_NAME', 'Up Next'),
-            os.environ.get('BOOKORBIT_SHELF_NAME', 'Kobo'),
+            user_setting('BOOKORBIT_SHELF_NAME', 'Kobo'),
         )
     return (
-        container.booklore_client(),
+        clients.booklore_client,
         os.environ.get('BOOKLORE_SHELF_WATCH_NAME', 'Up Next'),
-        os.environ.get('BOOKLORE_SHELF_NAME', 'Kobo'),
+        user_setting('BOOKLORE_SHELF_NAME', 'Kobo'),
     )
 
 
@@ -5421,11 +5422,38 @@ def _start_suggestions_scan_job(cached_suggestions_by_abs=None, cached_no_match_
             "updated_at": time.time(),
         }
 
-    threading.Thread(
-        target=_run_suggestions_scan_job,
-        args=(job_id, cached_suggestions_by_abs or {}, cached_no_match_abs_ids or []),
-        daemon=True
-    ).start()
+    bundle = uc()
+    try:
+        user = current_user()
+        user_id = user.id if user is not None else None
+    except Exception:
+        user_id = None
+    if user_id is None:
+        try:
+            user_id = get_current_user_id()
+        except Exception:
+            user_id = None
+    creds = get_current_user_credentials()
+
+    def runner():
+        tok_bundle = _active_bundle.set(bundle)
+        tok_uid = set_current_user_id(user_id)
+        tok_creds = set_current_user_credentials(creds)
+        try:
+            _run_suggestions_scan_job(
+                job_id,
+                cached_suggestions_by_abs or {},
+                cached_no_match_abs_ids or [],
+            )
+        finally:
+            reset_current_user_credentials(tok_creds)
+            reset_current_user_id(tok_uid)
+            _active_bundle.reset(tok_bundle)
+
+    if _BACKGROUND_TASKS_SYNCHRONOUS:
+        runner()
+    else:
+        threading.Thread(target=runner, daemon=True, name="suggestions-scan").start()
     return job_id
 
 
@@ -5547,8 +5575,22 @@ def _get_suggestions_state(create=True):
         return state_id, state
 
 
-def _suggestions_cache_file_path():
-    return DATA_DIR / SUGGESTIONS_CACHE_FILE_NAME
+def _suggestions_cache_scope_key(user_id=None):
+    if user_id is None:
+        try:
+            user_id = get_current_user_id()
+        except Exception:
+            user_id = None
+    if user_id is None:
+        return "global"
+    return f"user_{re.sub(r'[^A-Za-z0-9_.-]+', '_', str(user_id))}"
+
+
+def _suggestions_cache_file_path(user_id=None):
+    scope = _suggestions_cache_scope_key(user_id)
+    if scope == "global":
+        return DATA_DIR / SUGGESTIONS_CACHE_FILE_NAME
+    return DATA_DIR / f"suggestions_scan_cache_{scope}.json"
 
 
 def _empty_suggestions_cache_payload():
@@ -5866,8 +5908,11 @@ def suggestions_page():
             if audio_source == 'ABS' and audio_source_id:
                 selected_ab = None
                 if not audio_title or audio_duration is None:
-                    abs_items = container.abs_client().get_all_audiobooks()
+                    abs_client = uc().abs_client
+                    abs_items = abs_client.get_all_audiobooks()
                     selected_ab = next((ab for ab in abs_items if str(ab.get('id')) == audio_source_id), None)
+                else:
+                    abs_client = uc().abs_client
 
                 resolved_title = audio_title or (manager.get_abs_title(selected_ab) if selected_ab else '') or audio_source_id
                 resolved_duration = audio_duration if audio_duration is not None else (
@@ -5875,7 +5920,7 @@ def suggestions_page():
                 )
                 resolved_cover = (
                     audio_cover_url
-                    or f"{container.abs_client().base_url}/api/items/{audio_source_id}/cover?token={container.abs_client().token}"
+                    or f"{abs_client.base_url}/api/items/{audio_source_id}/cover?token={abs_client.token}"
                 )
                 selected_audio = {
                     'bridge_key': bridge_key or audio_source_id,
@@ -5944,6 +5989,7 @@ def suggestions_page():
         elif action == 'process_queue':
             from src.db.models import Book
 
+            clients = uc()
             for item in _load_match_queue():
                 audio_source = item.get('audio_source') or 'ABS'
                 if audio_source in _LIBRARY_AUDIO_SOURCES:
@@ -6023,8 +6069,8 @@ def suggestions_page():
                         logger.error(f"Storyteller Tri-Link failed for '{item['abs_title']}': {e}")
                         continue
                 else:
-                    if container.booklore_client().is_configured():
-                        book = container.booklore_client().find_book_by_filename(ebook_filename)
+                    if clients.booklore_client.is_configured():
+                        book = clients.booklore_client.find_book_by_filename(ebook_filename)
                         if book:
                             booklore_id = book.get('id')
 
@@ -6043,7 +6089,7 @@ def suggestions_page():
                     logger.info(f"Preserving existing hash '{current_book_entry.kosync_doc_id}' for '{item['abs_id']}' instead of new hash '{kosync_doc_id}'")
                     kosync_doc_id = current_book_entry.kosync_doc_id
 
-                item_details = container.abs_client().get_item_details(item['abs_id'])
+                item_details = clients.abs_client.get_item_details(item['abs_id'])
                 chapters = item_details.get('media', {}).get('chapters', []) if item_details else []
                 storyteller_manifest = ingest_storyteller_transcripts(
                     item['abs_id'],
@@ -6075,10 +6121,10 @@ def suggestions_page():
 
                 database_service.save_book(book)
 
-                _enqueue_tracker_automatch(container.sync_clients(), book)
+                _enqueue_tracker_automatch(clients.sync_clients, book)
 
                 if not str(item['abs_id']).startswith('booklore:'):
-                    container.abs_client().add_to_collection(item['abs_id'], user_setting("ABS_COLLECTION_NAME", "Synced with KOReader"))
+                    clients.abs_client.add_to_collection(item['abs_id'], user_setting("ABS_COLLECTION_NAME", "Synced with KOReader"))
 
                 # If this suggestion originated from the shelf-watch flow, do a full
                 # shelf MOVE (Up Next -> Kobo) rather than just an add. The origin
@@ -6104,12 +6150,12 @@ def suggestions_page():
                             )
                     except Exception as bl_err:
                         logger.warning(f"Shelf-watch approval move failed: {bl_err}")
-                elif container.booklore_client().is_configured():
+                elif clients.booklore_client.is_configured():
                     shelf_filename = original_ebook_filename or ebook_filename
-                    container.booklore_client().add_to_shelf(shelf_filename, BOOKLORE_SHELF_NAME)
-                if container.storyteller_client().is_configured():
+                    clients.booklore_client.add_to_shelf(shelf_filename, user_setting("BOOKLORE_SHELF_NAME", "Kobo"))
+                if clients.storyteller_client.is_configured():
                     if book.storyteller_uuid:
-                        container.storyteller_client().add_to_collection_by_uuid(book.storyteller_uuid)
+                        clients.storyteller_client.add_to_collection_by_uuid(book.storyteller_uuid)
 
                 database_service.dismiss_suggestion(item['abs_id'])
                 database_service.dismiss_suggestion(kosync_doc_id)
@@ -6290,7 +6336,7 @@ def suggestions_page():
         scan_in_progress=scan_in_progress,
         scan_error=scan_error,
         scan_stats=suggestions_state.get('scan_last_stats', {}),
-        storyteller_enabled=bool(container.storyteller_client().is_configured()),
+        storyteller_enabled=bool(uc().storyteller_client.is_configured()),
     )
 
 
@@ -6323,6 +6369,7 @@ def cleanup_mapping_resources(book):
     """Delete external artifacts and membership data for a mapped book."""
     if not book:
         return
+    clients = uc()
 
     if book.transcript_file:
         try:
@@ -6386,7 +6433,7 @@ def cleanup_mapping_resources(book):
     if is_abs_backed:
         collection_name = user_setting('ABS_COLLECTION_NAME', 'Synced with KOReader')
         try:
-            container.abs_client().remove_from_collection(book.abs_id, collection_name)
+            clients.abs_client.remove_from_collection(book.abs_id, collection_name)
         except Exception as e:
             logger.warning(f"⚠️ Failed to remove from ABS collection: {e}")
     else:
@@ -6402,7 +6449,7 @@ def cleanup_mapping_resources(book):
     if storyteller_uuid:
         storyteller_collection_name = os.environ.get('STORYTELLER_COLLECTION_NAME', 'Synced with KOReader')
         try:
-            st_client = container.storyteller_client()
+            st_client = clients.storyteller_client
             if hasattr(st_client, 'remove_from_collection_by_uuid'):
                 removed = st_client.remove_from_collection_by_uuid(storyteller_uuid, storyteller_collection_name)
                 if not removed:
@@ -6417,18 +6464,18 @@ def cleanup_mapping_resources(book):
         is_bookorbit = (getattr(book, 'ebook_source', None) or '').strip().lower() == 'bookorbit'
         try:
             if is_bookorbit:
-                client = container.bookorbit_client()
+                client = clients.bookorbit_client
                 if client.is_configured():
-                    shelf_name = (os.environ.get('BOOKORBIT_SHELF_NAME') or 'Kobo').strip()
+                    shelf_name = (user_setting('BOOKORBIT_SHELF_NAME', 'Kobo') or 'Kobo').strip()
                     ebook_source_id = getattr(book, 'ebook_source_id', None)
                     if ebook_source_id and hasattr(client, 'remove_book_id_from_shelf'):
                         client.remove_book_id_from_shelf(ebook_source_id, shelf_name)
                     else:
                         client.remove_from_shelf(shelf_filename, shelf_name)
             else:
-                client = container.booklore_client()
+                client = clients.booklore_client
                 if client.is_configured():
-                    shelf_name = os.environ.get('BOOKLORE_SHELF_NAME', 'Kobo')
+                    shelf_name = user_setting('BOOKLORE_SHELF_NAME', 'Kobo')
                     client.remove_from_shelf(shelf_filename, shelf_name)
         except Exception as e:
             logger.warning(f"⚠️ Failed to remove from {'BookOrbit' if is_bookorbit else 'Grimmory'} shelf: {e}")
@@ -6785,8 +6832,9 @@ def update_hash(abs_id):
         target_filename = book.original_ebook_filename or book.ebook_filename
         
         booklore_id = None
-        if container.booklore_client().is_configured():
-            bl_book = container.booklore_client().find_book_by_filename(target_filename)
+        booklore_client = uc().booklore_client
+        if booklore_client.is_configured():
+            bl_book = booklore_client.find_book_by_filename(target_filename)
             if bl_book:
                 booklore_id = bl_book.get('id')
 
@@ -6905,7 +6953,7 @@ def api_storyteller_link(abs_id):
 
         if previous_storyteller_uuid:
             try:
-                st_client = container.storyteller_client()
+                st_client = uc().storyteller_client
                 if hasattr(st_client, 'remove_from_collection_by_uuid'):
                     storyteller_collection_name = os.environ.get('STORYTELLER_COLLECTION_NAME', 'Synced with KOReader')
                     removed = st_client.remove_from_collection_by_uuid(previous_storyteller_uuid, storyteller_collection_name)

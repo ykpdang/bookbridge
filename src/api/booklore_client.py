@@ -104,7 +104,10 @@ class BookloreClient:
         # Whether the server exposes the paginated /api/v1/books/page endpoint.
         # None = unprobed; True = paginate; False = fall back to flat /api/v1/books.
         self._paginated_scan_supported = None
-        self._load_cache()
+        if self.is_configured():
+            self._load_cache()
+        else:
+            logger.debug("Grimmory: client not configured; skipping cached library load")
 
     def _load_cache(self):
         """Load cache from DB, migrating legacy JSON if needed."""

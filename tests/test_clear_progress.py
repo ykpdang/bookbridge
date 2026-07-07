@@ -26,6 +26,9 @@ class TestClearProgressMethod(unittest.TestCase):
 
     def setUp(self):
         """Set up test environment before each test."""
+        self._old_reprocess_on_clear = os.environ.get('REPROCESS_ON_CLEAR_IF_NO_ALIGNMENT')
+        os.environ['REPROCESS_ON_CLEAR_IF_NO_ALIGNMENT'] = 'true'
+
         # Create temporary directory for test database
         self.temp_dir = tempfile.mkdtemp()
         self.test_db_path = str(Path(self.temp_dir) / 'test_database.db')
@@ -120,6 +123,10 @@ class TestClearProgressMethod(unittest.TestCase):
     def tearDown(self):
         """Clean up after each test."""
         import shutil
+        if self._old_reprocess_on_clear is None:
+            os.environ.pop('REPROCESS_ON_CLEAR_IF_NO_ALIGNMENT', None)
+        else:
+            os.environ['REPROCESS_ON_CLEAR_IF_NO_ALIGNMENT'] = self._old_reprocess_on_clear
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_clear_progress_success(self):
@@ -241,6 +248,35 @@ class TestClearProgressMethod(unittest.TestCase):
         client_results = result['client_reset_results']
         self.assertFalse(client_results['kosync']['success'])
         self.assertIn('Connection error', client_results['kosync']['message'])
+
+    def test_clear_progress_skips_unconfigured_clients(self):
+        """Unconfigured per-user clients must not be called during reset."""
+        from src.sync_clients.sync_client_interface import SyncResult
+
+        configured = Mock()
+        configured.is_configured.return_value = True
+        configured.get_supported_sync_types.return_value = {'audiobook', 'ebook'}
+        configured.supports_book.return_value = True
+        configured.update_progress.return_value = SyncResult(success=True, location=0.0)
+
+        unconfigured = Mock()
+        unconfigured.is_configured.return_value = False
+        unconfigured.get_supported_sync_types.return_value = {'audiobook', 'ebook'}
+        unconfigured.supports_book.return_value = True
+
+        result = self.sync_manager.clear_progress(
+            'test-book-123',
+            sync_clients={
+                'Configured': configured,
+                'Hardcover': unconfigured,
+            },
+        )
+
+        configured.update_progress.assert_called_once()
+        unconfigured.update_progress.assert_not_called()
+        self.assertEqual(result['total_clients'], 1)
+        self.assertIn('Configured', result['client_reset_results'])
+        self.assertNotIn('Hardcover', result['client_reset_results'])
 
 
 if __name__ == '__main__':
