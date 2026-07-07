@@ -16,6 +16,8 @@ Highlight and note sync requires the **BridgeSync KOReader plugin from this rele
 
 - **BridgeSync has annotation controls.** The latest KOReader plugin now includes explicit highlight sync and sweep actions, captures new annotations when a book closes, and has safer plugin update handling.
 
+- **Every reader can download the KOReader plugin.** The BridgeSync plugin download appears on each user's Account page, so regular readers do not need admin Settings access to install or update it.
+
 - **BookOrbit audiobooks now sync.** BookOrbit can now be the audiobook source in a mapping, with progress read from and written back to the correct track position.
 
 - **ABS ebooks participate in combined entries.** Audiobookshelf ebook progress is included even when the same mapped book also has audiobook progress.

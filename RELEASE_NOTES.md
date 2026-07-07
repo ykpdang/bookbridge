@@ -8,6 +8,7 @@ Highlight and note sync requires the **BridgeSync KOReader plugin from this rele
 
 - **Highlights and notes sync** - KOReader annotations can now move between devices and the Grimmory and BookOrbit web readers when the updated BridgeSync plugin is installed. Each reader keeps their own annotation set, deletions travel intentionally, and stable identity keys reduce accidental cross-device highlight churn.
 - **BridgeSync annotation actions** - the KOReader plugin adds highlight sync and sweep controls, captures annotations when books close, and includes safer plugin self-updates.
+- **BridgeSync download for every reader** - the plugin download now appears on each user's Account page, so regular readers can install or update it without admin Settings access.
 - **BookOrbit audiobook sync** - BookOrbit-hosted audiobooks can now act as the audio side of a mapping, including multi-file track position conversion and BookOrbit reading-session logging.
 - **ABS ebook participation in combined entries** - Audiobookshelf ebook progress now stays in the sync loop even when the same mapped book also has audiobook progress.
 - **Rich progress metadata** - service-native update timestamps, status, and locator metadata are persisted so the sync manager can tell stale resurfaced states apart from real reading movement.

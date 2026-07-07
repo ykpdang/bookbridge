@@ -16,6 +16,8 @@ Highlight and note sync requires the **BridgeSync KOReader plugin from this rele
 
 - **BridgeSync grew into a real annotation companion.** The latest KOReader plugin now has explicit **Sync Highlights** and **Sweep All Highlights** actions, captures new annotations when a book closes, scrubs JSON-null note sentinels that could crash KOReader, and uses atomic self-updates so plugin upgrades are less fragile.
 
+- **Every reader can download the KOReader plugin.** The BridgeSync plugin download now appears on each user's Account page, so regular readers do not need admin Settings access to install or update their device plugin.
+
 - **BookOrbit-hosted audiobooks now participate in sync.** Listening progress for BookOrbit audiobooks is read, written, converted across multi-file tracks, and recorded as BookOrbit reading-session activity, so BookOrbit can act as either the ebook side, the audiobook side, or both.
 
 - **Combined audiobook+ebook entries cover ABS ebooks too.** Audiobookshelf ebook progress now participates when a book has both audio and ebook state, instead of being left out once the mapping also included an audiobook.

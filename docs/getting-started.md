@@ -165,7 +165,7 @@ That is enough to get syncing started. The normal background cycle runs every 5 
 
 ## Optional: KOReader Plugin
 
-If you want KOReader to download and manage bridge-provided books for you, you can also install the optional **Bridge Sync** KOReader plugin from the project's GitHub Releases page.
+If you want KOReader to download and manage bridge-provided books for you, you can also install the optional **Bridge Sync** KOReader plugin from your **Account** page or the project's GitHub Releases page.
 
 The plugin is also required for the newer highlight and note sync features. Normal KOReader/KOSync progress sync works without Bridge Sync, but highlights, notes, sweep, and close-capture only work with the Bridge Sync plugin from the current release or newer.
 

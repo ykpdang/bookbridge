@@ -232,6 +232,19 @@ class TestMultiUserAuth(unittest.TestCase):
     def test_account_requires_login(self):
         self.assertEqual(self.client.get('/account', follow_redirects=False).status_code, 302)
 
+    def test_regular_user_account_shows_bridgesync_plugin_download(self):
+        self.svc.create_user("reg", "pw", role="user")
+        self.client.post('/login', data={'username': 'reg', 'password': 'pw'})
+
+        resp = self.client.get('/account')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b'BridgeSync KOReader Plugin', resp.data)
+        self.assertIn(b'/api/kosync-plugin/download', resp.data)
+        self.assertIn(b'/api/kosync-plugin/version', resp.data)
+        self.assertEqual(self.client.get('/api/kosync-plugin/version').status_code, 200)
+        self.assertEqual(self.client.get('/api/kosync-plugin/download').status_code, 200)
+
     # --- admin-managed per-user integrations ---
     def _ipath(self, uid):
         return f'/admin/users/{uid}/integrations'

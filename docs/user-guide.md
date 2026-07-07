@@ -89,7 +89,7 @@ BookBridge can sync KOReader highlights and notes between KOReader devices and s
 
 Requirements:
 
-- Install the **Bridge Sync** KOReader plugin from the current release or newer on each KOReader device that should sync annotations.
+- Install the **Bridge Sync** KOReader plugin from your **Account** page, or from the current release or newer, on each KOReader device that should sync annotations.
 - Configure the plugin with that reader's bridge server URL and KOSync username/key.
 - Leave **KOReader -> Highlight Sync** enabled in Settings. It is enabled by default on the bridge side.
 - For Grimmory web-reader highlights and notes, enable **Highlight Sync** in that reader's Grimmory / BookLore Integrations.
