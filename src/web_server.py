@@ -1300,6 +1300,7 @@ def inject_global_vars():
             'STORYTELLER_ASSETS_DIR': '',
             'ABS_PROGRESS_OFFSET_SECONDS': '0',
             'EBOOK_CACHE_SIZE': '3',
+            'ALIGNMENT_CACHE_SIZE': '3',
             'KOSYNC_HASH_METHOD': 'content',
             'TELEGRAM_LOG_LEVEL': 'ERROR',
             'SHELFMARK_URL': '',

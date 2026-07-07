@@ -50,6 +50,10 @@ class LRUCache:
             while len(self.cache) > self.capacity:
                 self.cache.popitem(last=False)
 
+    def delete(self, key):
+        with self._lock:
+            self.cache.pop(key, None)
+
     def clear(self):
         with self._lock:
             self.cache.clear()
