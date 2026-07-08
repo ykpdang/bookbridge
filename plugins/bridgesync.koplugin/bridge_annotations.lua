@@ -187,6 +187,32 @@ function BridgeAnnotations.captureLiveBook(ui)
     return { file = ui.document.file, hash = hash, annotations = copies, live = false }
 end
 
+-- Read one closed book's sidecar after KOReader has had a chance to flush it.
+-- Used by the close hook; unlike captureLiveBook this does not depend on the
+-- reader UI still being alive.
+function BridgeAnnotations.collectBookByFile(file, known_hash)
+    if type(file) ~= "string" or file == "" or lfs.attributes(file, "mode") ~= "file" then
+        return nil
+    end
+    if not DocSettings:hasSidecarFile(file) then
+        return nil
+    end
+    local doc_settings = DocSettings:open(file)
+    local hash = known_hash
+    if type(hash) ~= "string" or #hash ~= 32 then
+        hash = bookHash(file, doc_settings)
+    end
+    if type(hash) ~= "string" or #hash ~= 32 then
+        return nil
+    end
+    return {
+        file = file,
+        hash = hash:lower(),
+        annotations = doc_settings:readSetting("annotations") or {},
+        live = false,
+    }
+end
+
 -- Collect candidate books: recently-read files with sidecar annotations, plus
 -- books we have watermarks for (so deleting a book's last highlight still
 -- propagates). Returns a list of

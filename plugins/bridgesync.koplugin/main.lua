@@ -90,6 +90,12 @@ function BridgeSync:init()
     self.is_enabled = self.settings:readSetting("is_enabled") or false
     self.auto_sync_on_resume = self.settings:readSetting("auto_sync_on_resume") or false
     self.auto_sync_on_network = self.settings:readSetting("auto_sync_on_network") or false
+    local auto_sync_on_close = self.settings:readSetting("auto_sync_on_close")
+    if auto_sync_on_close == nil then
+        self.auto_sync_on_close = true
+    else
+        self.auto_sync_on_close = auto_sync_on_close
+    end
     self.delete_removed_books = self.settings:readSetting("delete_removed_books") or false
     self.manual_only = self.settings:readSetting("manual_only") or false
     local do_not_sync_while_book_open = self.settings:readSetting("do_not_sync_while_book_open")
@@ -127,8 +133,11 @@ function BridgeSync:init()
     self.last_auto_sync_time = 0
     self.last_stats_sync_time = 0
     self.stats_sync_in_flight = false
+    self.stats_sync_scheduled = false
+    self.annotation_sync_scheduled = false
     self.needs_wake_sync = false
     self.sync_scheduled = false
+    self.close_book_sync_scheduled = false
     self.log_path = DataStorage:getSettingsDir() .. "/bridge_sync.log"
 
     self.api = APIClient:new()
@@ -180,6 +189,7 @@ function BridgeSync:_saveSettings()
     self.settings:saveSetting("is_enabled", self.is_enabled)
     self.settings:saveSetting("auto_sync_on_resume", self.auto_sync_on_resume)
     self.settings:saveSetting("auto_sync_on_network", self.auto_sync_on_network)
+    self.settings:saveSetting("auto_sync_on_close", self.auto_sync_on_close)
     self.settings:saveSetting("delete_removed_books", self.delete_removed_books)
     self.settings:saveSetting("manual_only", self.manual_only)
     self.settings:saveSetting("do_not_sync_while_book_open", self.do_not_sync_while_book_open)
@@ -553,11 +563,7 @@ function BridgeSync:_runScheduledWork(silent)
         self:logInfo("Deferring book sync while a document is open")
         return
     end
-    self.needs_wake_sync = false
-    self.last_auto_sync_time = os.time()  -- cooldown only once we actually sync
-    Trapper:wrap(function()
-        self:syncFromBridge(silent == nil and true or silent)
-    end)
+    self:_scheduleAutoBookSync("wake", 1, silent == nil and true or silent)
 end
 
 function BridgeSync:_scheduleSync(delay_seconds, silent, retries_left)
@@ -587,6 +593,76 @@ function BridgeSync:_scheduleSync(delay_seconds, silent, retries_left)
     end)
 end
 
+function BridgeSync:_scheduleAutoBookSync(reason, delay_seconds, silent, retries_left)
+    if not self.is_enabled or self.manual_only then
+        return
+    end
+    if self.close_book_sync_scheduled then
+        self:logInfo("Book sync already scheduled; skipping duplicate", tostring(reason or "auto"))
+        return
+    end
+    if self:_isCooldownActive() then
+        self:logInfo("Book sync skipped by cooldown after", tostring(reason or "auto"))
+        return
+    end
+
+    self.close_book_sync_scheduled = true
+    UIManager:scheduleIn(delay_seconds or 1, function()
+        self.close_book_sync_scheduled = false
+        if not self.is_enabled or self.manual_only then
+            return
+        end
+        if self:_isCooldownActive() then
+            self:logInfo("Book sync skipped by cooldown after", tostring(reason or "auto"))
+            return
+        end
+        if not NetworkMgr:isConnected() then
+            self.needs_wake_sync = true
+            self:logInfo("Book sync after", tostring(reason or "auto"), "waiting for WiFi")
+            return
+        end
+        if self:_shouldAvoidAutoSyncWhileReading() then
+            self.needs_wake_sync = true
+            self:logInfo("Deferring book sync after", tostring(reason or "auto"), "while a document is open")
+            return
+        end
+        if self.sync_in_progress or self.stats_sync_in_flight or self.annotation_sync_in_flight then
+            local remaining = retries_left
+            if remaining == nil then remaining = 3 end
+            if remaining > 0 then
+                self.needs_wake_sync = true
+                self:logInfo(
+                    "Book sync after",
+                    tostring(reason or "auto"),
+                    "busy; retrying",
+                    tostring(remaining)
+                )
+                self:_scheduleAutoBookSync(reason, 10, silent, remaining - 1)
+            else
+                self:logWarn("Book sync after", tostring(reason or "auto"), "gave up because Bridge Sync stayed busy")
+            end
+            return
+        end
+
+        self.needs_wake_sync = false
+        self.last_auto_sync_time = os.time()  -- cooldown only once we actually attempt sync
+        Trapper:wrap(function()
+            local ok = self:syncFromBridge(silent == nil and true or silent)
+            if not ok then
+                self.needs_wake_sync = true
+                self:logWarn("Book sync after", tostring(reason or "auto"), "did not complete")
+            end
+        end)
+    end)
+end
+
+function BridgeSync:_scheduleBookSyncAfterClose(delay_seconds)
+    if not self.is_enabled or self.manual_only or not self.auto_sync_on_close then
+        return
+    end
+    self:_scheduleAutoBookSync("close", delay_seconds or 5, true)
+end
+
 function BridgeSync:_maybeUploadPendingSessions(reason)
     if #self.pending_sessions == 0 then
         return false
@@ -605,11 +681,130 @@ function BridgeSync:_maybeUploadPendingSessions(reason)
     return true
 end
 
-function BridgeSync:_maybeAutoSyncStats(reason)
+function BridgeSync:_scheduleAutoAnnotationSync(reason, delay_seconds, silent, retries_left)
+    if not self.is_enabled or not self.annotation_sync_enabled then
+        return false
+    end
+    if self.annotation_sync_scheduled then
+        self:logInfo("Highlight sync already scheduled; skipping duplicate", tostring(reason or "auto"))
+        return true
+    end
+
+    self.annotation_sync_scheduled = true
+    UIManager:scheduleIn(delay_seconds or 1, function()
+        self.annotation_sync_scheduled = false
+        if not self.is_enabled or not self.annotation_sync_enabled then
+            return
+        end
+        if not NetworkMgr:isConnected() then
+            self:logInfo("Highlight sync after", tostring(reason or "auto"), "waiting for WiFi")
+            return
+        end
+        if self.annotation_sync_in_flight or self.stats_sync_in_flight or self.sync_in_progress then
+            local remaining = retries_left
+            if remaining == nil then remaining = 3 end
+            if remaining > 0 then
+                self:logInfo(
+                    "Highlight sync after",
+                    tostring(reason or "auto"),
+                    "busy; retrying",
+                    tostring(remaining)
+                )
+                self:_scheduleAutoAnnotationSync(reason, 10, silent, remaining - 1)
+            else
+                self:logWarn("Highlight sync after", tostring(reason or "auto"), "gave up because Bridge Sync stayed busy")
+            end
+            return
+        end
+
+        local ok = self:syncAnnotations(silent == nil and true or silent)
+        if not ok then
+            local remaining = retries_left
+            if remaining == nil then remaining = 2 end
+            if remaining > 0 then
+                self:logInfo("Highlight sync after", tostring(reason or "auto"), "did not complete; retrying", tostring(remaining))
+                self:_scheduleAutoAnnotationSync(reason, 10, silent, remaining - 1)
+            else
+                self:logWarn("Highlight sync after", tostring(reason or "auto"), "did not complete")
+            end
+        end
+    end)
+    return true
+end
+
+function BridgeSync:_scheduleAutoStatsSync(reason, delay_seconds, silent, retries_left)
     if not self.is_enabled or not self.session_tracking_enabled or not self.auto_sync_stats then
         return false
     end
-    if self.stats_sync_in_flight then
+    if self.stats_sync_scheduled then
+        self:logInfo("Reading stats sync already scheduled; skipping duplicate", tostring(reason or "auto"))
+        return true
+    end
+    if (os.time() - (self.last_stats_sync_time or 0)) < 300 then
+        return false
+    end
+
+    self.stats_sync_scheduled = true
+    UIManager:scheduleIn(delay_seconds or 1, function()
+        self.stats_sync_scheduled = false
+        if not self.is_enabled or not self.session_tracking_enabled or not self.auto_sync_stats then
+            return
+        end
+        if not NetworkMgr:isConnected() then
+            self:logInfo("Reading stats sync after", tostring(reason or "auto"), "waiting for WiFi")
+            return
+        end
+        if (os.time() - (self.last_stats_sync_time or 0)) < 300 then
+            return
+        end
+        if self.sync_in_progress or self.stats_sync_in_flight then
+            local remaining = retries_left
+            if remaining == nil then remaining = 3 end
+            if remaining > 0 then
+                self:logInfo(
+                    "Reading stats sync after",
+                    tostring(reason or "auto"),
+                    "busy; retrying",
+                    tostring(remaining)
+                )
+                self:_scheduleAutoStatsSync(reason, 10, silent, remaining - 1)
+            else
+                self:logWarn("Reading stats sync after", tostring(reason or "auto"), "gave up because Bridge Sync stayed busy")
+            end
+            return
+        end
+
+        if reason then
+            self:logInfo("Auto-syncing reading stats after", reason)
+        end
+        self.stats_sync_in_flight = true
+        Trapper:wrap(function()
+            local ok = self:syncReadingStats(silent == nil and true or silent)
+            self.stats_sync_in_flight = false
+            -- Only start the 5-minute cooldown once a sync actually succeeds, so a failed attempt
+            -- right after wake doesn't block the next reconnect from retrying.
+            if ok then
+                self.last_stats_sync_time = os.time()
+            end
+            if not ok then
+                local remaining = retries_left
+                if remaining == nil then remaining = 2 end
+                if remaining > 0 then
+                    self:logInfo("Reading stats sync after", tostring(reason or "auto"), "did not complete; retrying", tostring(remaining))
+                    self:_scheduleAutoStatsSync(reason, 10, silent, remaining - 1)
+                else
+                    self:logWarn("Reading stats sync after", tostring(reason or "auto"), "did not complete")
+                end
+            end
+            -- Highlights ride the same cadence: exchange after each stats round.
+            self:_scheduleAutoAnnotationSync("stats", 1, true)
+        end)
+    end)
+    return true
+end
+
+function BridgeSync:_maybeAutoSyncStats(reason)
+    if not self.is_enabled or not self.session_tracking_enabled or not self.auto_sync_stats then
         return false
     end
     if not NetworkMgr:isConnected() then
@@ -618,22 +813,7 @@ function BridgeSync:_maybeAutoSyncStats(reason)
     if (os.time() - (self.last_stats_sync_time or 0)) < 300 then
         return false
     end
-    if reason then
-        self:logInfo("Auto-syncing reading stats after", reason)
-    end
-    self.stats_sync_in_flight = true
-    Trapper:wrap(function()
-        local ok = self:syncReadingStats(true)
-        self.stats_sync_in_flight = false
-        -- Only start the 5-minute cooldown once a sync actually succeeds, so a failed attempt
-        -- right after wake doesn't block the next reconnect from retrying.
-        if ok then
-            self.last_stats_sync_time = os.time()
-        end
-        -- Highlights ride the same cadence: exchange after each stats round.
-        self:syncAnnotations(true)
-    end)
-    return true
+    return self:_scheduleAutoStatsSync(reason, 1, true)
 end
 
 function BridgeSync:syncAnnotations(silent)
@@ -653,6 +833,11 @@ function BridgeSync:syncAnnotations(silent)
         return false
     end
     if self.annotation_sync_in_flight then
+        if silent then
+            self:logInfo("Highlight sync skipped because another highlight sync is already running")
+        else
+            self:_showMessage(_("Highlight sync is already running"), 2)
+        end
         return false
     end
     self.annotation_sync_in_flight = true
@@ -1181,6 +1366,9 @@ function BridgeSync:syncFromBridge(silent)
     end
 
     if self.sync_in_progress then
+        if silent then
+            self:logInfo("Reading stats sync skipped because Bridge Sync is already running")
+        end
         if not silent then
             self:_showMessage(_("Bridge Sync is already running"), 2)
         end
@@ -1985,42 +2173,87 @@ function BridgeSync:onReaderReady()
 end
 
 function BridgeSync:onCloseDocument()
+    local captured = self:_captureAnnotationSnapshot()
+    local closed_file = nil
+    if captured and captured.file then
+        closed_file = captured.file
+    elseif self.current_session and self.current_session.file_path then
+        closed_file = self.current_session.file_path
+    elseif self.ui and self.ui.document then
+        closed_file = self.ui.document.file
+    end
     self:endSession({ force_queue = false })
-    self:_captureAnnotationsOnClose()
+    self:_syncAnnotationsAfterClose(closed_file, captured)
+    self:_scheduleBookSyncAfterClose(5)
     return false
 end
 
-function BridgeSync:_captureAnnotationsOnClose()
+function BridgeSync:_captureAnnotationSnapshot()
+    if not self.is_enabled or not self.annotation_sync_enabled then
+        return nil
+    end
+    -- Snapshot the live annotations NOW (plain copies, no reader references).
+    -- The close uploader prefers the freshly flushed sidecar, but this snapshot
+    -- is a fallback on builds where the sidecar is delayed or unavailable.
+    local ok, captured = pcall(BridgeAnnotations.captureLiveBook, self.ui)
+    if not ok or not captured then
+        return nil
+    end
+    return captured
+end
+
+function BridgeSync:_syncAnnotationsAfterClose(closed_file, captured, retries_left)
     if not self.is_enabled or not self.annotation_sync_enabled then
         return
     end
-    -- Snapshot the live annotations NOW (plain copies, no reader references);
-    -- upload after the close path has finished so applying server-side changes
-    -- merges into the freshly flushed sidecar.
-    local ok, captured = pcall(BridgeAnnotations.captureLiveBook, self.ui)
-    if not ok or not captured then
+    if not closed_file and not captured then
         return
     end
     UIManager:scheduleIn(2, function()
-        if self.annotation_close_sync_in_flight then
+        if self.annotation_close_sync_in_flight or self.annotation_sync_in_flight
+            or self.stats_sync_in_flight or self.sync_in_progress then
+            local remaining = retries_left
+            if remaining == nil then remaining = 3 end
+            if remaining > 0 then
+                self:logInfo("Close-sync highlights busy; retrying", tostring(remaining))
+                self:_syncAnnotationsAfterClose(closed_file, captured, remaining - 1)
+            else
+                self:logWarn("Close-sync highlights gave up because Bridge Sync stayed busy")
+            end
             return
         end
         if not NetworkMgr:isConnected() then
-            return -- silent; the periodic sync catches up later
+            self:logInfo("Close-sync highlights waiting for WiFi; periodic sync will retry later")
+            return
         end
         self.annotation_close_sync_in_flight = true
         Trapper:wrap(function()
             local run_ok, result, err = pcall(function()
-                if not captured.hash then
-                    captured.hash = BridgeAnnotations.resolveBookHash(captured.file)
+                local book = nil
+                if closed_file then
+                    local known_hash = captured and captured.hash or nil
+                    book = BridgeAnnotations.collectBookByFile(closed_file, known_hash)
                 end
-                if not captured.hash then
+                if not book and captured then
+                    if not captured.hash then
+                        captured.hash = BridgeAnnotations.resolveBookHash(captured.file)
+                    end
+                    if captured.hash then
+                        book = captured
+                    end
+                end
+                if not book or not book.hash then
                     return nil, "no hash"
                 end
-                -- upload_only: push this session's highlights on close; received
+                self:logInfo(
+                    "Close-sync scanning highlights:",
+                    tostring(#(book.annotations or {})),
+                    "annotation(s)"
+                )
+                -- upload_only: push this session's highlights on close. Received
                 -- changes for the just-closed book are applied by the next
-                -- periodic sync, not a sidecar write that races KOReader's flush.
-                return BridgeAnnotations.exchangeBooks(self, { captured }, { upload_only = true })
+                -- periodic sync, not a write that races KOReader's close flush.
+                return BridgeAnnotations.exchangeBooks(self, { book }, { upload_only = true })
             end)
             self.annotation_close_sync_in_flight = false
             if run_ok and type(result) == "table" then
@@ -2352,6 +2585,18 @@ function BridgeSync:addToMainMenu(menu_items)
                 end,
                 callback = function(touchmenu_instance)
                     self.auto_sync_on_network = not self.auto_sync_on_network
+                    self:_saveSettings()
+                    self:_refreshMenu(touchmenu_instance)
+                end,
+            },
+            {
+                text = _("Auto-Sync Books on Close"),
+                keep_menu_open = true,
+                checked_func = function()
+                    return self.auto_sync_on_close
+                end,
+                callback = function(touchmenu_instance)
+                    self.auto_sync_on_close = not self.auto_sync_on_close
                     self:_saveSettings()
                     self:_refreshMenu(touchmenu_instance)
                 end,
