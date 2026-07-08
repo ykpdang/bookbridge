@@ -245,7 +245,9 @@ token/cookies, under Settings → Users → (user) → Integrations.
 | --- | --- | --- | --- |
 | Shelfmark URL | `SHELFMARK_URL` | empty | Adds the Shelfmark shortcut when configured. |
 
-#### Ollama (Local LLM, Optional)
+#### AI / LLM Providers (Optional)
+
+The bridge can use Ollama, OpenAI, or an OpenAI-compatible local endpoint such as llama-server or llama-swap. The local OpenAI-compatible option expects standard `/v1/models`, `/v1/embeddings`, and `/v1/chat/completions` endpoints.
 
 This is an advanced, opt-in feature. If you run a local [Ollama](https://ollama.com) server, the bridge can use it to make smarter book-match suggestions and to rescue audio↔text alignments that plain text matching misses. Everything here is **off until you enable it**, and every feature falls back to the normal behavior if Ollama is unreachable — so it never blocks a sync.
 
@@ -253,6 +255,11 @@ Connection:
 
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |
+| Provider | `LLM_PROVIDER` | `ollama` | `ollama`, `openai`, or `openai_compatible`. llama-server and llama-swap use `openai_compatible`. |
+| OpenAI-compatible Base URL | `LLM_BASE_URL` | `http://localhost:8080/v1` | Used by `openai_compatible`; include the `/v1` path. |
+| API Key | `LLM_API_KEY` | empty | Optional for local OpenAI-compatible servers. OpenAI cloud uses `OPENAI_API_KEY` or this value. |
+| Generic Embedding Model | `LLM_EMBED_MODEL` | empty | Overrides the legacy Ollama embedding model setting for all providers. |
+| Generic Chat / Judge Model | `LLM_CHAT_MODEL` | empty | Overrides the legacy Ollama chat model setting for all providers. |
 | Enable | `OLLAMA_ENABLED` | `false` | Master switch for all Ollama features. |
 | Server URL | `OLLAMA_URL` | `http://ollama:11434` | Your Ollama server. Use container DNS (`http://ollama:11434`) or `http://localhost:11434`. |
 | Embedding Model | `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Used for similarity. Pull it first: `ollama pull nomic-embed-text`. |
@@ -278,6 +285,8 @@ Ollama notes:
 
 - The model never runs on hot sync paths — only on linking, suggestion scans, and alignment work — so day-to-day syncing stays fast.
 - Use the **Test** button to confirm the server is reachable. It reports each model's context length and capabilities, and warns if your embedding model can't actually embed.
+- OpenAI-compatible providers are tested with `/v1/models`; embeddings and chat calls are still lazy so local servers can load models on first real use.
+- Existing `OLLAMA_*` feature toggles remain supported. Generic `LLM_*` connection/model settings take precedence when present.
 - Finer tuning knobs (score bands, judge margins, similarity thresholds) are available in the Settings UI if you want them, but the defaults are a sensible starting point.
 
 ### Suggestions

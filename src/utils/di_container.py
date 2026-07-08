@@ -17,7 +17,7 @@ from src.api.bookorbit_client import BookOrbitClient
 from src.api.cwa_client import CWAClient
 from src.api.cwa_sync_api import CWASyncApi
 from src.api.hardcover_client import HardcoverClient
-from src.api.ollama_client import OllamaClient
+from src.api.llm_client import create_llm_client
 from src.api.storygraph_client import StorygraphClient
 from src.api.storyteller_api import StorytellerAPIClient
 from src.db.database_service import DatabaseService
@@ -97,7 +97,9 @@ class Container(containers.DeclarativeContainer):
         )
     )
 
-    ollama_client = providers.Singleton(OllamaClient)
+    # Historical provider name kept for compatibility with existing services; the
+    # object is now selected by LLM_PROVIDER.
+    ollama_client = providers.Singleton(create_llm_client)
 
     booklore_client = providers.Singleton(
         BookloreClient,

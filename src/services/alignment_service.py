@@ -40,19 +40,32 @@ class AlignmentService:
 
     @staticmethod
     def _env_true(key: str, default: str = "true") -> bool:
+        if key.startswith("OLLAMA_"):
+            from src.api.llm_settings import llm_setting_truthy
+            return llm_setting_truthy(key, default)
         return os.environ.get(key, default).lower() == "true"
 
     @staticmethod
     def _env_float(key: str, default: float) -> float:
+        if key.startswith("OLLAMA_"):
+            from src.api.llm_settings import llm_setting_value
+            raw = llm_setting_value(key, str(default))
+        else:
+            raw = os.environ.get(key, default)
         try:
-            return float(os.environ.get(key, default))
+            return float(raw)
         except (TypeError, ValueError):
             return default
 
     @staticmethod
     def _env_int(key: str, default: int) -> int:
+        if key.startswith("OLLAMA_"):
+            from src.api.llm_settings import llm_setting_value
+            raw = llm_setting_value(key, str(default))
+        else:
+            raw = os.environ.get(key, default)
         try:
-            return int(float(os.environ.get(key, default)))
+            return int(float(raw))
         except (TypeError, ValueError):
             return default
 

@@ -893,13 +893,14 @@ class AudioTranscriber:
         client = self.ollama_client
         if not client or not client.is_configured():
             return None
-        if os.environ.get("OLLAMA_ALIGN_FALLBACK", "false").lower() != "true":
+        from src.api.llm_settings import llm_setting_truthy, llm_setting_value
+        if not llm_setting_truthy("OLLAMA_ALIGN_FALLBACK", "false"):
             return None
         if not clean_search or not windows:
             return None
 
         try:
-            threshold = float(os.environ.get("OLLAMA_ALIGN_SIM_THRESHOLD", 0.72))
+            threshold = float(llm_setting_value("OLLAMA_ALIGN_SIM_THRESHOLD", "0.72"))
         except (TypeError, ValueError):
             threshold = 0.72
 

@@ -503,6 +503,22 @@ class TestPersistentEmbedCache(unittest.TestCase):
         ]), {})
         self.assertEqual(stub2.embedded_texts, ["alpha title"])
 
+    def test_provider_cache_key_prevents_same_model_collision(self):
+        stub1 = _CountingOllama()
+        stub1.cache_key = "openai_compatible|http://one/v1|same-model"
+        stub1.embed_model = "same-model"
+        svc1 = self._service(stub1)
+        svc1._embed_texts(["alpha title"])
+
+        stub2 = _CountingOllama(vector=[0.0, 1.0])
+        stub2.cache_key = "openai_compatible|http://two/v1|same-model"
+        stub2.embed_model = "same-model"
+        svc2 = self._service(stub2)
+        result = svc2._embed_texts(["alpha title"])
+
+        self.assertEqual(result["alpha title"], [0.0, 1.0])
+        self.assertEqual(stub2.embedded_texts, ["alpha title"])
+
     def test_mocked_database_service_is_harmless(self):
         stub = _CountingOllama()
         svc = _make_service(stub)  # database_service is a MagicMock

@@ -13,6 +13,7 @@ Highlight and note sync requires the **BridgeSync KOReader plugin from this rele
 - **ABS ebook participation in combined entries** - Audiobookshelf ebook progress now stays in the sync loop even when the same mapped book also has audiobook progress.
 - **Rich progress metadata** - service-native update timestamps, status, and locator metadata are persisted so the sync manager can tell stale resurfaced states apart from real reading movement.
 - **Add / Update Book KOSync document management** - recent unlinked KOSync document hashes can now be reviewed, linked to the right book, copied, unlinked, or deleted from Add / Update Book.
+- **Choice of LLM provider** - the optional AI features (match suggestions, alignment rescue) now work with Ollama, OpenAI, or an OpenAI-compatible local server such as llama-server or llama-swap, selectable from Settings. Ollama remains the default, existing configurations are unchanged, and features still fall back to normal behavior when the provider is unreachable.
 
 ## Changed
 

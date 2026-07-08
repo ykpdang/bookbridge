@@ -2794,7 +2794,8 @@ def settings():
         }
         url_keys = [
             'SHELFMARK_URL', 'ABS_SERVER', 'BOOKLORE_SERVER',
-            'STORYTELLER_API_URL', 'CWA_SERVER', 'KOSYNC_SERVER'
+            'STORYTELLER_API_URL', 'CWA_SERVER', 'KOSYNC_SERVER',
+            'OLLAMA_URL', 'LLM_BASE_URL',
         ]
 
         def _normalized_form_value(key):
@@ -8488,8 +8489,13 @@ def _run_test_connection(service: str, payload: dict):
             _coerce_test_bool(data.get('TELEGRAM_ENABLED')),
             _coerce_test_str(data.get('TELEGRAM_BOT_TOKEN')),
         ),
-        'ollama': lambda data: _test_ollama(
+        'ollama': lambda data: _test_llm_provider(
             _coerce_test_bool(data.get('OLLAMA_ENABLED')),
+            _coerce_test_str(data.get('LLM_PROVIDER')) or 'ollama',
+            _normalize_test_url(data.get('LLM_BASE_URL')),
+            _coerce_test_str(data.get('LLM_API_KEY')),
+            _coerce_test_str(data.get('LLM_EMBED_MODEL')),
+            _coerce_test_str(data.get('LLM_CHAT_MODEL')),
             _normalize_test_url(data.get('OLLAMA_URL')),
             _coerce_test_str(data.get('OLLAMA_EMBED_MODEL')),
             _coerce_test_str(data.get('OLLAMA_CHAT_MODEL')),
@@ -8507,6 +8513,68 @@ def _run_test_connection(service: str, payload: dict):
 def test_connection(service: str):
     """Test connectivity with diagnostic error messages."""
     return _run_test_connection(service, request.get_json(silent=True) or {})
+
+
+def _test_llm_provider(
+    enabled: bool,
+    provider: str,
+    base_url: str,
+    api_key: str,
+    embed_model: str,
+    chat_model: str,
+    ollama_url: str,
+    ollama_embed_model: str,
+    ollama_chat_model: str,
+) -> dict:
+    provider = (provider or "ollama").strip().lower()
+    if provider in {"openai-compatible", "openai_compat", "llama", "llama-server", "llama_swap", "llama-swap"}:
+        provider = "openai_compatible"
+    if provider == "ollama":
+        return _test_ollama(
+            enabled,
+            ollama_url,
+            embed_model or ollama_embed_model,
+            chat_model or ollama_chat_model,
+        )
+    if not enabled:
+        return {"ok": False, "message": "LLM provider is disabled"}
+    if provider == "openai":
+        base_url = base_url or "https://api.openai.com/v1"
+        api_key = api_key or os.environ.get("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            return {"ok": False, "message": "Missing OpenAI API key"}
+        embed_model = embed_model or "text-embedding-3-small"
+        chat_model = chat_model or "gpt-4o-mini"
+    elif provider == "openai_compatible":
+        if not base_url:
+            return {"ok": False, "message": "Missing OpenAI-compatible base URL"}
+        if not embed_model or not chat_model:
+            return {"ok": False, "message": "Missing embedding or chat model name"}
+    else:
+        return {"ok": False, "message": f"Unknown LLM provider: {provider}"}
+    return _test_openai_compatible(provider, base_url, api_key, embed_model, chat_model)
+
+
+def _test_openai_compatible(provider: str, base_url: str, api_key: str, embed_model: str, chat_model: str) -> dict:
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    r = requests.get(f"{base_url.rstrip('/')}/models", headers=headers, timeout=10)
+    if r.status_code != 200:
+        label = "OpenAI" if provider == "openai" else "OpenAI-compatible endpoint"
+        return {"ok": False, "message": f"{label} returned HTTP {r.status_code}"}
+    models = [m.get("id", "") for m in (r.json() or {}).get("data", []) if isinstance(m, dict) and m.get("id")]
+    missing = [m for m in (embed_model, chat_model) if models and m not in models]
+    if missing:
+        details = ", ".join(missing)
+        return {
+            "ok": False,
+            "message": f"Connected, but configured model(s) were not listed by /models: {details}",
+        }
+    return {
+        "ok": True,
+        "message": f"Connected. {embed_model} embeddings ready, {chat_model} judge ready",
+    }
 
 
 def _test_ollama(enabled: bool, url: str, embed_model: str, chat_model: str) -> dict:

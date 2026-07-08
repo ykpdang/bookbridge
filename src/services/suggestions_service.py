@@ -512,12 +512,18 @@ class SuggestionsService:
 
     @staticmethod
     def _env_true(key: str) -> bool:
-        return os.environ.get(key, "false").lower() == "true"
+        from src.api.llm_settings import llm_setting_truthy
+        return llm_setting_truthy(key, "false") if key.startswith("OLLAMA_") else os.environ.get(key, "false").lower() == "true"
 
     @staticmethod
     def _env_float(key: str, default: float) -> float:
+        if key.startswith("OLLAMA_"):
+            from src.api.llm_settings import llm_setting_value
+            raw = llm_setting_value(key, str(default))
+        else:
+            raw = os.environ.get(key, default)
         try:
-            return float(os.environ.get(key, default))
+            return float(raw)
         except (TypeError, ValueError):
             return default
 
@@ -556,7 +562,11 @@ class SuggestionsService:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def _embed_model_name(self) -> str:
-        return str(getattr(self.ollama_client, "embed_model", "") or "")
+        return str(
+            getattr(self.ollama_client, "cache_key", None)
+            or getattr(self.ollama_client, "embed_model", "")
+            or ""
+        )
 
     def _load_embeddings_from_db(self, missing: List[str]) -> List[str]:
         """Fill the per-scan cache from the persistent table; returns texts still missing.

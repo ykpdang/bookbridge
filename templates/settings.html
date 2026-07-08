@@ -1387,11 +1387,12 @@
 
             <div class="tab-panel" data-panel="ai">
 
-            <!-- Ollama (Local LLM) -->
+            <!-- AI / LLM Provider -->
             <div class="settings-section">
                 {% set ollama_enabled = get_bool('OLLAMA_ENABLED') %}
+                {% set llm_provider = get_val('LLM_PROVIDER') or 'ollama' %}
                 <div class="section-header">
-                    <h3>Ollama (Local LLM)</h3>
+                    <h3>AI / LLM Provider</h3>
                     <button class="btn btn-sm" type="button" onclick="testConnection('ollama', this)">🔗 Test</button>
                     <div class="toggle-switch-wrapper">
                         <span class="toggle-label">Enable</span>
@@ -1406,25 +1407,46 @@
                 <div id="ollama_body" class="section-body {% if not ollama_enabled %}collapsed{% endif %}">
                     <div class="full-width">
                         <p class="help-text">
-                            Use a local Ollama server to semantically improve book-match suggestions and rescue
-                            failed audio↔text alignments. All features below are off until you enable them, and fall
-                            back to the existing behavior if Ollama is unreachable.
+                            Use Ollama, OpenAI, or an OpenAI-compatible local endpoint such as llama-server or
+                            llama-swap to improve book-match suggestions and rescue failed audio/text alignments.
+                            All features below fall back to existing behavior if the provider is unreachable.
                         </p>
+                    </div>
+                    <div class="form-group full-width">
+                        <label>Provider</label>
+                        <select name="LLM_PROVIDER">
+                            <option value="ollama" {% if llm_provider == 'ollama' %}selected{% endif %}>Ollama</option>
+                            <option value="openai" {% if llm_provider == 'openai' %}selected{% endif %}>OpenAI</option>
+                            <option value="openai_compatible" {% if llm_provider == 'openai_compatible' %}selected{% endif %}>OpenAI-compatible (llama-server / llama-swap)</option>
+                        </select>
+                        <div class="help-text">Ollama remains the default. llama-server and llama-swap use the OpenAI-compatible option.</div>
                     </div>
                     <div class="form-group full-width">
                         <label>Ollama Server URL</label>
                         <input type="text" name="OLLAMA_URL" value="{{ get_val('OLLAMA_URL') }}">
                         <div class="help-text">e.g. http://ollama:11434 (container DNS) or http://localhost:11434</div>
                     </div>
+                    <div class="form-group full-width">
+                        <label>OpenAI-Compatible Base URL</label>
+                        <input type="text" name="LLM_BASE_URL" value="{{ get_val('LLM_BASE_URL') }}">
+                        <div class="help-text">Used for OpenAI-compatible providers. e.g. http://localhost:8080/v1</div>
+                    </div>
+                    <div class="form-group full-width">
+                        <label>API Key</label>
+                        <input type="password" name="LLM_API_KEY" value="{{ get_val('LLM_API_KEY') }}">
+                        <div class="help-text">Required for OpenAI. Optional for local OpenAI-compatible servers.</div>
+                    </div>
                     <div class="form-group">
                         <label>Embedding Model</label>
-                        <input type="text" name="OLLAMA_EMBED_MODEL" value="{{ get_val('OLLAMA_EMBED_MODEL') }}">
-                        <div class="help-text">e.g. nomic-embed-text (run: ollama pull nomic-embed-text)</div>
+                        <input type="text" name="LLM_EMBED_MODEL"
+                            value="{{ get_val('LLM_EMBED_MODEL') or get_val('OLLAMA_EMBED_MODEL') }}">
+                        <div class="help-text">e.g. nomic-embed-text for Ollama/local, text-embedding-3-small for OpenAI.</div>
                     </div>
                     <div class="form-group">
                         <label>Chat / Judge Model</label>
-                        <input type="text" name="OLLAMA_CHAT_MODEL" value="{{ get_val('OLLAMA_CHAT_MODEL') }}">
-                        <div class="help-text">e.g. qwen2.5:14b</div>
+                        <input type="text" name="LLM_CHAT_MODEL"
+                            value="{{ get_val('LLM_CHAT_MODEL') or get_val('OLLAMA_CHAT_MODEL') }}">
+                        <div class="help-text">e.g. qwen2.5:14b for Ollama/local, gpt-4o-mini for OpenAI.</div>
                     </div>
                     <div class="form-group">
                         <label>Keep Alive</label>
@@ -1434,9 +1456,9 @@
                     </div>
                     <div class="form-group">
                         <label>Chat Context Length (num_ctx)</label>
-                        <input type="number" name="OLLAMA_NUM_CTX" value="{{ get_val('OLLAMA_NUM_CTX') }}">
-                        <div class="help-text">Context window for judge calls. Empty = server default. Raise if
-                            judge prompts get truncated; costs VRAM.</div>
+                        <input type="number" name="LLM_NUM_CTX"
+                            value="{{ get_val('LLM_NUM_CTX') or get_val('OLLAMA_NUM_CTX') }}">
+                        <div class="help-text">Used by Ollama judge calls. Empty = server default. Raise if judge prompts get truncated; costs VRAM.</div>
                     </div>
 
                     <div class="checkbox-wrapper full-width">
@@ -2213,7 +2235,11 @@
             hardcover: ['HARDCOVER_ENABLED', 'HARDCOVER_TOKEN'],
             storygraph: ['STORYGRAPH_ENABLED', 'STORYGRAPH_SESSION_COOKIE', 'STORYGRAPH_REMEMBER_USER_TOKEN'],
             telegram: ['TELEGRAM_ENABLED', 'TELEGRAM_BOT_TOKEN'],
-            ollama: ['OLLAMA_ENABLED', 'OLLAMA_URL', 'OLLAMA_EMBED_MODEL', 'OLLAMA_CHAT_MODEL'],
+            ollama: [
+                'OLLAMA_ENABLED', 'LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_API_KEY',
+                'LLM_EMBED_MODEL', 'LLM_CHAT_MODEL',
+                'OLLAMA_URL', 'OLLAMA_EMBED_MODEL', 'OLLAMA_CHAT_MODEL'
+            ],
         };
 
         function getTestConnectionPayload(service) {

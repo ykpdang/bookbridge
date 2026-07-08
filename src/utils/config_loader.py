@@ -66,7 +66,11 @@ ALL_SETTINGS = [
     'STORYGRAPH_ENABLED', 'STORYGRAPH_SESSION_COOKIE', 'STORYGRAPH_REMEMBER_USER_TOKEN',
     'STORYGRAPH_UPDATE_COOLDOWN_MINS',
     
-    # Ollama (local LLM)
+    # LLM providers (Ollama, OpenAI, OpenAI-compatible local servers)
+    'LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_API_KEY',
+    'LLM_EMBED_MODEL', 'LLM_CHAT_MODEL', 'LLM_NUM_CTX',
+
+    # Ollama (legacy/local LLM settings, still honored)
     'OLLAMA_ENABLED', 'OLLAMA_URL', 'OLLAMA_EMBED_MODEL', 'OLLAMA_CHAT_MODEL',
     'OLLAMA_KEEP_ALIVE', 'OLLAMA_NUM_CTX',
     'OLLAMA_RERANK_SUGGESTIONS', 'OLLAMA_RERANK_BAND_MIN', 'OLLAMA_RERANK_BAND_MAX',
@@ -194,6 +198,12 @@ DEFAULT_CONFIG = {
     'HARDCOVER_UPDATE_COOLDOWN_MINS': '60',
     'STORYGRAPH_ENABLED': 'false',
     'STORYGRAPH_UPDATE_COOLDOWN_MINS': '60',
+    'LLM_PROVIDER': 'ollama',
+    'LLM_BASE_URL': 'http://localhost:8080/v1',
+    'LLM_API_KEY': '',
+    'LLM_EMBED_MODEL': '',
+    'LLM_CHAT_MODEL': '',
+    'LLM_NUM_CTX': '',
     'OLLAMA_ENABLED': 'false',
     'OLLAMA_URL': 'http://ollama:11434',
     'OLLAMA_EMBED_MODEL': 'nomic-embed-text',
