@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ class ClientPoller:
             self._shelf_watch_services = {'BookLore': shelf_watch_service}
         else:
             self._shelf_watch_services = {}
-        self._last_known: dict[tuple, float] = {}  # {(client_name, abs_id): last_pct}
+        self._last_known: dict[tuple, object] = {}  # {(user_id, client_name, abs_id): state fingerprint}
         self._last_poll: dict[str, float] = {}     # {client_name: last_poll_timestamp}
         # Deferred syncs for clients with {PREFIX}_POLL_WAIT_FOR_SETTLE enabled:
         # a detected change is held until a later poll shows no further movement
@@ -58,6 +59,70 @@ class ClientPoller:
         self._echo_tolerance = float(
             os.environ.get("CLIENT_POLLER_SELF_WRITE_ECHO_PERCENT", "1.0")
         ) / 100.0
+
+    _STATE_FINGERPRINT_KEYS = (
+        "ts",
+        "service_updated_at",
+        "href",
+        "frag",
+        "fragment",
+        "fragments",
+        "chapter_progress",
+        "css_selector",
+        "position",
+        "match_index",
+        "cfi",
+    )
+
+    @classmethod
+    def _freeze_state_value(cls, value):
+        if isinstance(value, Mapping):
+            return tuple(sorted((str(k), cls._freeze_state_value(v)) for k, v in value.items()))
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return tuple(cls._freeze_state_value(v) for v in value)
+        return value
+
+    @classmethod
+    def _state_fingerprint(cls, current: dict) -> tuple:
+        """Small stable snapshot used to detect position changes during polling.
+
+        Storyteller can advance a locator/timestamp without changing the rounded
+        book percentage enough to cross the old poll threshold. Manual sync sees
+        those richer fields; the poller must watch them too.
+        """
+        if not isinstance(current, dict):
+            return ()
+        details = tuple(
+            (key, cls._freeze_state_value(current.get(key)))
+            for key in cls._STATE_FINGERPRINT_KEYS
+            if current.get(key) is not None
+        )
+        return ("state", current.get("pct"), details)
+
+    @staticmethod
+    def _cached_pct(cached, fallback=None):
+        if isinstance(cached, tuple):
+            if len(cached) == 3 and cached[0] == "state":
+                return cached[1]
+            for key, value in cached:
+                if key == "pct":
+                    return value
+            return fallback
+        return cached if cached is not None else fallback
+
+    @staticmethod
+    def _state_changed(last_marker, current_marker, last_pct, current_pct, pct_threshold=0.001) -> bool:
+        if not isinstance(last_marker, tuple):
+            return abs(current_pct - last_pct) > pct_threshold
+        if abs(current_pct - last_pct) > pct_threshold:
+            return True
+        if (
+            len(current_marker) == 3
+            and len(last_marker) == 3
+            and current_marker[0] == last_marker[0] == "state"
+        ):
+            return current_marker[2] != last_marker[2]
+        return current_marker != last_marker
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -210,6 +275,20 @@ class ClientPoller:
             f"📡 {client_name} poll: checked {total_checked} across {len(targets)} target(s)"
         )
 
+    def _self_write_window(self, client_name: str) -> int:
+        """Self-write lookback covering one full poll gap for this client.
+
+        A push is only observable at the NEXT poll of this client — up to a
+        whole poll interval later, far past the tracker's 60s default. With the
+        short window, the echo of our own write (fresh timestamp/locator, same
+        percentage) reads as an external change and bounces a spurious sync
+        cycle after every push. Real jumps still get through the widened
+        window via the echo-percentage tolerance check.
+        """
+        env_prefix = dict(self._POLLABLE).get(client_name)
+        interval = self._get_interval(env_prefix) if env_prefix else 0
+        return max(interval + 60, 60)
+
     def _recent_self_write(self, client_name: str, abs_id: str, user_id):
         """Return BookBridge's recent write for this client/book, if any.
 
@@ -222,9 +301,10 @@ class ClientPoller:
         """
         from src.services.write_tracker import get_recent_write
 
-        recent = get_recent_write(client_name, abs_id, user_id=user_id)
+        window = self._self_write_window(client_name)
+        recent = get_recent_write(client_name, abs_id, suppression_window=window, user_id=user_id)
         if recent is None and user_id is not None:
-            recent = get_recent_write(client_name, abs_id, user_id=None)
+            recent = get_recent_write(client_name, abs_id, suppression_window=window, user_id=None)
         return recent
 
     def _poll_client_for_user(self, client_name, sync_client, user_id, active_books, wait_for_settle) -> int:
@@ -263,13 +343,16 @@ class ClientPoller:
 
                 checked += 1
                 cache_key = (user_id, client_name, book.abs_id)
-                last_pct = self._last_known.get(cache_key)
+                current_marker = self._state_fingerprint(current_state.current)
+                last_marker = self._last_known.get(cache_key)
+                last_pct = self._cached_pct(last_marker, fallback=current_pct)
+                marker_changed = self._state_changed(last_marker, current_marker, last_pct, current_pct)
 
-                if last_pct is None:
+                if last_marker is None:
                     logger.debug(
                         f"📡 {client_name} poll: '{book.abs_title}' initial position cached ({current_pct:.1%})"
                     )
-                elif abs(current_pct - last_pct) > 0.001:
+                elif marker_changed:
                     # Check write-suppression before acting.
                     recent = self._recent_self_write(client_name, book.abs_id, user_id)
                     if recent is not None:
@@ -317,7 +400,7 @@ class ClientPoller:
                             daemon=True,
                         ).start()
 
-                self._last_known[cache_key] = current_pct
+                self._last_known[cache_key] = current_marker
 
             except Exception as e:
                 logger.debug(f"ClientPoller: poll check failed for {client_name}/{getattr(book, 'abs_title', '?')}: {e}")

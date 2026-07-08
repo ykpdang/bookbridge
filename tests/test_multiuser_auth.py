@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from tests.test_webserver import MockContainer
 from src.db.database_service import DatabaseService
-from src.db.models import Book, PendingSuggestion, State
+from src.db.models import Book, KosyncDocument, PendingSuggestion, State
 
 _TEMPLATES = str(Path(__file__).parent.parent / "templates")
 
@@ -231,6 +231,19 @@ class TestMultiUserAuth(unittest.TestCase):
 
     def test_account_requires_login(self):
         self.assertEqual(self.client.get('/account', follow_redirects=False).status_code, 302)
+
+    def test_regular_user_account_shows_bridgesync_plugin_download(self):
+        self.svc.create_user("reg", "pw", role="user")
+        self.client.post('/login', data={'username': 'reg', 'password': 'pw'})
+
+        resp = self.client.get('/account')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b'BridgeSync KOReader Plugin', resp.data)
+        self.assertIn(b'/api/kosync-plugin/download', resp.data)
+        self.assertIn(b'/api/kosync-plugin/version', resp.data)
+        self.assertEqual(self.client.get('/api/kosync-plugin/version').status_code, 200)
+        self.assertEqual(self.client.get('/api/kosync-plugin/download').status_code, 200)
 
     # --- admin-managed per-user integrations ---
     def _ipath(self, uid):
@@ -665,6 +678,132 @@ class TestMultiUserAuth(unittest.TestCase):
         resp = self.client.post('/api/storyteller/link/reg-book', json={'uuid': 'none'})
         self.assertEqual(resp.status_code, 200)
         self.assertIsNone(self.svc.get_book("reg-book").storyteller_uuid)
+
+    def test_regular_user_kosync_documents_are_scoped_to_own_and_claimed(self):
+        admin = self.svc.get_user_by_username("admin")
+        reg = self.svc.create_user("reg", "pw", role="user")
+        self.svc.save_book(Book(
+            abs_id="admin-book",
+            abs_title="Admin Book",
+            ebook_filename="a.epub",
+            status="active",
+            user_id=admin.id,
+        ))
+        self.svc.save_book(Book(
+            abs_id="reg-book",
+            abs_title="Reg Book",
+            ebook_filename="r.epub",
+            status="active",
+            user_id=reg.id,
+        ))
+        self.svc.save_kosync_document(KosyncDocument(
+            document_hash="a" * 32,
+            percentage=0.1,
+            user_id=admin.id,
+        ))
+        self.svc.save_kosync_document(KosyncDocument(
+            document_hash="b" * 32,
+            percentage=0.2,
+            user_id=reg.id,
+        ))
+        self.svc.save_kosync_document(KosyncDocument(
+            document_hash="c" * 32,
+            percentage=0.3,
+            linked_abs_id="reg-book",
+            user_id=admin.id,
+        ))
+
+        self.client.post('/login', data={'username': 'reg', 'password': 'pw'})
+        resp = self.client.get('/api/me/kosync-documents')
+        self.assertEqual(resp.status_code, 200)
+        hashes = {doc["document_hash"] for doc in resp.get_json()["documents"]}
+        self.assertEqual(hashes, {"b" * 32, "c" * 32})
+
+        books_resp = self.client.get('/api/me/books')
+        self.assertEqual(books_resp.status_code, 200)
+        self.assertEqual(
+            {book["abs_id"] for book in books_resp.get_json()["books"]},
+            {"reg-book"},
+        )
+
+    def test_regular_user_links_kosync_document_without_replacing_primary_hash(self):
+        admin = self.svc.get_user_by_username("admin")
+        reg = self.svc.create_user("reg", "pw", role="user")
+        self.svc.save_book(Book(
+            abs_id="admin-book",
+            abs_title="Admin Book",
+            ebook_filename="a.epub",
+            status="active",
+            user_id=admin.id,
+        ))
+        self.svc.save_book(Book(
+            abs_id="reg-book",
+            abs_title="Reg Book",
+            ebook_filename="r.epub",
+            kosync_doc_id="primary-hash",
+            status="active",
+            user_id=reg.id,
+        ))
+        self.svc.save_kosync_document(KosyncDocument(
+            document_hash="d" * 32,
+            percentage=0.4,
+            user_id=reg.id,
+        ))
+
+        self.client.post('/login', data={'username': 'reg', 'password': 'pw'})
+        forbidden = self.client.post(
+            f"/api/me/kosync-documents/{'d' * 32}/link",
+            json={"abs_id": "admin-book"},
+        )
+        self.assertEqual(forbidden.status_code, 403)
+
+        resp = self.client.post(
+            f"/api/me/kosync-documents/{'d' * 32}/link",
+            json={"abs_id": "reg-book"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.get_json()["success"])
+        self.assertEqual(self.svc.get_kosync_document("d" * 32).linked_abs_id, "reg-book")
+        self.assertEqual(self.svc.get_book("reg-book").kosync_doc_id, "primary-hash")
+
+    def test_regular_user_can_unlink_and_delete_only_allowed_kosync_documents(self):
+        reg = self.svc.create_user("reg", "pw", role="user")
+        other = self.svc.create_user("other", "pw", role="user")
+        self.svc.save_book(Book(
+            abs_id="reg-book",
+            abs_title="Reg Book",
+            ebook_filename="r.epub",
+            status="active",
+            user_id=reg.id,
+        ))
+        self.svc.save_kosync_document(KosyncDocument(
+            document_hash="e" * 32,
+            linked_abs_id="reg-book",
+            user_id=reg.id,
+        ))
+        self.svc.save_kosync_document(KosyncDocument(
+            document_hash="f" * 32,
+            user_id=reg.id,
+        ))
+        self.svc.save_kosync_document(KosyncDocument(
+            document_hash="9" * 32,
+            user_id=other.id,
+        ))
+
+        self.client.post('/login', data={'username': 'reg', 'password': 'pw'})
+        delete_linked = self.client.delete(f"/api/me/kosync-documents/{'e' * 32}")
+        self.assertEqual(delete_linked.status_code, 400)
+        unlink = self.client.post(f"/api/me/kosync-documents/{'e' * 32}/unlink")
+        self.assertEqual(unlink.status_code, 200)
+        self.assertIsNone(self.svc.get_kosync_document("e" * 32).linked_abs_id)
+
+        delete_own = self.client.delete(f"/api/me/kosync-documents/{'f' * 32}")
+        self.assertEqual(delete_own.status_code, 200)
+        self.assertIsNone(self.svc.get_kosync_document("f" * 32))
+
+        delete_other = self.client.delete(f"/api/me/kosync-documents/{'9' * 32}")
+        self.assertEqual(delete_other.status_code, 403)
+        self.assertIsNotNone(self.svc.get_kosync_document("9" * 32))
 
     def test_regular_user_dashboard_hides_pending_suggestions(self):
         admin = self.svc.get_user_by_username("admin")

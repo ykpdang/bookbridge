@@ -81,7 +81,7 @@ def test_get_audiobook_progress_shape(client):
 def test_get_audiobook_progress_unstarted_204_is_zero_not_none(client):
     with patch.object(client, '_make_request', return_value=_Resp(status_code=204)):
         prog = client.get_audiobook_progress(5)
-    assert prog == {"pct": 0.0, "position_seconds": 0.0, "current_file_id": None}
+    assert prog == {"pct": 0.0, "position_seconds": 0.0, "current_file_id": None, "updated_at": None}
 
 
 def test_get_audiobook_progress_unstarted_200_null_is_zero_not_none(client):
@@ -89,7 +89,7 @@ def test_get_audiobook_progress_unstarted_200_null_is_zero_not_none(client):
     # That must read as the 0.0 baseline, not None (None drops BookOrbit from sync).
     with patch.object(client, '_make_request', return_value=_Resp(None, status_code=200)):
         prog = client.get_audiobook_progress(5)
-    assert prog == {"pct": 0.0, "position_seconds": 0.0, "current_file_id": None}
+    assert prog == {"pct": 0.0, "position_seconds": 0.0, "current_file_id": None, "updated_at": None}
 
 
 def test_update_audiobook_progress_includes_current_file_id(client):

@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 import uuid
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -34,6 +34,7 @@ from src.utils.user_context import (
 from src.utils.user_config import user_setting
 
 from src.utils.config_loader import ConfigLoader, env_truthy
+from src.utils.cache_paths import safe_cache_path
 from src.utils.logging_utils import memory_log_handler, LOG_PATH
 from src.utils.logging_utils import sanitize_log_data
 from src.api.api_clients import ABS_DISABLED_SENTINEL, is_abs_disabled_value
@@ -43,7 +44,7 @@ from src.api.storygraph_routes import storygraph_bp, init_storygraph_routes
 from src.version import APP_VERSION, get_update_status
 from src.db.models import State
 from src.sync_clients.sync_client_interface import LocatorResult, UpdateProgressRequest
-from src.services.audio_source_adapters import AudioResult, ABSAudioSourceAdapter, BookLoreAudioSourceAdapter
+from src.services.audio_source_adapters import AudioResult, ABSAudioSourceAdapter, BookLoreAudioSourceAdapter, BookOrbitAudioSourceAdapter
 from src.utils.storyteller_transcript import StorytellerTranscript
 from src.utils.kosync_headers import hash_kosync_key, kosync_auth_headers
 
@@ -1300,6 +1301,7 @@ def inject_global_vars():
             'STORYTELLER_ASSETS_DIR': '',
             'ABS_PROGRESS_OFFSET_SECONDS': '0',
             'EBOOK_CACHE_SIZE': '3',
+            'ALIGNMENT_CACHE_SIZE': '3',
             'KOSYNC_HASH_METHOD': 'content',
             'TELEGRAM_LOG_LEVEL': 'ERROR',
             'SHELFMARK_URL': '',
@@ -1391,7 +1393,7 @@ def find_ebook_file(filename):
 
 
 def get_kosync_id_for_ebook(ebook_filename, booklore_id=None, original_filename=None,
-                            bookorbit_id=None):
+                            bookorbit_id=None, source_path=None):
     """Get KOSync document ID for an ebook.
     Tries Grimmory API first (if configured and booklore_id provided),
     falls back to filesystem, then BookOrbit / ABS / CWA on-demand downloads.
@@ -1410,8 +1412,21 @@ def get_kosync_id_for_ebook(ebook_filename, booklore_id=None, original_filename=
         except Exception as e:
             logger.warning(f"⚠️ Failed to get KOSync ID from Grimmory, falling back to filesystem: {e}")
 
-    # Fall back to filesystem
-    ebook_path = find_ebook_file(ebook_filename)
+    # Fall back to filesystem. When a queue item carries the selected local source path,
+    # prefer it over filename-only globbing so duplicate basenames do not hash the wrong book.
+    ebook_path = None
+    source_path_text = str(source_path or "").strip()
+    if source_path_text and "://" not in source_path_text:
+        try:
+            selected_path = Path(source_path_text)
+            if selected_path.exists() and selected_path.is_file():
+                ebook_path = selected_path
+            else:
+                logger.debug(f"Selected ebook source path not found, falling back to filename search: '{source_path_text}'")
+        except Exception as e:
+            logger.debug(f"Selected ebook source path could not be used, falling back to filename search: {e}")
+    if not ebook_path:
+        ebook_path = find_ebook_file(ebook_filename)
     if not ebook_path and original_filename:
         # [Tri-Link] Fallback to original filename if Storyteller file not found/relevant
         logger.debug(f"Primary file '{ebook_filename}' not found, checking original '{original_filename}'")
@@ -1422,8 +1437,8 @@ def get_kosync_id_for_ebook(ebook_filename, booklore_id=None, original_filename=
 
     # [NEW] Check Epub Cache explicitly (if acquired by LibraryService but not meant for /books)
     epub_cache = container.epub_cache_dir()
-    cached_path = epub_cache / ebook_filename
-    if cached_path.exists():
+    cached_path = safe_cache_path(epub_cache, ebook_filename)
+    if cached_path and cached_path.exists():
          return container.ebook_parser().get_kosync_id(cached_path)
 
     # [NEW] On-Demand Fetching
@@ -1461,7 +1476,7 @@ def get_kosync_id_for_ebook(ebook_filename, booklore_id=None, original_filename=
                      target = ebook_files[0]
                      if not epub_cache.exists(): epub_cache.mkdir(parents=True, exist_ok=True)
                      
-                     if abs_client.download_file(target['stream_url'], cached_path):
+                     if cached_path and abs_client.download_file(target['stream_url'], cached_path):
                          logger.info(f"   ✅ Downloaded ABS ebook to '{cached_path}'")
                          return container.ebook_parser().get_kosync_id(cached_path)
                  else:
@@ -1518,7 +1533,7 @@ def get_kosync_id_for_ebook(ebook_filename, booklore_id=None, original_filename=
 
                      if target and target.get('download_url'):
                          if not epub_cache.exists(): epub_cache.mkdir(parents=True, exist_ok=True)
-                         if cwa_client.download_ebook(target['download_url'], cached_path):
+                         if cached_path and cwa_client.download_ebook(target['download_url'], cached_path):
                              logger.info(f"   ✅ Downloaded CWA ebook to '{cached_path}'")
                              return container.ebook_parser().get_kosync_id(cached_path)
                      else:
@@ -2043,6 +2058,9 @@ def get_searchable_audiobooks(search_term):
             adapters["ABS"] = ABSAudioSourceAdapter(clients.abs_client)
         if clients.booklore_client and clients.booklore_client.is_configured():
             adapters["BookLore"] = BookLoreAudioSourceAdapter(clients.booklore_client, container.data_dir())
+        _bo_client = getattr(clients, "bookorbit_client", None)
+        if _bo_client and _bo_client.is_configured():
+            adapters["BookOrbit"] = BookOrbitAudioSourceAdapter(_bo_client, container.data_dir())
     except Exception as e:
         logger.debug("Could not build user-scoped audio adapters, falling back to globals: %s", e)
         adapters = container.audio_source_adapters() if hasattr(container, "audio_source_adapters") else {}
@@ -2430,6 +2448,28 @@ def _promote_authoritative_ebook_matches(audiobooks, ebooks):
     return ebooks
 
 
+# Non-ABS audiobook providers. Their mappings live under a prefixed bridge key
+# ('booklore:<id>' / 'bookorbit:<id>') instead of an ABS item id.
+_LIBRARY_AUDIO_SOURCES = ("BookLore", "BookOrbit")
+_AUDIO_BRIDGE_PREFIXES = {"booklore": "booklore", "bookorbit": "bookorbit"}
+
+
+def _audio_source_display_name(source):
+    """'BookLore' is the internal key; users know it as Grimmory."""
+    return "Grimmory" if source == "BookLore" else str(source or "")
+
+
+def _audio_source_from_bridge_key(bridge_key):
+    """Infer the audio source from a bridge key's prefix ('booklore:'/'bookorbit:').
+
+    Un-prefixed non-empty keys are ABS item ids; an empty key yields ''."""
+    key = str(bridge_key or "")
+    for src in _LIBRARY_AUDIO_SOURCES:
+        if key.lower().startswith(f"{src.lower()}:"):
+            return src
+    return "ABS" if key else ""
+
+
 def _build_bridge_key(audio_source, audio_source_id):
     if audio_source_id is None:
         return None
@@ -2437,12 +2477,13 @@ def _build_bridge_key(audio_source, audio_source_id):
     if not source_id:
         return None
 
-    if source_id.lower().startswith("booklore:"):
-        return f"booklore:{source_id.split(':', 1)[1].strip()}"
+    head = source_id.lower().split(":", 1)[0]
+    if ":" in source_id and head in _AUDIO_BRIDGE_PREFIXES:
+        return f"{head}:{source_id.split(':', 1)[1].strip()}"
 
     source_name = str(audio_source or "").strip().lower()
-    if source_name == "booklore":
-        return f"booklore:{source_id}"
+    if source_name in _AUDIO_BRIDGE_PREFIXES:
+        return f"{_AUDIO_BRIDGE_PREFIXES[source_name]}:{source_id}"
     return source_id
 
 
@@ -2502,8 +2543,9 @@ def _parse_audio_duration(raw_value):
         return None
 
 
-def _create_or_update_booklore_audio_mapping(
+def _create_or_update_library_audio_mapping(
     *,
+    audio_source="BookLore",
     audio_source_id,
     audio_title,
     audio_cover_url,
@@ -2514,11 +2556,17 @@ def _create_or_update_booklore_audio_mapping(
     ebook_source,
     ebook_source_id,
     storyteller_uuid,
+    ebook_source_path=None,
 ):
-    bridge_key = _build_bridge_key("BookLore", audio_source_id)
+    """Create/refresh a mapping whose audio lives on a library provider
+    (Grimmory or BookOrbit) instead of ABS."""
+    if audio_source not in _LIBRARY_AUDIO_SOURCES:
+        return None, f"Unsupported audio source '{audio_source}'", 400
+    audio_display = _audio_source_display_name(audio_source)
+    bridge_key = _build_bridge_key(audio_source, audio_source_id)
     existing_book = (
         database_service.get_book(bridge_key)
-        or database_service.get_book_by_audio_source("BookLore", audio_source_id)
+        or database_service.get_book_by_audio_source(audio_source, audio_source_id)
     )
 
     resolved_ebook_filename = (ebook_filename or "").strip() or None
@@ -2551,10 +2599,15 @@ def _create_or_update_booklore_audio_mapping(
         kosync_doc_id = _compute_storyteller_trilink_kosync_id(
             original_ebook_filename,
             resolved_ebook_filename,
-            "Grimmory audiobook match",
+            f"{audio_display} audiobook match",
         )
     else:
-        kosync_doc_id = get_kosync_id_for_ebook(resolved_ebook_filename, booklore_ebook_id)
+        kosync_doc_id = get_kosync_id_for_ebook(
+            resolved_ebook_filename,
+            booklore_ebook_id,
+            bookorbit_id=ebook_source_id if ebook_source == "BookOrbit" else None,
+            source_path=ebook_source_path,
+        )
 
     if existing_book and existing_book.kosync_doc_id:
         kosync_doc_id = existing_book.kosync_doc_id
@@ -2564,13 +2617,18 @@ def _create_or_update_booklore_audio_mapping(
 
     from src.db.models import Book
 
+    default_cover = (
+        f"/api/bookorbit/audiobook-cover/{audio_source_id}"
+        if audio_source == "BookOrbit"
+        else f"/api/booklore/audiobook-cover/{audio_source_id}"
+    )
     target_book = existing_book or Book(abs_id=bridge_key, sync_mode="audiobook")
     target_book.abs_id = bridge_key
     target_book.abs_title = audio_title or target_book.abs_title or bridge_key
-    target_book.audio_source = "BookLore"
+    target_book.audio_source = audio_source
     target_book.audio_source_id = str(audio_source_id)
     target_book.audio_title = audio_title or target_book.audio_title or target_book.abs_title
-    target_book.audio_cover_url = audio_cover_url or target_book.audio_cover_url or f"/api/booklore/audiobook-cover/{audio_source_id}"
+    target_book.audio_cover_url = audio_cover_url or target_book.audio_cover_url or default_cover
     target_book.audio_duration = audio_duration if audio_duration is not None else target_book.audio_duration
     target_book.audio_provider_book_id = str(audio_provider_book_id or audio_source_id)
     target_book.audio_provider_file_id = str(audio_provider_file_id) if audio_provider_file_id else target_book.audio_provider_file_id
@@ -2607,15 +2665,15 @@ def _create_or_update_booklore_audio_mapping(
             logger.warning(f"Failed to add Storyteller UUID to collection: {st_err}")
 
     shelf_filename = saved_book.original_ebook_filename or saved_book.ebook_filename
-    if (
-        shelf_filename
-        and not _is_storyteller_artifact_filename(shelf_filename)
-        and uc().booklore_client.is_configured()
-    ):
+    if shelf_filename and not _is_storyteller_artifact_filename(shelf_filename):
         try:
-            uc().booklore_client.add_to_shelf(shelf_filename)
-        except Exception as bl_err:
-            logger.warning(f"Failed to add Grimmory shelf entry for '{shelf_filename}': {bl_err}")
+            _shelve_matched_ebook(
+                shelf_filename,
+                ebook_source=saved_book.ebook_source,
+                ebook_source_id=saved_book.ebook_source_id,
+            )
+        except Exception as shelf_err:
+            logger.warning(f"Failed to shelve matched ebook '{shelf_filename}': {shelf_err}")
 
     database_service.dismiss_suggestion(saved_book.abs_id)
     if isinstance(saved_book.kosync_doc_id, str) and saved_book.kosync_doc_id.strip():
@@ -2684,6 +2742,8 @@ def settings():
         bool_keys = [
             'KOSYNC_USE_PERCENTAGE_FROM_SERVER',
             'KOSYNC_AUTO_MAP_ON_AGREEMENT',
+            'KOREADER_ANNOTATION_SYNC',
+            'SYNC_FRESHNESS_GUARDS',
             'SYNC_ABS_EBOOK',
             'XPATH_FALLBACK_TO_PREVIOUS_SEGMENT',
             'KOSYNC_ENABLED',
@@ -2734,7 +2794,8 @@ def settings():
         }
         url_keys = [
             'SHELFMARK_URL', 'ABS_SERVER', 'BOOKLORE_SERVER',
-            'STORYTELLER_API_URL', 'CWA_SERVER', 'KOSYNC_SERVER'
+            'STORYTELLER_API_URL', 'CWA_SERVER', 'KOSYNC_SERVER',
+            'OLLAMA_URL', 'LLM_BASE_URL',
         ]
 
         def _normalized_form_value(key):
@@ -3150,7 +3211,7 @@ def _get_storyteller_display_metadata(storyteller_uuid):
     if not storyteller_uuid:
         return {}
     try:
-        st_client = container.storyteller_client()
+        st_client = uc().storyteller_client
         if not st_client or not st_client.is_configured() or not hasattr(st_client, "get_book_details"):
             return {}
         details = st_client.get_book_details(storyteller_uuid) or {}
@@ -3343,16 +3404,17 @@ def _shelf_watch_clients_for(meta: dict):
     """Resolve (library_client, watch_shelf, kobo_shelf) for a shelf-watch
     suggestion based on its origin source (Grimmory vs BookOrbit)."""
     source = (meta or {}).get('source_name') or 'BookLore'
+    clients = uc()
     if source == 'BookOrbit':
         return (
-            container.bookorbit_client(),
+            clients.bookorbit_client,
             os.environ.get('BOOKORBIT_SHELF_WATCH_NAME', 'Up Next'),
-            os.environ.get('BOOKORBIT_SHELF_NAME', 'Kobo'),
+            user_setting('BOOKORBIT_SHELF_NAME', 'Kobo'),
         )
     return (
-        container.booklore_client(),
+        clients.booklore_client,
         os.environ.get('BOOKLORE_SHELF_WATCH_NAME', 'Up Next'),
-        os.environ.get('BOOKLORE_SHELF_NAME', 'Kobo'),
+        user_setting('BOOKLORE_SHELF_NAME', 'Kobo'),
     )
 
 
@@ -3534,6 +3596,10 @@ def _build_dashboard_mapping(
     elif mapping["audio_source"] == "BookLore":
         mapping["abs_url"] = None
         mapping["audio_url"] = f"{manager.booklore_client.base_url}/book/{mapping['audio_source_id']}?tab=view"
+    elif mapping["audio_source"] == "BookOrbit":
+        mapping["abs_url"] = None
+        _bo_audio_base = (os.environ.get("BOOKORBIT_SERVER") or "").rstrip("/")
+        mapping["audio_url"] = f"{_bo_audio_base}/book/{mapping['audio_source_id']}" if _bo_audio_base else None
     else:
         mapping["abs_url"] = f"{manager.abs_client.base_url}/item/{book.abs_id}"
         mapping["audio_url"] = mapping["abs_url"]
@@ -3583,7 +3649,9 @@ def _build_dashboard_mapping(
         mapping["cover_url"] = mapping["audio_cover_url"]
     elif mapping.get("audio_source") == "BookLore" and mapping.get("audio_source_id"):
         mapping["cover_url"] = f"/api/booklore/audiobook-cover/{mapping['audio_source_id']}"
-    elif book.abs_id and mapping.get("audio_source") != "BookLore":
+    elif mapping.get("audio_source") == "BookOrbit" and mapping.get("audio_source_id"):
+        mapping["cover_url"] = f"/api/bookorbit/audiobook-cover/{mapping['audio_source_id']}"
+    elif book.abs_id and mapping.get("audio_source") not in _LIBRARY_AUDIO_SOURCES:
         mapping["cover_url"] = f"{manager.abs_client.base_url}/api/items/{book.abs_id}/cover?token={manager.abs_client.token}"
 
     reading_stats = reading_stats_by_book.get(book.abs_id)
@@ -3818,6 +3886,30 @@ def forge_search_audio():
             except Exception as e:
                 logger.warning(f"⚠️ Forge audio Grimmory search failed: {e}")
 
+        _bo_client = getattr(clients, "bookorbit_client", None)
+        if _bo_client and _bo_client.is_configured():
+            try:
+                for book in _bo_client.search_audiobooks(query) or []:
+                    book_id = str(book.get("id") or "").strip()
+                    if not book_id:
+                        continue
+                    bridge_key = _build_bridge_key("BookOrbit", book_id)
+                    if bridge_key in found_ids:
+                        continue
+                    found_ids.add(bridge_key)
+                    results.append({
+                        "id": bridge_key,
+                        "audio_source": "BookOrbit",
+                        "audio_source_id": book_id,
+                        "title": book.get("title") or f"BookOrbit {book_id}",
+                        "author": _coerce_author_display(book.get("authors")),
+                        "file_size_mb": round((book.get("total_size_bytes") or 0) / (1024 * 1024), 2),
+                        "num_files": book.get("num_files") or 1,
+                        "cover_url": f"/api/bookorbit/audiobook-cover/{book_id}",
+                    })
+            except Exception as e:
+                logger.warning(f"⚠️ Forge audio BookOrbit search failed: {e}")
+
         all_audiobooks = get_audiobooks_conditionally()
 
         for ab in all_audiobooks:
@@ -4002,9 +4094,14 @@ def forge_process():
         return jsonify({"error": "Missing JSON payload"}), 400
 
     requested_abs_id = data.get('abs_id')
-    audio_source = (data.get('audio_source') or ('BookLore' if str(requested_abs_id or '').startswith('booklore:') else 'ABS')).strip()
+    _requested_key = str(requested_abs_id or '')
+    _inferred_source = next(
+        (src for src in _LIBRARY_AUDIO_SOURCES if _requested_key.startswith(f"{src.lower()}:")),
+        'ABS',
+    )
+    audio_source = (data.get('audio_source') or _inferred_source).strip()
     audio_source_id = str(data.get('audio_source_id') or requested_abs_id or '').strip()
-    if audio_source == "BookLore" and audio_source_id.lower().startswith("booklore:"):
+    if audio_source in _LIBRARY_AUDIO_SOURCES and audio_source_id.lower().startswith(f"{audio_source.lower()}:"):
         audio_source_id = audio_source_id.split(":", 1)[1].strip()
     text_item = data.get('text_item')
     forge_stage_mode = data.get('forge_stage_mode')
@@ -4013,13 +4110,13 @@ def forge_process():
         return jsonify({"error": "Missing text_item"}), 400
     if audio_source == "ABS" and not requested_abs_id:
         return jsonify({"error": "Missing abs_id"}), 400
-    if audio_source == "BookLore" and not audio_source_id:
+    if audio_source in _LIBRARY_AUDIO_SOURCES and not audio_source_id:
         return jsonify({"error": "Missing audio_source_id"}), 400
 
-    abs_id = requested_abs_id if audio_source == "ABS" else _build_bridge_key("BookLore", audio_source_id)
+    abs_id = requested_abs_id if audio_source == "ABS" else _build_bridge_key(audio_source, audio_source_id)
     clients = uc()
 
-    # Get title/author from ABS for folder naming
+    # Get title/author from the audio provider for folder naming
     title = "Unknown"
     author = "Unknown"
     try:
@@ -4038,6 +4135,11 @@ def forge_process():
                     or _coerce_author_display(metadata.get("authors"))
                     or "Unknown"
                 )
+        elif audio_source == "BookOrbit":
+            book_detail = clients.bookorbit_client.get_book_by_id(audio_source_id)
+            if book_detail:
+                title = book_detail.get("title") or f"BookOrbit {audio_source_id}"
+                author = _coerce_author_display(book_detail.get("authors")) or "Unknown"
         else:
             item_details = clients.abs_client.get_item_details(abs_id)
             if item_details:
@@ -4050,8 +4152,8 @@ def forge_process():
     # Start manual forge in service
     try:
         forge_kwargs = {}
-        if audio_source == "BookLore":
-            forge_kwargs["audio_source"] = "BookLore"
+        if audio_source in _LIBRARY_AUDIO_SOURCES:
+            forge_kwargs["audio_source"] = audio_source
             forge_kwargs["audio_source_id"] = audio_source_id
         if forge_stage_mode:
             forge_kwargs["stage_mode"] = forge_stage_mode
@@ -4144,6 +4246,7 @@ def match():
         selected_filename = (request.form.get('ebook_filename') or '').strip() or None
         ebook_source = (request.form.get('ebook_source') or request.form.get('source_type') or '').strip() or None
         ebook_source_id = (request.form.get('ebook_source_id') or request.form.get('source_id') or '').strip() or None
+        source_path = (request.form.get('ebook_source_path') or request.form.get('source_path') or '').strip() or None
         storyteller_uuid = (request.form.get('storyteller_uuid') or '').strip() or None
         forge_stage_mode = (request.form.get('forge_stage_mode') or '').strip() or None
         ebook_filename = selected_filename
@@ -4152,16 +4255,17 @@ def match():
         audiobooks = get_audiobooks_conditionally()
         selected_ab = next((ab for ab in audiobooks if ab['id'] == abs_id), None) if abs_id else None
 
-        if request.form.get('action') == 'forge_match' and audio_source not in ('ABS', 'BookLore'):
-            return "Forge match requires an ABS or Grimmory audiobook", 400
+        if request.form.get('action') == 'forge_match' and audio_source not in ('ABS',) + _LIBRARY_AUDIO_SOURCES:
+            return "Forge match requires an ABS, Grimmory or BookOrbit audiobook", 400
 
         if request.form.get('action') == 'forge_match' and audio_source == 'ABS' and not selected_ab:
             return "Audiobook not found", 404
 
-        if audio_source == 'BookLore' and audio_source_id and request.form.get('action') != 'forge_match':
-            saved_book, err_msg, err_code = _create_or_update_booklore_audio_mapping(
+        if audio_source in _LIBRARY_AUDIO_SOURCES and audio_source_id and request.form.get('action') != 'forge_match':
+            saved_book, err_msg, err_code = _create_or_update_library_audio_mapping(
+                audio_source=audio_source,
                 audio_source_id=audio_source_id,
-                audio_title=audio_title or Path(selected_filename or f"booklore_{audio_source_id}").stem,
+                audio_title=audio_title or Path(selected_filename or f"{audio_source.lower()}_{audio_source_id}").stem,
                 audio_cover_url=audio_cover_url,
                 audio_duration=audio_duration,
                 audio_provider_book_id=audio_provider_book_id,
@@ -4170,6 +4274,7 @@ def match():
                 ebook_source=ebook_source,
                 ebook_source_id=ebook_source_id,
                 storyteller_uuid=storyteller_uuid,
+                ebook_source_path=source_path,
             )
             if err_msg:
                 return err_msg, err_code
@@ -4230,22 +4335,27 @@ def match():
                 return "Original ebook filename required for forge match", 400
 
             source_type = request.form.get('source_type')
-            source_path = request.form.get('source_path')
+            source_path = request.form.get('source_path') or source_path
             source_id = request.form.get('source_id')
             text_item = _build_forge_text_item(source_type, source_id, source_path, original_filename)
             normalized_source_type = text_item.get("source")
 
             initial_booklore_id = source_id if normalized_source_type == 'Booklore' else None
-            kosync_doc_id = get_kosync_id_for_ebook(original_filename, initial_booklore_id)
+            kosync_doc_id = get_kosync_id_for_ebook(
+                original_filename,
+                initial_booklore_id,
+                bookorbit_id=source_id if normalized_source_type == 'BookOrbit' else None,
+                source_path=source_path,
+            )
 
             if not kosync_doc_id:
                 logger.warning(f"Could not compute ID for original '{original_filename}'")
 
             from src.db.models import Book
 
-            if audio_source == 'BookLore':
-                forge_title = audio_title or Path(selected_filename or f"booklore_{audio_source_id}").stem
-                forge_id = _build_bridge_key('BookLore', audio_source_id)
+            if audio_source in _LIBRARY_AUDIO_SOURCES:
+                forge_title = audio_title or Path(selected_filename or f"{audio_source.lower()}_{audio_source_id}").stem
+                forge_id = _build_bridge_key(audio_source, audio_source_id)
                 book = Book(
                     abs_id=forge_id,
                     abs_title=forge_title,
@@ -4254,7 +4364,7 @@ def match():
                     kosync_doc_id=kosync_doc_id or f"forging_{forge_id}",
                     status="forging",
                     duration=audio_duration or 0.0,
-                    audio_source='BookLore',
+                    audio_source=audio_source,
                     audio_source_id=audio_source_id,
                     audio_provider_book_id=audio_provider_book_id,
                     audio_provider_file_id=audio_provider_file_id,
@@ -4274,7 +4384,7 @@ def match():
                     author=None,
                     original_filename=original_filename,
                     original_hash=kosync_doc_id,
-                    audio_source='BookLore',
+                    audio_source=audio_source,
                     audio_source_id=audio_source_id,
                     **({"stage_mode": forge_stage_mode} if forge_stage_mode else {}),
                     **_client_bundle_kwargs(clients),
@@ -4307,7 +4417,7 @@ def match():
                     **_client_bundle_kwargs(clients),
                 )
 
-            forge_book_id = forge_id if audio_source == 'BookLore' else abs_id
+            forge_book_id = forge_id if audio_source in _LIBRARY_AUDIO_SOURCES else abs_id
             database_service.dismiss_suggestion(forge_book_id)
             if kosync_doc_id:
                 database_service.dismiss_suggestion(kosync_doc_id)
@@ -4361,6 +4471,7 @@ def match():
                 ebook_filename,
                 booklore_id,
                 bookorbit_id=ebook_source_id if ebook_source == 'BookOrbit' else None,
+                source_path=source_path,
             )
 
         if not kosync_doc_id:
@@ -4595,9 +4706,9 @@ def _process_forge_only_queue(queue_items, forge_stage_mode=None):
             source_path = str(resolved_path) if resolved_path else ''
         text_item = _build_forge_text_item(source_type, source_id, source_path, original_filename)
 
-        if audio_source == 'BookLore':
+        if audio_source in _LIBRARY_AUDIO_SOURCES:
             audio_source_id = (item.get('audio_source_id') or '').strip()
-            abs_id = _build_bridge_key('BookLore', audio_source_id)
+            abs_id = _build_bridge_key(audio_source, audio_source_id)
         else:
             audio_source = 'ABS'
             abs_id = item.get('abs_id')
@@ -4617,6 +4728,11 @@ def _process_forge_only_queue(queue_items, forge_stage_mode=None):
                         or _coerce_author_display(metadata.get('authors'))
                         or author
                     )
+            elif audio_source == 'BookOrbit':
+                book_detail = clients.bookorbit_client.get_book_by_id(audio_source_id)
+                if book_detail:
+                    title = book_detail.get('title') or title
+                    author = _coerce_author_display(book_detail.get('authors')) or author
             else:
                 item_details = clients.abs_client.get_item_details(abs_id)
                 if item_details:
@@ -4627,8 +4743,8 @@ def _process_forge_only_queue(queue_items, forge_stage_mode=None):
             logger.warning("Forge only: metadata lookup failed for '%s': %s", sanitize_log_data(abs_id), e)
 
         forge_kwargs = {}
-        if audio_source == 'BookLore':
-            forge_kwargs['audio_source'] = 'BookLore'
+        if audio_source in _LIBRARY_AUDIO_SOURCES:
+            forge_kwargs['audio_source'] = audio_source
             forge_kwargs['audio_source_id'] = audio_source_id
         if forge_stage_mode:
             forge_kwargs['stage_mode'] = forge_stage_mode
@@ -4655,8 +4771,9 @@ def _process_batch_queue(queue_items):
             _create_ebook_only_mapping_from_queue_item(item)
             continue
         audio_source = item.get('audio_source') or 'ABS'
-        if audio_source == 'BookLore':
-            saved_book, err_msg, _err_code = _create_or_update_booklore_audio_mapping(
+        if audio_source in _LIBRARY_AUDIO_SOURCES:
+            saved_book, err_msg, _err_code = _create_or_update_library_audio_mapping(
+                audio_source=audio_source,
                 audio_source_id=item.get('audio_source_id'),
                 audio_title=item.get('audio_title'),
                 audio_cover_url=item.get('audio_cover_url'),
@@ -4667,10 +4784,12 @@ def _process_batch_queue(queue_items):
                 ebook_source=item.get('ebook_source'),
                 ebook_source_id=item.get('ebook_source_id'),
                 storyteller_uuid=item.get('storyteller_uuid'),
+                ebook_source_path=item.get('ebook_source_path'),
             )
             if err_msg:
                 logger.warning(
-                    "⚠️ Batch Match skipped Grimmory audiobook '%s': %s",
+                    "⚠️ Batch Match skipped %s audiobook '%s': %s",
+                    _audio_source_display_name(audio_source),
                     sanitize_log_data(item.get('audio_title') or item.get('audio_source_id')),
                     err_msg,
                 )
@@ -4723,6 +4842,7 @@ def _process_batch_queue(queue_items):
                 ebook_filename,
                 booklore_id,
                 bookorbit_id=item.get('ebook_source_id') if _item_ebook_source == 'BookOrbit' else None,
+                source_path=item.get('ebook_source_path'),
             )
 
         if not kosync_doc_id:
@@ -4813,8 +4933,9 @@ def _process_forge_match_queue(queue_items):
 
         # If Storyteller is selected, keep the current direct-match path.
         if storyteller_uuid:
-            if audio_source == 'BookLore':
-                saved_book, err_msg, _err_code = _create_or_update_booklore_audio_mapping(
+            if audio_source in _LIBRARY_AUDIO_SOURCES:
+                saved_book, err_msg, _err_code = _create_or_update_library_audio_mapping(
+                    audio_source=audio_source,
                     audio_source_id=item.get('audio_source_id'),
                     audio_title=item.get('audio_title'),
                     audio_cover_url=item.get('audio_cover_url'),
@@ -4825,10 +4946,12 @@ def _process_forge_match_queue(queue_items):
                     ebook_source=item.get('ebook_source'),
                     ebook_source_id=item.get('ebook_source_id'),
                     storyteller_uuid=storyteller_uuid,
+                    ebook_source_path=item.get('ebook_source_path'),
                 )
                 if err_msg:
                     logger.warning(
-                        "Batch Forge skipped Grimmory audiobook '%s': %s",
+                        "Batch Forge skipped %s audiobook '%s': %s",
+                        _audio_source_display_name(audio_source),
                         sanitize_log_data(item.get('audio_title') or item.get('audio_source_id')),
                         err_msg,
                     )
@@ -4979,7 +5102,12 @@ def _process_forge_match_queue(queue_items):
 
         text_item = _build_forge_text_item(source_type, source_id, source_path, original_filename)
         initial_booklore_id = source_id if text_item.get('source') == 'Booklore' else None
-        kosync_doc_id = get_kosync_id_for_ebook(original_filename, initial_booklore_id)
+        kosync_doc_id = get_kosync_id_for_ebook(
+            original_filename,
+            initial_booklore_id,
+            bookorbit_id=source_id if text_item.get('source') == 'BookOrbit' else None,
+            source_path=source_path,
+        )
         if not kosync_doc_id:
             logger.warning(
                 "Batch Forge: Could not compute KOSync ID for '%s', continuing with forge fallback hash",
@@ -4990,13 +5118,14 @@ def _process_forge_match_queue(queue_items):
         if audio_duration is None:
             audio_duration = _parse_audio_duration(item.get('duration'))
 
-        if audio_source == 'BookLore':
+        if audio_source in _LIBRARY_AUDIO_SOURCES:
             audio_source_id = (item.get('audio_source_id') or '').strip()
-            forge_id = _build_bridge_key('BookLore', audio_source_id)
+            forge_id = _build_bridge_key(audio_source, audio_source_id)
             if not forge_id:
                 logger.warning(
-                    "Batch Forge skipped '%s': missing Grimmory source id",
+                    "Batch Forge skipped '%s': missing %s source id",
                     sanitize_log_data(item.get('audio_title') or item.get('abs_title') or item.get('abs_id')),
+                    _audio_source_display_name(audio_source),
                 )
                 continue
 
@@ -5009,7 +5138,7 @@ def _process_forge_match_queue(queue_items):
                 kosync_doc_id=kosync_doc_id or f"forging_{forge_id}",
                 status="forging",
                 duration=audio_duration or 0.0,
-                audio_source='BookLore',
+                audio_source=audio_source,
                 audio_source_id=audio_source_id,
                 audio_provider_book_id=item.get('audio_provider_book_id') or audio_source_id,
                 audio_provider_file_id=item.get('audio_provider_file_id'),
@@ -5030,7 +5159,7 @@ def _process_forge_match_queue(queue_items):
                 author=None,
                 original_filename=original_filename,
                 original_hash=kosync_doc_id,
-                audio_source='BookLore',
+                audio_source=audio_source,
                 audio_source_id=audio_source_id,
                 **_client_bundle_kwargs(clients),
             )
@@ -5121,12 +5250,12 @@ def _add_book_view(template_name, self_endpoint):
                     'audio_provider_book_id': abs_id,
                     'audio_provider_file_id': None,
                 }
-            elif audio_source == 'BookLore' and audio_source_id:
+            elif audio_source in _LIBRARY_AUDIO_SOURCES and audio_source_id:
                 selected_audio = {
-                    'bridge_key': _build_bridge_key('BookLore', audio_source_id),
-                    'audio_source': 'BookLore',
+                    'bridge_key': _build_bridge_key(audio_source, audio_source_id),
+                    'audio_source': audio_source,
                     'audio_source_id': audio_source_id,
-                    'audio_title': audio_title or f"Grimmory {audio_source_id}",
+                    'audio_title': audio_title or f"{_audio_source_display_name(audio_source)} {audio_source_id}",
                     'audio_duration': audio_duration,
                     'audio_cover_url': audio_cover_url,
                     'audio_provider_book_id': audio_provider_book_id,
@@ -5161,7 +5290,9 @@ def _add_book_view(template_name, self_endpoint):
                     "duration": selected_audio['audio_duration'],
                     "cover_url": selected_audio['audio_cover_url'],
                 })
-            return redirect(url_for(self_endpoint, search=request.form.get('search', '')))
+            # Clear the search box + results after queueing so the user starts the
+            # next book from a clean search (drop the preserved `search` term).
+            return redirect(url_for(self_endpoint))
         elif action == 'remove_from_queue':
             abs_id = request.form.get('abs_id')
             _match_queue_remove(abs_id)
@@ -5293,11 +5424,38 @@ def _start_suggestions_scan_job(cached_suggestions_by_abs=None, cached_no_match_
             "updated_at": time.time(),
         }
 
-    threading.Thread(
-        target=_run_suggestions_scan_job,
-        args=(job_id, cached_suggestions_by_abs or {}, cached_no_match_abs_ids or []),
-        daemon=True
-    ).start()
+    bundle = uc()
+    try:
+        user = current_user()
+        user_id = user.id if user is not None else None
+    except Exception:
+        user_id = None
+    if user_id is None:
+        try:
+            user_id = get_current_user_id()
+        except Exception:
+            user_id = None
+    creds = get_current_user_credentials()
+
+    def runner():
+        tok_bundle = _active_bundle.set(bundle)
+        tok_uid = set_current_user_id(user_id)
+        tok_creds = set_current_user_credentials(creds)
+        try:
+            _run_suggestions_scan_job(
+                job_id,
+                cached_suggestions_by_abs or {},
+                cached_no_match_abs_ids or [],
+            )
+        finally:
+            reset_current_user_credentials(tok_creds)
+            reset_current_user_id(tok_uid)
+            _active_bundle.reset(tok_bundle)
+
+    if _BACKGROUND_TASKS_SYNCHRONOUS:
+        runner()
+    else:
+        threading.Thread(target=runner, daemon=True, name="suggestions-scan").start()
     return job_id
 
 
@@ -5419,8 +5577,22 @@ def _get_suggestions_state(create=True):
         return state_id, state
 
 
-def _suggestions_cache_file_path():
-    return DATA_DIR / SUGGESTIONS_CACHE_FILE_NAME
+def _suggestions_cache_scope_key(user_id=None):
+    if user_id is None:
+        try:
+            user_id = get_current_user_id()
+        except Exception:
+            user_id = None
+    if user_id is None:
+        return "global"
+    return f"user_{re.sub(r'[^A-Za-z0-9_.-]+', '_', str(user_id))}"
+
+
+def _suggestions_cache_file_path(user_id=None):
+    scope = _suggestions_cache_scope_key(user_id)
+    if scope == "global":
+        return DATA_DIR / SUGGESTIONS_CACHE_FILE_NAME
+    return DATA_DIR / f"suggestions_scan_cache_{scope}.json"
 
 
 def _empty_suggestions_cache_payload():
@@ -5668,7 +5840,7 @@ def suggestions_page():
                 audio_source = (
                     request.form.get('audio_source')
                     or (current_entry.get('audio_source') if current_entry else '')
-                    or ('BookLore' if bridge_key.startswith('booklore:') else 'ABS')
+                    or _audio_source_from_bridge_key(bridge_key)
                 ).strip() or 'ABS'
                 abs_title = (
                     request.form.get('audio_title')
@@ -5720,7 +5892,7 @@ def suggestions_page():
             bridge_key = (request.form.get('audiobook_id') or '').strip()
             audio_source = (
                 request.form.get('audio_source')
-                or ('BookLore' if bridge_key.startswith('booklore:') else ('ABS' if bridge_key else ''))
+                or _audio_source_from_bridge_key(bridge_key)
             ).strip() or None
             audio_source_id = (request.form.get('audio_source_id') or bridge_key).strip() or None
             audio_title = (request.form.get('audio_title') or '').strip() or None
@@ -5738,8 +5910,11 @@ def suggestions_page():
             if audio_source == 'ABS' and audio_source_id:
                 selected_ab = None
                 if not audio_title or audio_duration is None:
-                    abs_items = container.abs_client().get_all_audiobooks()
+                    abs_client = uc().abs_client
+                    abs_items = abs_client.get_all_audiobooks()
                     selected_ab = next((ab for ab in abs_items if str(ab.get('id')) == audio_source_id), None)
+                else:
+                    abs_client = uc().abs_client
 
                 resolved_title = audio_title or (manager.get_abs_title(selected_ab) if selected_ab else '') or audio_source_id
                 resolved_duration = audio_duration if audio_duration is not None else (
@@ -5747,7 +5922,7 @@ def suggestions_page():
                 )
                 resolved_cover = (
                     audio_cover_url
-                    or f"{container.abs_client().base_url}/api/items/{audio_source_id}/cover?token={container.abs_client().token}"
+                    or f"{abs_client.base_url}/api/items/{audio_source_id}/cover?token={abs_client.token}"
                 )
                 selected_audio = {
                     'bridge_key': bridge_key or audio_source_id,
@@ -5759,12 +5934,12 @@ def suggestions_page():
                     'audio_provider_book_id': audio_provider_book_id or audio_source_id,
                     'audio_provider_file_id': audio_provider_file_id,
                 }
-            elif audio_source == 'BookLore' and audio_source_id:
+            elif audio_source in _LIBRARY_AUDIO_SOURCES and audio_source_id:
                 selected_audio = {
-                    'bridge_key': bridge_key or _build_bridge_key('BookLore', audio_source_id),
-                    'audio_source': 'BookLore',
+                    'bridge_key': bridge_key or _build_bridge_key(audio_source, audio_source_id),
+                    'audio_source': audio_source,
                     'audio_source_id': audio_source_id,
-                    'audio_title': audio_title or f"Grimmory {audio_source_id}",
+                    'audio_title': audio_title or f"{_audio_source_display_name(audio_source)} {audio_source_id}",
                     'audio_duration': audio_duration,
                     'audio_cover_url': audio_cover_url,
                     'audio_provider_book_id': audio_provider_book_id,
@@ -5816,10 +5991,12 @@ def suggestions_page():
         elif action == 'process_queue':
             from src.db.models import Book
 
+            clients = uc()
             for item in _load_match_queue():
                 audio_source = item.get('audio_source') or 'ABS'
-                if audio_source == 'BookLore':
-                    saved_book, err_msg, _err_code = _create_or_update_booklore_audio_mapping(
+                if audio_source in _LIBRARY_AUDIO_SOURCES:
+                    saved_book, err_msg, _err_code = _create_or_update_library_audio_mapping(
+                        audio_source=audio_source,
                         audio_source_id=item.get('audio_source_id'),
                         audio_title=item.get('audio_title'),
                         audio_cover_url=item.get('audio_cover_url'),
@@ -5830,16 +6007,18 @@ def suggestions_page():
                         ebook_source=item.get('ebook_source'),
                         ebook_source_id=item.get('ebook_source_id'),
                         storyteller_uuid=item.get('storyteller_uuid'),
+                        ebook_source_path=item.get('ebook_source_path'),
                     )
                     if err_msg:
                         logger.warning(
-                            "Suggestions skipped Grimmory audiobook '%s': %s",
+                            "Suggestions skipped %s audiobook '%s': %s",
+                            _audio_source_display_name(audio_source),
                             sanitize_log_data(item.get('audio_title') or item.get('audio_source_id')),
                             err_msg,
                         )
                     elif saved_book:
                         # Approving a shelf-watch suggestion needs the Up Next
-                        # leg of the shelf move; _create_or_update_booklore_audio_mapping
+                        # leg of the shelf move; _create_or_update_library_audio_mapping
                         # only adds to Kobo, it does not remove from Up Next.
                         try:
                             sw_pending = database_service.get_pending_suggestion(item.get('audio_source_id') or saved_book.abs_id)
@@ -5892,12 +6071,16 @@ def suggestions_page():
                         logger.error(f"Storyteller Tri-Link failed for '{item['abs_title']}': {e}")
                         continue
                 else:
-                    if container.booklore_client().is_configured():
-                        book = container.booklore_client().find_book_by_filename(ebook_filename)
+                    if clients.booklore_client.is_configured():
+                        book = clients.booklore_client.find_book_by_filename(ebook_filename)
                         if book:
                             booklore_id = book.get('id')
 
-                    kosync_doc_id = get_kosync_id_for_ebook(ebook_filename, booklore_id)
+                    kosync_doc_id = get_kosync_id_for_ebook(
+                        ebook_filename,
+                        booklore_id,
+                        source_path=item.get('ebook_source_path'),
+                    )
 
                 if not kosync_doc_id:
                     logger.warning(f"Could not compute KOSync ID for {sanitize_log_data(ebook_filename)}, skipping")
@@ -5908,7 +6091,7 @@ def suggestions_page():
                     logger.info(f"Preserving existing hash '{current_book_entry.kosync_doc_id}' for '{item['abs_id']}' instead of new hash '{kosync_doc_id}'")
                     kosync_doc_id = current_book_entry.kosync_doc_id
 
-                item_details = container.abs_client().get_item_details(item['abs_id'])
+                item_details = clients.abs_client.get_item_details(item['abs_id'])
                 chapters = item_details.get('media', {}).get('chapters', []) if item_details else []
                 storyteller_manifest = ingest_storyteller_transcripts(
                     item['abs_id'],
@@ -5940,10 +6123,10 @@ def suggestions_page():
 
                 database_service.save_book(book)
 
-                _enqueue_tracker_automatch(container.sync_clients(), book)
+                _enqueue_tracker_automatch(clients.sync_clients, book)
 
                 if not str(item['abs_id']).startswith('booklore:'):
-                    container.abs_client().add_to_collection(item['abs_id'], user_setting("ABS_COLLECTION_NAME", "Synced with KOReader"))
+                    clients.abs_client.add_to_collection(item['abs_id'], user_setting("ABS_COLLECTION_NAME", "Synced with KOReader"))
 
                 # If this suggestion originated from the shelf-watch flow, do a full
                 # shelf MOVE (Up Next -> Kobo) rather than just an add. The origin
@@ -5969,12 +6152,12 @@ def suggestions_page():
                             )
                     except Exception as bl_err:
                         logger.warning(f"Shelf-watch approval move failed: {bl_err}")
-                elif container.booklore_client().is_configured():
+                elif clients.booklore_client.is_configured():
                     shelf_filename = original_ebook_filename or ebook_filename
-                    container.booklore_client().add_to_shelf(shelf_filename, BOOKLORE_SHELF_NAME)
-                if container.storyteller_client().is_configured():
+                    clients.booklore_client.add_to_shelf(shelf_filename, user_setting("BOOKLORE_SHELF_NAME", "Kobo"))
+                if clients.storyteller_client.is_configured():
                     if book.storyteller_uuid:
-                        container.storyteller_client().add_to_collection_by_uuid(book.storyteller_uuid)
+                        clients.storyteller_client.add_to_collection_by_uuid(book.storyteller_uuid)
 
                 database_service.dismiss_suggestion(item['abs_id'])
                 database_service.dismiss_suggestion(kosync_doc_id)
@@ -6114,7 +6297,7 @@ def suggestions_page():
     removed_duplicate_keys = []
     for item in scan_results:
         suggestion_key = (item.get('bridge_key') or item.get('abs_id') or '').strip()
-        source = (item.get('audio_source') or ('BookLore' if suggestion_key.startswith('booklore:') else 'ABS')).strip().lower()
+        source = (item.get('audio_source') or _audio_source_from_bridge_key(suggestion_key) or 'ABS').strip().lower()
         title = _normalize_suggestion_identity_part(item.get('audio_title') or item.get('abs_title'))
         author = _normalize_suggestion_identity_part(item.get('audio_author') or item.get('abs_author'))
         if not title:
@@ -6155,7 +6338,7 @@ def suggestions_page():
         scan_in_progress=scan_in_progress,
         scan_error=scan_error,
         scan_stats=suggestions_state.get('scan_last_stats', {}),
-        storyteller_enabled=bool(container.storyteller_client().is_configured()),
+        storyteller_enabled=bool(uc().storyteller_client.is_configured()),
     )
 
 
@@ -6188,6 +6371,7 @@ def cleanup_mapping_resources(book):
     """Delete external artifacts and membership data for a mapped book."""
     if not book:
         return
+    clients = uc()
 
     if book.transcript_file:
         try:
@@ -6232,8 +6416,8 @@ def cleanup_mapping_resources(book):
                 continue
             seen_dirs.add(cache_dir_key)
 
-            cached_path = cache_dir_path / book.ebook_filename
-            if cached_path.exists():
+            cached_path = safe_cache_path(cache_dir_path, book.ebook_filename)
+            if cached_path and cached_path.exists():
                 try:
                     cached_path.unlink()
                     logger.info(f"🗑️ Deleted cached ebook file: {book.ebook_filename}")
@@ -6251,7 +6435,7 @@ def cleanup_mapping_resources(book):
     if is_abs_backed:
         collection_name = user_setting('ABS_COLLECTION_NAME', 'Synced with KOReader')
         try:
-            container.abs_client().remove_from_collection(book.abs_id, collection_name)
+            clients.abs_client.remove_from_collection(book.abs_id, collection_name)
         except Exception as e:
             logger.warning(f"⚠️ Failed to remove from ABS collection: {e}")
     else:
@@ -6267,7 +6451,7 @@ def cleanup_mapping_resources(book):
     if storyteller_uuid:
         storyteller_collection_name = os.environ.get('STORYTELLER_COLLECTION_NAME', 'Synced with KOReader')
         try:
-            st_client = container.storyteller_client()
+            st_client = clients.storyteller_client
             if hasattr(st_client, 'remove_from_collection_by_uuid'):
                 removed = st_client.remove_from_collection_by_uuid(storyteller_uuid, storyteller_collection_name)
                 if not removed:
@@ -6282,18 +6466,18 @@ def cleanup_mapping_resources(book):
         is_bookorbit = (getattr(book, 'ebook_source', None) or '').strip().lower() == 'bookorbit'
         try:
             if is_bookorbit:
-                client = container.bookorbit_client()
+                client = clients.bookorbit_client
                 if client.is_configured():
-                    shelf_name = (os.environ.get('BOOKORBIT_SHELF_NAME') or 'Kobo').strip()
+                    shelf_name = (user_setting('BOOKORBIT_SHELF_NAME', 'Kobo') or 'Kobo').strip()
                     ebook_source_id = getattr(book, 'ebook_source_id', None)
                     if ebook_source_id and hasattr(client, 'remove_book_id_from_shelf'):
                         client.remove_book_id_from_shelf(ebook_source_id, shelf_name)
                     else:
                         client.remove_from_shelf(shelf_filename, shelf_name)
             else:
-                client = container.booklore_client()
+                client = clients.booklore_client
                 if client.is_configured():
-                    shelf_name = os.environ.get('BOOKLORE_SHELF_NAME', 'Kobo')
+                    shelf_name = user_setting('BOOKLORE_SHELF_NAME', 'Kobo')
                     client.remove_from_shelf(shelf_filename, shelf_name)
         except Exception as e:
             logger.warning(f"⚠️ Failed to remove from {'BookOrbit' if is_bookorbit else 'Grimmory'} shelf: {e}")
@@ -6320,6 +6504,190 @@ def _forbidden_book_response(json_response: bool = False):
     if json_response or _request_wants_json():
         return jsonify({"success": False, "error": message}), 403
     return (message, 403)
+
+
+def _current_user_claimed_abs_ids(user) -> set:
+    if current_app.config.get('LOGIN_DISABLED'):
+        return {
+            getattr(book, "abs_id", None)
+            for book in database_service.get_all_books()
+            if getattr(book, "abs_id", None)
+        }
+    if user is None:
+        return set()
+    try:
+        return set(database_service.get_linked_abs_ids(user.id) or set())
+    except Exception:
+        return set()
+
+
+def _kosync_document_visible_to_user(doc, user, claimed_abs_ids: set) -> bool:
+    if doc is None:
+        return False
+    if current_app.config.get('LOGIN_DISABLED'):
+        return True
+    if user is None:
+        return False
+    if getattr(doc, "user_id", None) == user.id:
+        return True
+    linked_abs_id = getattr(doc, "linked_abs_id", None)
+    return bool(linked_abs_id and linked_abs_id in claimed_abs_ids)
+
+
+def _book_claimed_by_current_scope(abs_id: str) -> bool:
+    if current_app.config.get('LOGIN_DISABLED'):
+        return True
+    user = current_user()
+    if user is None or not abs_id:
+        return False
+    try:
+        return database_service.is_user_linked(user.id, abs_id)
+    except Exception:
+        return False
+
+
+def _serialize_kosync_document_for_ui(doc, linked_book=None) -> dict:
+    return {
+        "document_hash": doc.document_hash,
+        "progress": doc.progress,
+        "percentage": float(doc.percentage) if doc.percentage else 0,
+        "device": doc.device,
+        "device_id": doc.device_id,
+        "timestamp": doc.timestamp.isoformat() if doc.timestamp else None,
+        "first_seen": doc.first_seen.isoformat() if doc.first_seen else None,
+        "last_updated": doc.last_updated.isoformat() if doc.last_updated else None,
+        "linked_abs_id": doc.linked_abs_id,
+        "linked_book_title": linked_book.abs_title if linked_book else None,
+        "filename": doc.filename,
+        "source": doc.source,
+        "owned_by_current_user": bool(
+            current_app.config.get('LOGIN_DISABLED')
+            or (current_user() is not None and doc.user_id == current_user().id)
+        ),
+    }
+
+
+def api_me_kosync_documents():
+    """User-scoped KOSync document list for the dashboard modal."""
+    user = current_user()
+    claimed_abs_ids = _current_user_claimed_abs_ids(user)
+    visible_docs = []
+    for doc in database_service.get_all_kosync_documents():
+        if not _kosync_document_visible_to_user(doc, user, claimed_abs_ids):
+            continue
+        linked_book = database_service.get_book(doc.linked_abs_id) if doc.linked_abs_id else None
+        visible_docs.append(_serialize_kosync_document_for_ui(doc, linked_book=linked_book))
+
+    return jsonify({
+        "documents": visible_docs,
+        "total": len(visible_docs),
+        "linked": sum(1 for d in visible_docs if d["linked_abs_id"]),
+        "unlinked": sum(1 for d in visible_docs if not d["linked_abs_id"]),
+    })
+
+
+def api_me_books():
+    """Return current user's claimed BookBridge books as KOSync link targets."""
+    user = current_user()
+    if current_app.config.get('LOGIN_DISABLED'):
+        books = database_service.get_all_books()
+    elif user is None:
+        books = []
+    else:
+        books = database_service.get_all_books(user_id=user.id)
+
+    result = []
+    for book in books or []:
+        result.append({
+            "abs_id": book.abs_id,
+            "title": book.abs_title,
+            "author": getattr(book, "audio_title", None) or "",
+            "ebook_filename": book.ebook_filename,
+            "kosync_doc_id": book.kosync_doc_id,
+        })
+    result.sort(key=lambda b: (b.get("title") or "").lower())
+    return jsonify({"books": result, "total": len(result)})
+
+
+def _get_visible_kosync_document_or_response(doc_hash: str):
+    doc = database_service.get_kosync_document(doc_hash)
+    if not doc:
+        return None, (jsonify({"success": False, "error": "This KOSync document is no longer available."}), 404)
+    user = current_user()
+    claimed_abs_ids = _current_user_claimed_abs_ids(user)
+    if not _kosync_document_visible_to_user(doc, user, claimed_abs_ids):
+        return None, (jsonify({"success": False, "error": "You do not have permission to change this document."}), 403)
+    return doc, None
+
+
+def api_me_link_kosync_document(doc_hash):
+    """Link a visible device hash to one of the current user's claimed books."""
+    doc, error = _get_visible_kosync_document_or_response(doc_hash)
+    if error:
+        return error
+
+    data = request.get_json(silent=True) or {}
+    abs_id = str(data.get("abs_id") or "").strip()
+    if not abs_id:
+        return jsonify({"success": False, "error": "Missing book selection."}), 400
+
+    book = database_service.get_book(abs_id)
+    if not book:
+        return jsonify({"success": False, "error": "That book is not in your library."}), 404
+
+    if not _book_claimed_by_current_scope(abs_id):
+        return jsonify({"success": False, "error": "That book is not in your library."}), 403
+
+    success = database_service.link_kosync_document(doc.document_hash, abs_id)
+    if not success:
+        return jsonify({"success": False, "error": "Could not link this KOSync document."}), 500
+
+    database_service.dismiss_suggestion(doc.document_hash)
+    linked = database_service.get_kosync_document(doc.document_hash)
+    return jsonify({
+        "success": True,
+        "message": f"Linked to {book.abs_title}",
+        "document": _serialize_kosync_document_for_ui(linked, linked_book=book),
+    })
+
+
+def api_me_unlink_kosync_document(doc_hash):
+    """Clear the book link for a visible KOSync document."""
+    doc, error = _get_visible_kosync_document_or_response(doc_hash)
+    if error:
+        return error
+    if not doc.linked_abs_id:
+        return jsonify({"success": True, "message": "Document is already unlinked."})
+    if not _book_claimed_by_current_scope(doc.linked_abs_id):
+        return jsonify({"success": False, "error": "You do not have permission to change this document."}), 403
+
+    success = database_service.unlink_kosync_document(doc.document_hash)
+    if not success:
+        return jsonify({"success": False, "error": "Could not unlink this KOSync document."}), 500
+    updated = database_service.get_kosync_document(doc.document_hash)
+    return jsonify({
+        "success": True,
+        "message": "Document unlinked.",
+        "document": _serialize_kosync_document_for_ui(updated),
+    })
+
+
+def api_me_delete_kosync_document(doc_hash):
+    """Delete an unlinked KOSync document owned by the current user."""
+    doc, error = _get_visible_kosync_document_or_response(doc_hash)
+    if error:
+        return error
+    if doc.linked_abs_id:
+        return jsonify({"success": False, "error": "Unlink this document before deleting it."}), 400
+    if not current_app.config.get('LOGIN_DISABLED'):
+        user = current_user()
+        if user is None or doc.user_id != user.id:
+            return jsonify({"success": False, "error": "You do not have permission to delete this document."}), 403
+
+    success = database_service.delete_kosync_document(doc.document_hash)
+    if not success:
+        return jsonify({"success": False, "error": "Could not delete this KOSync document."}), 500
+    return jsonify({"success": True, "message": "Document deleted."})
 
 
 def _delete_or_unlink_book(user, abs_id, book) -> None:
@@ -6466,8 +6834,9 @@ def update_hash(abs_id):
         target_filename = book.original_ebook_filename or book.ebook_filename
         
         booklore_id = None
-        if container.booklore_client().is_configured():
-            bl_book = container.booklore_client().find_book_by_filename(target_filename)
+        booklore_client = uc().booklore_client
+        if booklore_client.is_configured():
+            bl_book = booklore_client.find_book_by_filename(target_filename)
             if bl_book:
                 booklore_id = bl_book.get('id')
 
@@ -6586,7 +6955,7 @@ def api_storyteller_link(abs_id):
 
         if previous_storyteller_uuid:
             try:
-                st_client = container.storyteller_client()
+                st_client = uc().storyteller_client
                 if hasattr(st_client, 'remove_from_collection_by_uuid'):
                     storyteller_collection_name = os.environ.get('STORYTELLER_COLLECTION_NAME', 'Synced with KOReader')
                     removed = st_client.remove_from_collection_by_uuid(previous_storyteller_uuid, storyteller_collection_name)
@@ -7349,6 +7718,16 @@ def logs_view():
     return render_template('logs.html', embed=embed)
 
 
+def _tail_text_lines(path: Path, max_lines: int) -> list[str]:
+    if max_lines <= 0:
+        return []
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            return list(deque(f, maxlen=max_lines))
+    except OSError:
+        return []
+
+
 def api_logs():
     """API endpoint for fetching logs with filtering and pagination."""
     try:
@@ -7366,19 +7745,18 @@ def api_logs():
 
         # Read current log file
         if LOG_PATH and LOG_PATH.exists():
-            with open(LOG_PATH, 'r', encoding='utf-8') as f:
-                all_lines.extend(f.readlines())
+            all_lines.extend(_tail_text_lines(LOG_PATH, lines_count))
 
         # Read backup files if needed (for more history)
         if LOG_PATH and lines_count > len(all_lines):
             for i in range(1, 6):  # Check up to 5 backup files
                 backup_path = Path(str(LOG_PATH) + f'.{i}')
                 if backup_path.exists():
-                    with open(backup_path, 'r', encoding='utf-8') as f:
-                        backup_lines = f.readlines()
-                        all_lines = backup_lines + all_lines
-                        if len(all_lines) >= lines_count:
-                            break
+                    remaining = lines_count - len(all_lines)
+                    backup_lines = _tail_text_lines(backup_path, remaining)
+                    all_lines = backup_lines + all_lines
+                    if len(all_lines) >= lines_count:
+                        break
 
         # Parse and filter logs
         log_levels = {
@@ -7673,8 +8051,8 @@ def _run_storyteller_backfill():
                 if ebook_parser and book.ebook_filename:
                     try:
                         epub_filename = book.original_ebook_filename or book.ebook_filename
-                        epub_path = container.epub_cache_dir() / epub_filename
-                        if epub_path.exists():
+                        epub_path = safe_cache_path(container.epub_cache_dir(), epub_filename)
+                        if epub_path and epub_path.exists():
                             book_text, _ = ebook_parser.extract_text_and_map(epub_path)
                     except Exception as e:
                         logger.warning(f"Could not extract text for storyteller backfill: {e}")
@@ -7948,6 +8326,24 @@ def proxy_booklore_audiobook_cover(book_id):
         return "Error loading cover", 500
 
 
+def proxy_bookorbit_audiobook_cover(book_id):
+    """Stream a BookOrbit book cover through the backend."""
+    client = uc().bookorbit_client
+    if not client or not client.is_configured():
+        return "BookOrbit not configured", 400
+
+    try:
+        content, content_type = client.get_cover_bytes(book_id)
+        if not content:
+            return "Cover not found", 404
+        from flask import Response
+
+        return Response(content, content_type=content_type or "image/jpeg")
+    except Exception as e:
+        logger.error(f"❌ Error proxying BookOrbit cover for '{book_id}': {e}")
+        return "Error loading cover", 500
+
+
 def api_booklore_refresh():
     """Clear Grimmory cache and trigger a full refresh."""
     client = container.booklore_client()
@@ -8093,8 +8489,13 @@ def _run_test_connection(service: str, payload: dict):
             _coerce_test_bool(data.get('TELEGRAM_ENABLED')),
             _coerce_test_str(data.get('TELEGRAM_BOT_TOKEN')),
         ),
-        'ollama': lambda data: _test_ollama(
+        'ollama': lambda data: _test_llm_provider(
             _coerce_test_bool(data.get('OLLAMA_ENABLED')),
+            _coerce_test_str(data.get('LLM_PROVIDER')) or 'ollama',
+            _normalize_test_url(data.get('LLM_BASE_URL')),
+            _coerce_test_str(data.get('LLM_API_KEY')),
+            _coerce_test_str(data.get('LLM_EMBED_MODEL')),
+            _coerce_test_str(data.get('LLM_CHAT_MODEL')),
             _normalize_test_url(data.get('OLLAMA_URL')),
             _coerce_test_str(data.get('OLLAMA_EMBED_MODEL')),
             _coerce_test_str(data.get('OLLAMA_CHAT_MODEL')),
@@ -8112,6 +8513,68 @@ def _run_test_connection(service: str, payload: dict):
 def test_connection(service: str):
     """Test connectivity with diagnostic error messages."""
     return _run_test_connection(service, request.get_json(silent=True) or {})
+
+
+def _test_llm_provider(
+    enabled: bool,
+    provider: str,
+    base_url: str,
+    api_key: str,
+    embed_model: str,
+    chat_model: str,
+    ollama_url: str,
+    ollama_embed_model: str,
+    ollama_chat_model: str,
+) -> dict:
+    provider = (provider or "ollama").strip().lower()
+    if provider in {"openai-compatible", "openai_compat", "llama", "llama-server", "llama_swap", "llama-swap"}:
+        provider = "openai_compatible"
+    if provider == "ollama":
+        return _test_ollama(
+            enabled,
+            ollama_url,
+            embed_model or ollama_embed_model,
+            chat_model or ollama_chat_model,
+        )
+    if not enabled:
+        return {"ok": False, "message": "LLM provider is disabled"}
+    if provider == "openai":
+        base_url = base_url or "https://api.openai.com/v1"
+        api_key = api_key or os.environ.get("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            return {"ok": False, "message": "Missing OpenAI API key"}
+        embed_model = embed_model or "text-embedding-3-small"
+        chat_model = chat_model or "gpt-4o-mini"
+    elif provider == "openai_compatible":
+        if not base_url:
+            return {"ok": False, "message": "Missing OpenAI-compatible base URL"}
+        if not embed_model or not chat_model:
+            return {"ok": False, "message": "Missing embedding or chat model name"}
+    else:
+        return {"ok": False, "message": f"Unknown LLM provider: {provider}"}
+    return _test_openai_compatible(provider, base_url, api_key, embed_model, chat_model)
+
+
+def _test_openai_compatible(provider: str, base_url: str, api_key: str, embed_model: str, chat_model: str) -> dict:
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    r = requests.get(f"{base_url.rstrip('/')}/models", headers=headers, timeout=10)
+    if r.status_code != 200:
+        label = "OpenAI" if provider == "openai" else "OpenAI-compatible endpoint"
+        return {"ok": False, "message": f"{label} returned HTTP {r.status_code}"}
+    models = [m.get("id", "") for m in (r.json() or {}).get("data", []) if isinstance(m, dict) and m.get("id")]
+    missing = [m for m in (embed_model, chat_model) if models and m not in models]
+    if missing:
+        details = ", ".join(missing)
+        return {
+            "ok": False,
+            "message": f"Connected, but configured model(s) were not listed by /models: {details}",
+        }
+    return {
+        "ok": True,
+        "message": f"Connected. {embed_model} embeddings ready, {chat_model} judge ready",
+    }
 
 
 def _test_ollama(enabled: bool, url: str, embed_model: str, chat_model: str) -> dict:
@@ -8291,17 +8754,27 @@ def _test_storyteller(enabled: bool, url: str, user: str, pwd: str) -> dict:
         return {"ok": False, "message": "Storyteller is disabled"}
     if not url or not user or not pwd:
         return {"ok": False, "message": "Missing URL, username, or password"}
-    r = requests.post(
-        f"{url}/api/token",
-        data={"username": user, "password": pwd},
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=10,
-    )
-    if r.status_code == 200:
-        return {"ok": True, "message": "Authenticated successfully"}
-    if r.status_code in (401, 403, 422):
+    responses = []
+    for endpoint, payload in (
+        ("/api/v2/token", {"usernameOrEmail": user, "password": pwd}),
+        ("/api/token", {"username": user, "password": pwd}),
+    ):
+        r = requests.post(
+            f"{url}{endpoint}",
+            data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=10,
+        )
+        responses.append(r.status_code)
+        if r.status_code == 200:
+            return {"ok": True, "message": "Authenticated successfully"}
+        if r.status_code in (401, 403):
+            return {"ok": False, "message": "Invalid username or password"}
+        if r.status_code not in (400, 404, 405, 422):
+            break
+    if any(status == 422 for status in responses):
         return {"ok": False, "message": "Invalid username or password"}
-    return {"ok": False, "message": f"Login returned {r.status_code}"}
+    return {"ok": False, "message": f"Login returned {responses[-1]}"}
 
 
 def _test_booklore(enabled: bool, url: str, user: str, pwd: str) -> dict:
@@ -8582,6 +9055,11 @@ def create_app(test_container=None):
     app.add_url_rule('/clear-progress/<abs_id>', 'clear_progress', clear_progress, methods=['POST'])
     app.add_url_rule('/api/sync-now/<abs_id>', 'sync_now', sync_now, methods=['POST'])
     app.add_url_rule('/api/mark-complete/<abs_id>', 'mark_complete', mark_complete, methods=['POST'])
+    app.add_url_rule('/api/me/kosync-documents', 'api_me_kosync_documents', api_me_kosync_documents, methods=['GET'])
+    app.add_url_rule('/api/me/kosync-documents/<doc_hash>/link', 'api_me_link_kosync_document', api_me_link_kosync_document, methods=['POST'])
+    app.add_url_rule('/api/me/kosync-documents/<doc_hash>/unlink', 'api_me_unlink_kosync_document', api_me_unlink_kosync_document, methods=['POST'])
+    app.add_url_rule('/api/me/kosync-documents/<doc_hash>', 'api_me_delete_kosync_document', api_me_delete_kosync_document, methods=['DELETE'])
+    app.add_url_rule('/api/me/books', 'api_me_books', api_me_books, methods=['GET'])
     app.add_url_rule('/update-hash/<abs_id>', 'update_hash', update_hash, methods=['POST'])
     app.add_url_rule('/covers/<path:filename>', 'serve_cover', serve_cover)
     app.add_url_rule('/api/health', 'api_health', api_health)
@@ -8608,6 +9086,7 @@ def create_app(test_container=None):
     app.add_url_rule('/api/cache/clean', 'clean_cache', clean_inactive_cache, methods=['POST'])
     app.add_url_rule('/api/cover-proxy/<abs_id>', 'proxy_cover', proxy_cover)
     app.add_url_rule('/api/booklore/audiobook-cover/<book_id>', 'proxy_booklore_audiobook_cover', proxy_booklore_audiobook_cover, methods=['GET'])
+    app.add_url_rule('/api/bookorbit/audiobook-cover/<book_id>', 'proxy_bookorbit_audiobook_cover', proxy_bookorbit_audiobook_cover, methods=['GET'])
     app.add_url_rule('/api/booklore/libraries', 'get_booklore_libraries', get_booklore_libraries, methods=['GET'])
     app.add_url_rule('/api/booklore/shelves', 'get_booklore_shelves', get_booklore_shelves, methods=['GET'])
     app.add_url_rule('/api/abs/libraries', 'get_abs_libraries', get_abs_libraries, methods=['GET'])
@@ -8706,11 +9185,49 @@ if __name__ == '__main__':
     poller_thread = threading.Thread(target=client_poller.start, daemon=True)
     poller_thread.start()
 
+    # Annotation hub — BookOrbit spoke: relay highlights between devices and
+    # BookOrbit's web reader for users with BOOKORBIT_KOSYNC_* creds configured.
+    try:
+        from src.services.annotation_sync_service import AnnotationSyncService, run_annotation_sync_daemon
+
+        def _annotation_sync_interval():
+            intervals = []
+            try:
+                bookorbit_interval = int(os.environ.get("BOOKORBIT_ANNOTATION_SYNC_MINUTES", "15") or 0)
+                if bookorbit_interval > 0:
+                    intervals.append(bookorbit_interval)
+            except (TypeError, ValueError):
+                pass
+            try:
+                booklore_interval = int(os.environ.get("BOOKLORE_ANNOTATION_SYNC_MINUTES", "15") or 0)
+                if booklore_interval > 0:
+                    intervals.append(booklore_interval)
+            except (TypeError, ValueError):
+                pass
+            return min(intervals) if intervals else 0
+
+        annotation_sync_service = AnnotationSyncService(
+            database_service,
+            ebook_parser=container.ebook_parser(),
+            epub_cache_dir=container.epub_cache_dir(),
+        )
+        threading.Thread(
+            target=run_annotation_sync_daemon,
+            args=(annotation_sync_service, _annotation_sync_interval),
+            daemon=True,
+            name="annotation-sync",
+        ).start()
+    except Exception as exc:
+        logger.warning("Annotation sync daemon failed to start: %s", exc)
+
     # Re-attach Forge & Match completion watchers orphaned by a restart. The
     # banner/card survive in the DB (status='forging'), but the polling thread
-    # that finalizes the forge does not, so resume it here.
+    # that finalizes the forge does not, so resume it here. The registry lets
+    # each book resume on its owner's clients (multi-user), not just the admin's.
     try:
-        container.forge_service().resume_pending_forge_matches()
+        container.forge_service().resume_pending_forge_matches(
+            user_client_registry=container.user_client_registry()
+        )
     except Exception as exc:
         logger.warning("Forge & Match: resume on startup failed: %s", exc)
 

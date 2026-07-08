@@ -45,5 +45,20 @@ class TestABSEbookSyncClient(unittest.TestCase):
 
         mock_record_write.assert_not_called()
 
+    def test_participates_in_both_audiobook_and_ebook_modes(self):
+        # Regression for issue #300: combined audiobook+ebook entries sync in
+        # 'audiobook' mode, so the client must advertise 'audiobook' too or it is
+        # excluded from every combined match and ABS ebook progress never syncs.
+        self.assertEqual(
+            self.client.get_supported_sync_types(), {'audiobook', 'ebook'}
+        )
+
+    def test_get_service_state_none_when_item_has_no_ebook_progress(self):
+        # Natural gate that makes participation in audiobook mode safe: an ABS item
+        # with no ebookProgress (e.g. audio-only, ebook hosted elsewhere) yields no
+        # state, so sync_manager drops the client from that book entirely.
+        self.mock_abs_client.get_progress.return_value = {'progress': 0.3}
+        self.assertIsNone(self.client.get_service_state(self.book, None))
+
 if __name__ == '__main__':
     unittest.main()

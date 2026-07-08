@@ -7,6 +7,24 @@ local socketutil = require("socketutil")
 
 local KOSYNC_ACCEPT = "application/vnd.koreader.v1+json"
 
+-- A JSON null decodes to a non-nil sentinel (a function/userdata in KOReader's
+-- json lib), which is truthy and, if it reaches a KOReader annotation field,
+-- crashes rendering ("attempt to concatenate a function value"). Recursively
+-- drop anything that isn't a string/number/boolean/table so absent optional
+-- fields read as nil.
+local function scrubJsonNulls(value)
+    local t = type(value)
+    if t == "table" then
+        for k, v in pairs(value) do
+            value[k] = scrubJsonNulls(v)
+        end
+        return value
+    elseif t == "string" or t == "number" or t == "boolean" then
+        return value
+    end
+    return nil
+end
+
 local APIClient = {
     server_url = "",
     username = "",
@@ -315,6 +333,37 @@ function APIClient:uploadStatistics(payload)
         total_timeout = 90,
         attempts = 2,
     })
+end
+
+function APIClient:exchangeAnnotations(payload)
+    local body = json.encode(payload)
+    local ok, code, resp_body = self:_requestJSON("POST", "/koreader/device-sync/annotations/exchange", body, {
+        block_timeout = 30,
+        total_timeout = 90,
+        attempts = 2,
+    })
+    if not ok then
+        return false, resp_body or ("HTTP " .. tostring(code))
+    end
+    local parsed, result = pcall(json.decode, resp_body or "{}")
+    if not parsed or type(result) ~= "table" then
+        logger.warn("Bridge Sync API: Invalid annotation exchange JSON")
+        return false, "Invalid annotation exchange response"
+    end
+    return true, scrubJsonNulls(result)
+end
+
+function APIClient:ackAnnotations(payload)
+    local body = json.encode(payload)
+    local ok, code, resp_body = self:_requestJSON("POST", "/koreader/device-sync/annotations/exchange-ack", body, {
+        block_timeout = 20,
+        total_timeout = 60,
+        attempts = 2,
+    })
+    if not ok then
+        return false, resp_body or ("HTTP " .. tostring(code))
+    end
+    return true
 end
 
 local function _urlencode(value)

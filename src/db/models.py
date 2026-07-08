@@ -5,7 +5,7 @@ SQLAlchemy ORM models for abs-kosync-bridge database.
 import logging
 import os
 
-from sqlalchemy import create_engine, Column, Integer, String, Float, Text, DateTime, ForeignKey, Numeric, Index
+from sqlalchemy import create_engine, Column, Integer, String, Float, Text, DateTime, ForeignKey, Numeric, Index, Boolean, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
@@ -300,13 +300,22 @@ class State(Base):
     timestamp = Column(Float)
     xpath = Column(Text)
     cfi = Column(Text)
+    # Rich progress metadata (capture-only; see src/utils/progress_metadata.py).
+    # service_updated_at = when the REMOTE SERVICE says the position changed
+    # (epoch seconds), not when the bridge observed it.
+    service_updated_at = Column(Float, nullable=True)
+    status = Column(String(32), nullable=True)
+    locator_source = Column(String(32), nullable=True)
+    locator_json = Column(Text, nullable=True)
 
     # Relationship
     book = relationship("Book", back_populates="states")
 
     def __init__(self, abs_id: str, client_name: str, last_updated: float = None,
                  percentage: float = None, timestamp: float = None,
-                 xpath: str = None, cfi: str = None, user_id: int = None):
+                 xpath: str = None, cfi: str = None, user_id: int = None,
+                 service_updated_at: float = None, status: str = None,
+                 locator_source: str = None, locator_json: str = None):
         self.abs_id = abs_id
         self.client_name = client_name
         self.user_id = user_id
@@ -315,6 +324,10 @@ class State(Base):
         self.timestamp = timestamp
         self.xpath = xpath
         self.cfi = cfi
+        self.service_updated_at = service_updated_at
+        self.status = status
+        self.locator_source = locator_source
+        self.locator_json = locator_json
 
     def __repr__(self):
         return f"<State(abs_id='{self.abs_id}', client='{self.client_name}', pct={self.percentage})>"
@@ -529,6 +542,10 @@ class KOReaderBookStat(Base):
     total_read_time = Column(Integer, nullable=True)
     last_updated = Column(DateTime, default=utcnow, onupdate=utcnow, index=True)
 
+    __table_args__ = (
+        UniqueConstraint('md5', 'user_id', 'device_key', name='uq_koreader_book_stats_md5_user_device_key'),
+    )
+
     def __init__(
         self,
         md5: str,
@@ -575,6 +592,10 @@ class KOReaderPageStat(Base):
     total_pages = Column(Integer, nullable=True)
     uploaded_at = Column(DateTime, default=utcnow)
 
+    __table_args__ = (
+        UniqueConstraint('md5', 'user_id', 'device_key', 'page', 'start_time', name='uq_koreader_page_stats_user_replay'),
+    )
+
     def __init__(
         self,
         md5: str,
@@ -597,6 +618,115 @@ class KOReaderPageStat(Base):
         self.duration = duration
         self.total_pages = total_pages
         self.uploaded_at = utcnow()
+
+
+class KoreaderAnnotation(Base):
+    """
+    Canonical highlight/annotation store for the device+web annotation hub.
+
+    One row per highlight, keyed by (user, document md5, ann_key). Anchors are
+    KOReader-native xpointers plus the highlighted text (the text is the
+    re-anchoring fallback when EPUB builds differ between devices/servers —
+    position repair happens on the consumers, never here). ``version`` bumps on
+    every content change so per-device ack state can compute adds/edits;
+    deletions are tombstones so they propagate to every device before cleanup.
+    """
+    __tablename__ = 'koreader_annotations'
+    __table_args__ = (
+        UniqueConstraint('md5', 'user_id', 'ann_key', name='uq_koreader_annotation_identity'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    md5 = Column(String(32), nullable=False, index=True)      # KOSync partial-md5 doc hash
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
+    ann_key = Column(String(32), nullable=False, index=True)  # md5(datetime|pos0) exchange key
+    datetime = Column(String(19), nullable=False)             # KOReader identity "YYYY-MM-DD HH:MM:SS"
+    datetime_updated = Column(String(19), nullable=True)
+    pos_format = Column(String(16), nullable=False, default='xpointer')
+    pos0 = Column(String(4000), nullable=False)
+    pos1 = Column(String(4000), nullable=True)
+    drawer = Column(String(16), nullable=True)                # lighten/underscore/strikeout/invert
+    color = Column(String(30), nullable=True)
+    text = Column(Text, nullable=True)
+    note = Column(Text, nullable=True)
+    chapter = Column(String(500), nullable=True)
+    pageno = Column(Integer, nullable=True)
+    source_device = Column(String(128), nullable=True)        # device_key or 'bookorbit'
+    version = Column(Integer, nullable=False, default=1)
+    deleted = Column(Boolean, nullable=False, default=False)
+    deleted_at = Column(DateTime, nullable=True)
+    # BookOrbit spoke bookkeeping (which server row mirrors this annotation)
+    bookorbit_server_id = Column(Integer, nullable=True, index=True)
+    bookorbit_version = Column(Integer, nullable=True)
+    bookorbit_synced_at = Column(DateTime, nullable=True)
+    # Grimmory / BookLore spoke bookkeeping
+    booklore_server_id = Column(Integer, nullable=True, index=True)
+    booklore_version = Column(Integer, nullable=True)
+    booklore_synced_at = Column(DateTime, nullable=True)
+    # Grimmory reader-note (book_notes_v2) id — a separate remote store with its
+    # own id space; a row mirrors at most one of annotations/notes per field.
+    booklore_note_id = Column(Integer, nullable=True, index=True)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, index=True)
+
+    def __init__(self, md5: str, ann_key: str, datetime: str, pos0: str,
+                 user_id: int = None, datetime_updated: str = None,
+                 pos_format: str = 'xpointer', pos1: str = None,
+                 drawer: str = None, color: str = None, text: str = None,
+                 note: str = None, chapter: str = None, pageno: int = None,
+                 source_device: str = None, version: int = 1,
+                 bookorbit_server_id: int = None, bookorbit_version: int = None,
+                 booklore_server_id: int = None, booklore_version: int = None):
+        self.md5 = md5
+        self.user_id = user_id
+        self.ann_key = ann_key
+        self.datetime = datetime
+        self.datetime_updated = datetime_updated
+        self.pos_format = pos_format
+        self.pos0 = pos0
+        self.pos1 = pos1
+        self.drawer = drawer
+        self.color = color
+        self.text = text
+        self.note = note
+        self.chapter = chapter
+        self.pageno = pageno
+        self.source_device = source_device
+        self.version = version
+        self.deleted = False
+        self.bookorbit_server_id = bookorbit_server_id
+        self.bookorbit_version = bookorbit_version
+        self.booklore_server_id = booklore_server_id
+        self.booklore_version = booklore_version
+        self.created_at = utcnow()
+        self.updated_at = utcnow()
+
+
+class KoreaderAnnotationDeviceState(Base):
+    """
+    Per-device delivery state for the annotation hub: which annotation version
+    (and tombstone) each device has acknowledged, so the exchange can compute
+    add/edit/delete deltas per device without re-sending everything.
+    """
+    __tablename__ = 'koreader_annotation_device_state'
+    __table_args__ = (
+        UniqueConstraint('annotation_id', 'device_key', name='uq_koreader_annotation_device'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    annotation_id = Column(Integer, ForeignKey('koreader_annotations.id'), nullable=False, index=True)
+    device_key = Column(String(128), nullable=False, index=True)
+    acked_version = Column(Integer, nullable=False, default=0)
+    ack_deleted = Column(Boolean, nullable=False, default=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    def __init__(self, annotation_id: int, device_key: str,
+                 acked_version: int = 0, ack_deleted: bool = False):
+        self.annotation_id = annotation_id
+        self.device_key = device_key
+        self.acked_version = acked_version
+        self.ack_deleted = ack_deleted
+        self.updated_at = utcnow()
 
 
 class BookloreBook(Base):

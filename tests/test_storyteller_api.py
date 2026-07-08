@@ -2,6 +2,7 @@ import base64
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -9,6 +10,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.api.storyteller_api import StorytellerAPIClient
+from src.sync_clients.sync_client_interface import LocatorResult
 
 
 @patch.dict(
@@ -260,6 +262,183 @@ class TestStorytellerIsConfigured(unittest.TestCase):
                 "STORYTELLER_PASSWORD": "p",
             })
             self.assertTrue(client.is_configured())
+
+
+class TestStorytellerAuthCompatibility(unittest.TestCase):
+    def test_get_fresh_token_uses_v2_username_or_email_endpoint_first(self):
+        client = StorytellerAPIClient(credentials={
+            "STORYTELLER_API_URL": "http://storyteller:8001",
+            "STORYTELLER_USER": "reader",
+            "STORYTELLER_PASSWORD": "secret",
+        })
+
+        with patch("src.api.storyteller_api.requests.post") as mock_post:
+            mock_post.return_value = Mock(
+                status_code=200,
+                json=Mock(return_value={
+                    "access_token": "token-v2",
+                    "expires_in": 3_600_000,
+                }),
+            )
+
+            token = client._get_fresh_token()
+
+        self.assertEqual(token, "token-v2")
+        self.assertEqual(mock_post.call_args.args[0], "http://storyteller:8001/api/v2/token")
+        self.assertEqual(
+            mock_post.call_args.kwargs["data"],
+            {"usernameOrEmail": "reader", "password": "secret"},
+        )
+        self.assertGreater(client._token_expire_timestamp, time.time())
+
+    def test_get_fresh_token_falls_back_to_legacy_token_endpoint(self):
+        client = StorytellerAPIClient(credentials={
+            "STORYTELLER_API_URL": "http://storyteller:8001",
+            "STORYTELLER_USER": "reader",
+            "STORYTELLER_PASSWORD": "secret",
+        })
+
+        with patch("src.api.storyteller_api.requests.post") as mock_post:
+            mock_post.side_effect = [
+                Mock(status_code=404),
+                Mock(
+                    status_code=200,
+                    json=Mock(return_value={
+                        "access_token": "token-legacy",
+                        "expires_in": 3_600_000,
+                    }),
+                ),
+            ]
+
+            token = client._get_fresh_token()
+
+        self.assertEqual(token, "token-legacy")
+        self.assertEqual(mock_post.call_args_list[0].args[0], "http://storyteller:8001/api/v2/token")
+        self.assertEqual(mock_post.call_args_list[1].args[0], "http://storyteller:8001/api/token")
+        self.assertEqual(
+            mock_post.call_args_list[1].kwargs["data"],
+            {"username": "reader", "password": "secret"},
+        )
+
+
+class TestStorytellerPositionPayloadCompatibility(unittest.TestCase):
+    def setUp(self):
+        self.client = StorytellerAPIClient(credentials={
+            "STORYTELLER_API_URL": "http://storyteller:8001",
+            "STORYTELLER_USER": "reader",
+            "STORYTELLER_PASSWORD": "secret",
+        })
+
+    def test_position_payload_parses_current_v2_readium_locator(self):
+        with patch.object(self.client, "_make_request") as mock_request:
+            mock_request.return_value = Mock(
+                status_code=200,
+                json=Mock(return_value={
+                    "timestamp": 1_782_861_600_000,
+                    "locator": {
+                        "href": "text/chapter01.xhtml",
+                        "type": "application/xhtml+xml",
+                        "locations": {
+                            "totalProgression": 0.42,
+                            "progression": 0.5,
+                            "fragments": ["frag-1"],
+                            "position": "12",
+                            "partialCfi": "/4/2/8",
+                            "cssSelector": "p:nth-child(3)",
+                        },
+                    },
+                }),
+            )
+
+            payload = self.client.get_position_details_payload("book-uuid")
+
+        self.assertEqual(payload["pct"], 0.42)
+        self.assertEqual(payload["ts"], 1_782_861_600_000)
+        self.assertEqual(payload["href"], "text/chapter01.xhtml")
+        self.assertEqual(payload["fragment"], "frag-1")
+        self.assertEqual(payload["chapter_progress"], 0.5)
+        self.assertEqual(payload["position"], 12)
+        self.assertEqual(payload["cfi"], "/4/2/8")
+        self.assertEqual(payload["css_selector"], "p:nth-child(3)")
+
+    def test_position_payload_accepts_nested_position_envelope_and_percent_number(self):
+        with patch.object(self.client, "_make_request") as mock_request:
+            mock_request.return_value = Mock(
+                status_code=200,
+                json=Mock(return_value={
+                    "position": {
+                        "updatedAt": "2026-07-06T20:00:00Z",
+                        "percentage": 37.5,
+                        "locator": {
+                            "href": "audio/track01.mp3",
+                            "type": "audio/mpeg",
+                            "locations": {"fragments": "t=120"},
+                        },
+                    },
+                }),
+            )
+
+            payload = self.client.get_position_details_payload("book-uuid")
+
+        self.assertEqual(payload["pct"], 0.375)
+        self.assertEqual(payload["fragment"], "t=120")
+        self.assertGreater(payload["ts"], 0)
+
+
+class TestStorytellerPositionPostCompatibility(unittest.TestCase):
+    def setUp(self):
+        self.client = StorytellerAPIClient(credentials={
+            "STORYTELLER_API_URL": "http://storyteller:8001",
+            "STORYTELLER_USER": "reader",
+            "STORYTELLER_PASSWORD": "secret",
+        })
+
+    def test_build_position_payload_matches_v2_position_contract(self):
+        locator = LocatorResult(
+            percentage=0.42,
+            href="text/chapter01.xhtml",
+            fragment="frag-1",
+            cfi="/4/2/8",
+            css_selector="p:nth-child(3)",
+            chapter_progress=0.5,
+        )
+
+        payload = self.client._build_position_payload(
+            "book-uuid",
+            0.42,
+            locator,
+        )
+
+        self.assertNotIn("uuid", payload)
+        self.assertIsInstance(payload["timestamp"], int)
+        self.assertEqual(payload["locator"]["href"], "text/chapter01.xhtml")
+        self.assertEqual(payload["locator"]["type"], "application/xhtml+xml")
+        self.assertEqual(payload["locator"]["locations"]["totalProgression"], 0.42)
+        self.assertEqual(payload["locator"]["locations"]["progression"], 0.5)
+        self.assertEqual(payload["locator"]["locations"]["fragments"], ["frag-1"])
+        self.assertEqual(payload["locator"]["locations"]["partialCfi"], "/4/2/8")
+        self.assertNotIn("cfi", payload["locator"]["locations"])
+
+    def test_update_position_posts_v2_position_contract(self):
+        locator = LocatorResult(
+            percentage=0.64,
+            href="text/chapter02.xhtml",
+            fragment="frag-2",
+            cfi="/4/2/10",
+            chapter_progress=0.75,
+        )
+
+        with patch.object(self.client, "_make_request") as mock_request:
+            mock_request.return_value = Mock(status_code=204)
+
+            ok = self.client.update_position("book-uuid", 0.64, locator)
+
+        self.assertTrue(ok)
+        method, endpoint, payload = mock_request.call_args.args
+        self.assertEqual(method, "POST")
+        self.assertEqual(endpoint, "/api/v2/books/book-uuid/positions")
+        self.assertNotIn("uuid", payload)
+        self.assertEqual(payload["locator"]["locations"]["partialCfi"], "/4/2/10")
 
 
 if __name__ == "__main__":

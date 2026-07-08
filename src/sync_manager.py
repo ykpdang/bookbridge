@@ -44,11 +44,13 @@ from src.utils.user_context import (
 )
 from src.utils.storyteller_transcript import StorytellerTranscript
 # Logging utilities (placed at top to ensure availability during sync)
+from src.utils.cache_paths import safe_cache_path
 from src.utils.logging_utils import sanitize_log_data
+from src.utils.progress_metadata import state_metadata_kwargs
 
 # [NEW] Service Imports
 from src.services.alignment_service import AlignmentService, ingest_storyteller_transcripts
-from src.services.audio_source_adapters import ABSAudioSourceAdapter, BookLoreAudioSourceAdapter
+from src.services.audio_source_adapters import ABSAudioSourceAdapter, BookLoreAudioSourceAdapter, BookOrbitAudioSourceAdapter
 from src.services.library_service import LibraryService
 from src.services.migration_service import MigrationService
 
@@ -269,6 +271,8 @@ class SyncManager:
         source = self._get_audio_source_name(book)
         if source == "BookLore":
             return "BookLoreAudio"
+        if source == "BookOrbit":
+            return "BookOrbitAudio"
         if source == "ABS":
             return "ABS"
         return None
@@ -278,6 +282,22 @@ class SyncManager:
         if not source:
             return None
         return self.active_audio_source_adapters.get(source)
+
+    @staticmethod
+    def _freshness_guards_enabled() -> bool:
+        """Kill switch for the Phase 2 freshness guards (staleness suppression +
+        rollback veto). Read per call so the settings UI applies immediately."""
+        return os.environ.get("SYNC_FRESHNESS_GUARDS", "true").strip().lower() in ("true", "1", "yes", "on")
+
+    @staticmethod
+    def _rollback_veto_tolerance_seconds() -> float:
+        """How much newer a peer's service timestamp must be before a behind
+        candidate is vetoed. Generous by default to absorb clock skew between
+        services — this is a veto threshold, not an arbitration signal."""
+        try:
+            return float(os.environ.get("SYNC_ROLLBACK_VETO_SECONDS", "600") or 600)
+        except (TypeError, ValueError):
+            return 600.0
 
     def _build_text_anchors(self, full_text: str, char_offset: int):
         if not full_text:
@@ -519,6 +539,13 @@ class SyncManager:
         if booklore_client is not None:
             adapters["BookLore"] = BookLoreAudioSourceAdapter(
                 booklore_client,
+                self.data_dir or Path("/data"),
+            )
+
+        bookorbit_client = getattr(bundle, "bookorbit_client", None)
+        if bookorbit_client is not None:
+            adapters["BookOrbit"] = BookOrbitAudioSourceAdapter(
+                bookorbit_client,
                 self.data_dir or Path("/data"),
             )
         return adapters
@@ -858,6 +885,15 @@ class SyncManager:
                 try:
                     state = future.result()
                     if state is not None:
+                        # Stamp the previously persisted service timestamp so the
+                        # freshness guards can ask "does the service itself say the
+                        # position changed since we last saved it?" — a same-clock
+                        # comparison, immune to cross-service clock skew. Private
+                        # key: excluded from locator_json persistence.
+                        prev_state = prev_states_by_client.get(client_name.lower())
+                        state.current['_service_prev_updated_at'] = getattr(
+                            prev_state, 'service_updated_at', None
+                        )
                         config[client_name] = state
                 except Exception as e:
                     logger.warning(f"⚠️ '{client_name}' state fetch failed: {e}")
@@ -886,7 +922,10 @@ class SyncManager:
         
         # Check persistent EPUB cache
         self.epub_cache_dir.mkdir(parents=True, exist_ok=True)
-        cached_path = self.epub_cache_dir / ebook_filename
+        cached_path = safe_cache_path(self.epub_cache_dir, ebook_filename)
+        if cached_path is None:
+            logger.warning("Refusing unsafe EPUB cache filename '%s'", sanitize_log_data(ebook_filename))
+            return None
         if cached_path.exists():
             logger.info(f"🔍 Found EPUB in cache: '{cached_path}'")
             return cached_path
@@ -2050,6 +2089,57 @@ class SyncManager:
                 vals[client_name] = locator_pct
                 clients_with_delta.pop(client_name, None)
 
+        # Freshness guards (rich progress metadata, Phase 2). Both only shrink
+        # the candidate set — a guarded client still participates as a follower
+        # and in furthest-wins fallbacks — and both no-op without timestamps.
+        if self._freshness_guards_enabled():
+            # Guard 1 — staleness suppression: the service's own clock says this
+            # position hasn't changed since we last persisted it, so the "delta"
+            # is a stale value re-surfacing (e.g. a static sibling-hash reading),
+            # not fresh movement. Same-clock comparison; skew-free.
+            for client_name in list(clients_with_delta.keys()):
+                current = config[client_name].current
+                fresh_ts = current.get('service_updated_at')
+                prev_ts = current.get('_service_prev_updated_at')
+                if fresh_ts is None or prev_ts is None:
+                    continue
+                if fresh_ts <= prev_ts:
+                    logger.info(
+                        f"⏸️ '{abs_id}' '{title_snip}' Suppressing '{client_name}' delta: "
+                        f"service reports no position change since last sync "
+                        f"(service_updated_at unchanged at {fresh_ts:.0f})"
+                    )
+                    clients_with_delta.pop(client_name, None)
+
+            # Guard 2 — rollback veto: a candidate sitting materially BEHIND a
+            # peer whose position the service stamped materially NEWER cannot
+            # lead (it would roll the true position back). The generous time
+            # tolerance absorbs cross-service clock skew; a genuine re-read has
+            # a fresh timestamp and passes. Forward movement is never vetoed.
+            veto_tolerance = self._rollback_veto_tolerance_seconds()
+            regression_margin = getattr(self, "sync_delta_between_clients", 0.005)
+            for client_name in list(clients_with_delta.keys()):
+                candidate_pct = vals.get(client_name)
+                candidate_ts = config[client_name].current.get('service_updated_at')
+                if candidate_pct is None or candidate_ts is None:
+                    continue
+                for other_name, other_pct in vals.items():
+                    if other_name == client_name or other_pct is None:
+                        continue
+                    other_ts = config[other_name].current.get('service_updated_at')
+                    if other_ts is None:
+                        continue
+                    if (other_pct > candidate_pct + regression_margin
+                            and (other_ts - candidate_ts) > veto_tolerance):
+                        logger.info(
+                            f"🛑 '{abs_id}' '{title_snip}' Rollback veto: '{client_name}' "
+                            f"({candidate_pct:.2%}) is behind '{other_name}' ({other_pct:.2%}) "
+                            f"whose position is {other_ts - candidate_ts:.0f}s newer "
+                            f"(> {veto_tolerance:.0f}s tolerance) — not eligible to lead"
+                        )
+                        clients_with_delta.pop(client_name, None)
+                        break
+
         leader = None
         leader_pct = None
 
@@ -2265,6 +2355,7 @@ class SyncManager:
                 timestamp=state_current.get('ts'),
                 xpath=state_current.get('xpath'),
                 cfi=state_current.get('cfi'),
+                **state_metadata_kwargs(state_current),
             ))
         except Exception as e:
             logger.debug(f"Could not persist state snapshot for '{client_name}': {e}")
@@ -2896,7 +2987,8 @@ class SyncManager:
                     percentage=leader_state_data.get('pct'),
                     timestamp=leader_state_data.get('ts'),
                     xpath=leader_state_data.get('xpath'),
-                    cfi=leader_state_data.get('cfi')
+                    cfi=leader_state_data.get('cfi'),
+                    **state_metadata_kwargs(leader_state_data),
                 )
                 self.database_service.save_state(leader_state_model)
 
@@ -2913,7 +3005,8 @@ class SyncManager:
                             percentage=state_data.get('pct'),
                             timestamp=state_data.get('ts'),
                             xpath=state_data.get('xpath'),
-                            cfi=state_data.get('cfi')
+                            cfi=state_data.get('cfi'),
+                            **state_metadata_kwargs(state_data),
                         )
                         self.database_service.save_state(client_state_model)
 
@@ -2950,7 +3043,10 @@ class SyncManager:
                     os.environ.get("BOOKORBIT_READING_SESSIONS", "true").strip().lower() in ("true", "1", "yes", "on")
                     and bookorbit_client
                     and bookorbit_client.is_configured()
-                    and getattr(book, "ebook_source", None) == "BookOrbit"
+                    and (
+                        getattr(book, "ebook_source", None) == "BookOrbit"
+                        or getattr(book, "audio_source", None) == "BookOrbit"
+                    )
                     and leader_pct != leader_state.previous_pct
                     and leader.lower() != 'kosync'  # kosync_server handles KOSync->BookOrbit
                 ):
@@ -3165,14 +3261,11 @@ class SyncManager:
         current_time: float,
     ) -> None:
         """Record a reading session to BookOrbit when progress changes on a
-        BookOrbit-hosted ebook. The session is logged against the BookOrbit book
-        (ebook_source_id); audio-leader sessions fall back to the ebook file."""
+        BookOrbit-hosted ebook or audiobook. Audio-leader sessions are logged
+        against the BookOrbit audiobook when the audio is BookOrbit-hosted,
+        falling back to the ebook's BookOrbit id otherwise."""
         bookorbit_client = self.active_bookorbit_client
         if not bookorbit_client:
-            return
-
-        book_id = getattr(book, "ebook_source_id", None)
-        if not book_id:
             return
 
         leader_pct = leader_state.current.get('pct', 0)
@@ -3187,6 +3280,18 @@ class SyncManager:
 
         primary_audio_client = self._get_primary_audio_client_name(book)
         is_audio_leader = (leader == primary_audio_client)
+
+        book_id = None
+        if is_audio_leader and getattr(book, "audio_source", None) == "BookOrbit":
+            book_id = (
+                getattr(book, "audio_provider_book_id", None)
+                or getattr(book, "audio_source_id", None)
+            )
+        if not book_id and getattr(book, "ebook_source", None) == "BookOrbit":
+            book_id = getattr(book, "ebook_source_id", None)
+        if not book_id:
+            return
+
         end_location = None
         if is_audio_leader:
             book_type = "AUDIOBOOK"
@@ -3281,10 +3386,21 @@ class SyncManager:
                 locator = LocatorResult(percentage=0.0)
                 request = UpdateProgressRequest(locator_result=locator, txt="", previous_location=None)
 
+                def _client_is_configured(client) -> bool:
+                    is_configured = getattr(client, "is_configured", None)
+                    if not callable(is_configured):
+                        return True
+                    try:
+                        return bool(is_configured())
+                    except Exception as e:
+                        logger.debug("Skipping progress reset for client with failed configuration check: %s", e)
+                        return False
+
                 applicable_clients = {
                     name: client for name, client in clients.items()
                     if (
-                        ('ebook' if getattr(book, 'sync_mode', 'audiobook') == 'ebook_only' else 'audiobook') in client.get_supported_sync_types()
+                        _client_is_configured(client)
+                        and ('ebook' if getattr(book, 'sync_mode', 'audiobook') == 'ebook_only' else 'audiobook') in client.get_supported_sync_types()
                         and client.supports_book(book)
                     )
                 }
@@ -3310,10 +3426,50 @@ class SyncManager:
                         }
                         logger.warning(f"⚠️ Error resetting '{client_name}': {e}")
 
+                reset_time = time.time()
+                reset_snapshots_saved = 0
+                for client_name, result_info in reset_results.items():
+                    if not result_info.get('success'):
+                        continue
+                    state_data = {'pct': 0.0, 'service_updated_at': reset_time}
+                    try:
+                        self.database_service.save_state(State(
+                            abs_id=book.abs_id,
+                            client_name=client_name.lower(),
+                            last_updated=reset_time,
+                            percentage=0.0,
+                            timestamp=0.0,
+                            xpath="",
+                            cfi="",
+                            user_id=user_id,
+                            **state_metadata_kwargs(state_data),
+                        ))
+                        reset_snapshots_saved += 1
+                    except Exception as e:
+                        logger.debug(f"Could not persist reset snapshot for '{client_name}': {e}")
+
+                kosync_progress_rows_reset = 0
+                reset_user_kosync_progress = getattr(
+                    self.database_service, "reset_user_kosync_progress_for_book", None
+                )
+                if callable(reset_user_kosync_progress):
+                    try:
+                        kosync_progress_rows_reset = reset_user_kosync_progress(abs_id, user_id=user_id)
+                        if not isinstance(kosync_progress_rows_reset, (int, float)):
+                            kosync_progress_rows_reset = 0
+                        if kosync_progress_rows_reset:
+                            logger.info(
+                                f"Reset {kosync_progress_rows_reset} user-scoped KoSync progress row(s)"
+                            )
+                    except Exception as e:
+                        logger.debug(f"Could not reset user-scoped KoSync progress rows: {e}")
+
                 summary = {
                     'book_id': abs_id,
                     'book_title': book.abs_title,
                     'database_states_cleared': cleared_count,
+                    'database_reset_snapshots_saved': reset_snapshots_saved,
+                    'kosync_progress_rows_reset': kosync_progress_rows_reset,
                     'client_reset_results': reset_results,
                     'successful_resets': sum(1 for r in reset_results.values() if r['success']),
                     'total_clients': len(reset_results)

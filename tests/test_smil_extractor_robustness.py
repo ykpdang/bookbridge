@@ -120,5 +120,15 @@ class TestSmilExtractorRobustness(unittest.TestCase):
         except ET.ParseError as e:
             self.fail(f"Stripped XML failed to parse: {e}")
 
+    def test_malicious_container_entity_is_rejected_without_crash(self):
+        """Defused XML should reject entity expansion and return no OPF path."""
+        mock_zf = MagicMock()
+        mock_zf.read.return_value = b"""<?xml version="1.0"?>
+        <!DOCTYPE root [<!ENTITY boom SYSTEM "file:///etc/passwd">]>
+        <container><rootfiles><rootfile full-path="&boom;"/></rootfiles></container>
+        """
+
+        self.assertIsNone(self.extractor._find_opf_path(mock_zf))
+
 if __name__ == '__main__':
     unittest.main()

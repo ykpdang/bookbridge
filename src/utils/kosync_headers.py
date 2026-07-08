@@ -12,7 +12,8 @@ KOSYNC_ACCEPT = "application/vnd.koreader.v1+json"
 
 def hash_kosync_key(plain_key: str) -> str:
     """Return the MD5 hex-digest of a KoSync password/key."""
-    return hashlib.md5(plain_key.encode("utf-8")).hexdigest()
+    # KOReader/KoSync protocol clients send MD5(password) in x-auth-key.
+    return hashlib.md5(plain_key.encode("utf-8")).hexdigest()  # nosec B324
 
 
 def kosync_auth_headers(user: str, hashed_key: str) -> dict:

@@ -23,6 +23,7 @@ import tempfile
 from pathlib import Path
 from collections import OrderedDict
 from src.sync_clients.sync_client_interface import LocatorResult
+from src.utils.cache_paths import safe_cache_path
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,10 @@ class LRUCache:
             self.cache[key] = value
             while len(self.cache) > self.capacity:
                 self.cache.popitem(last=False)
+
+    def delete(self, key):
+        with self._lock:
+            self.cache.pop(key, None)
 
     def clear(self):
         with self._lock:
@@ -128,8 +133,8 @@ class EbookParser:
                     return f
 
         if self.epub_cache_dir.exists():
-            cached_path = self.epub_cache_dir / filename
-            if cached_path.exists():
+            cached_path = safe_cache_path(self.epub_cache_dir, filename)
+            if cached_path and cached_path.exists():
                 return cached_path
 
         raise FileNotFoundError(f"Could not locate {filename}")
@@ -259,9 +264,9 @@ class EbookParser:
     def get_kosync_id(self, filepath):
         filepath = Path(filepath)
         if self.hash_method == "filename":
-            return hashlib.md5(filepath.name.encode('utf-8')).hexdigest()
+            return hashlib.md5(filepath.name.encode('utf-8'), usedforsecurity=False).hexdigest()
         
-        md5 = hashlib.md5()
+        md5 = hashlib.md5(usedforsecurity=False)
         try:
             file_size = os.path.getsize(filepath)
             with open(filepath, 'rb') as f:
@@ -280,7 +285,7 @@ class EbookParser:
             return None
 
     def _compute_koreader_hash_from_bytes(self, content):
-        md5 = hashlib.md5()
+        md5 = hashlib.md5(usedforsecurity=False)
         try:
             file_size = len(content)
             for i in range(-1, 11):
@@ -297,7 +302,7 @@ class EbookParser:
 
     def get_kosync_id_from_bytes(self, filename, content):
         if self.hash_method == "filename":
-            return hashlib.md5(filename.encode('utf-8')).hexdigest()
+            return hashlib.md5(filename.encode('utf-8'), usedforsecurity=False).hexdigest()
         return self._compute_koreader_hash_from_bytes(content)
 
     def extract_cover(self, filepath, output_path):
@@ -668,14 +673,15 @@ class EbookParser:
         client = self.ollama_client
         if not client or not client.is_configured():
             return -1
-        if os.getenv("OLLAMA_EBOOK_TEXT_FALLBACK", "false").lower() != "true":
+        from src.api.llm_settings import llm_setting_truthy, llm_setting_value
+        if not llm_setting_truthy("OLLAMA_EBOOK_TEXT_FALLBACK", "false"):
             return -1
         clean_search = " ".join((search_phrase or "").split())
         if not clean_search or not full_text:
             return -1
 
         try:
-            threshold = float(os.getenv("OLLAMA_ALIGN_SIM_THRESHOLD", 0.72))
+            threshold = float(llm_setting_value("OLLAMA_ALIGN_SIM_THRESHOLD", "0.72"))
         except (TypeError, ValueError):
             threshold = 0.72
 

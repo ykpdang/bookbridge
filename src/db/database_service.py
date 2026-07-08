@@ -6,6 +6,7 @@ Direct model-based interface without dictionary conversions.
 import json
 import logging
 import os
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,6 +29,8 @@ from .models import (
     ReadingSession,
     KOReaderBookStat,
     KOReaderPageStat,
+    KoreaderAnnotation,
+    KoreaderAnnotationDeviceState,
     ShelfWatchScan,
     EmbeddingCache,
     BookAlignment,
@@ -778,7 +781,8 @@ class DatabaseService:
 
             if existing:
                 # Update existing state
-                for attr in ['last_updated', 'percentage', 'timestamp', 'xpath', 'cfi']:
+                for attr in ['last_updated', 'percentage', 'timestamp', 'xpath', 'cfi',
+                             'service_updated_at', 'status', 'locator_source', 'locator_json']:
                     if hasattr(state, attr):
                         setattr(existing, attr, getattr(state, attr))
                 session.flush()
@@ -1270,6 +1274,58 @@ class DatabaseService:
                 session.expunge(row)
             return rows
 
+    def reset_user_kosync_progress_for_book(self, abs_id: str, user_id: int = None) -> int:
+        """Set this user's KoSync device-progress rows for a linked book to 0%.
+
+        ``clear_progress`` must reset both the bridge ``State`` row and the
+        per-user hash cache. Otherwise a later KoSync GET can see an old
+        sibling-hash row as "ahead" of the freshly reset bridge state and pull
+        the book back to the pre-reset position.
+        """
+        uid = self._resolve_uid(user_id)
+        if uid is None or not abs_id:
+            return 0
+
+        now = utcnow()
+        with self.get_session() as session:
+            hashes = {
+                row[0]
+                for row in session.query(KosyncDocument.document_hash)
+                .filter(KosyncDocument.linked_abs_id == abs_id)
+                .all()
+                if row[0]
+            }
+            book = session.query(Book).filter(Book.abs_id == abs_id).first()
+            if book and book.kosync_doc_id:
+                hashes.add(book.kosync_doc_id)
+
+            count = 0
+            for document_hash in hashes:
+                row = session.query(KosyncUserProgress).filter(
+                    KosyncUserProgress.document_hash == document_hash,
+                    KosyncUserProgress.user_id == uid,
+                ).first()
+                if row is None:
+                    row = KosyncUserProgress(
+                        document_hash=document_hash,
+                        user_id=uid,
+                        progress="",
+                        percentage=0,
+                        device="abs-sync-bot",
+                        device_id="abs-sync-bot",
+                        timestamp=now,
+                    )
+                    session.add(row)
+                else:
+                    row.progress = ""
+                    row.percentage = 0
+                    row.device = "abs-sync-bot"
+                    row.device_id = "abs-sync-bot"
+                    row.timestamp = now
+                    row.last_updated = now
+                count += 1
+            return count
+
 
     # PendingSuggestion operations
     def get_pending_suggestion(self, source_id: str) -> Optional[PendingSuggestion]:
@@ -1542,13 +1598,26 @@ class DatabaseService:
     def _normalize_koreader_device_key(device: str = None, device_id: str = None) -> str:
         return str(device_id or device or "").strip()
 
-    def upsert_koreader_book_stats(self, device: str, device_id: str, books: list[dict]) -> int:
+    @staticmethod
+    def _scope_koreader_user(query, model, user_id):
+        if user_id is None:
+            return query.filter(model.user_id.is_(None))
+        return query.filter(model.user_id == user_id)
+
+    def upsert_koreader_book_stats(
+        self,
+        device: str,
+        device_id: str,
+        books: list[dict],
+        user_id: int = None,
+    ) -> int:
         """Upsert KOReader book metadata rows for one device."""
         from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
         device_key = self._normalize_koreader_device_key(device=device, device_id=device_id)
         if not device_key:
             return 0
+        uid = self._resolve_uid(user_id)
 
         rows = []
         now = utcnow()
@@ -1559,6 +1628,7 @@ class DatabaseService:
 
             rows.append({
                 "md5": md5,
+                "user_id": uid,
                 "device": str(device or "").strip() or None,
                 "device_id": str(device_id or "").strip() or None,
                 "device_key": device_key,
@@ -1577,7 +1647,7 @@ class DatabaseService:
         with self.get_session() as session:
             stmt = sqlite_insert(KOReaderBookStat).values(rows)
             stmt = stmt.on_conflict_do_update(
-                index_elements=["md5", "device_key"],
+                index_elements=["md5", "user_id", "device_key"],
                 set_={
                     "device": stmt.excluded.device,
                     "device_id": stmt.excluded.device_id,
@@ -1593,13 +1663,20 @@ class DatabaseService:
             session.execute(stmt)
         return len(rows)
 
-    def bulk_insert_koreader_page_stats(self, device: str, device_id: str, page_stats: list[dict]) -> dict:
+    def bulk_insert_koreader_page_stats(
+        self,
+        device: str,
+        device_id: str,
+        page_stats: list[dict],
+        user_id: int = None,
+    ) -> dict:
         """Bulk insert KOReader page stats with replay-safe dedupe and cross-device echo suppression."""
         from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
         device_key = self._normalize_koreader_device_key(device=device, device_id=device_id)
         if not device_key:
             return {"accepted": 0, "duplicates": 0, "echoes": 0}
+        uid = self._resolve_uid(user_id)
 
         rows = []
         now = utcnow()
@@ -1627,6 +1704,7 @@ class DatabaseService:
 
             rows.append({
                 "md5": md5,
+                "user_id": uid,
                 "device": str(device or "").strip() or None,
                 "device_id": str(device_id or "").strip() or None,
                 "device_key": device_key,
@@ -1645,14 +1723,15 @@ class DatabaseService:
             # under another device_key is a merged copy injected into this device's
             # statistics.sqlite by the plugin, not new reading on this device.
             batch_md5s = {row["md5"] for row in rows}
-            foreign = (
-                session.query(KOReaderPageStat.md5, KOReaderPageStat.start_time, KOReaderPageStat.duration)
-                .filter(
-                    KOReaderPageStat.md5.in_(batch_md5s),
-                    KOReaderPageStat.device_key != device_key,
-                )
-                .all()
+            foreign_query = session.query(
+                KOReaderPageStat.md5,
+                KOReaderPageStat.start_time,
+                KOReaderPageStat.duration,
+            ).filter(
+                KOReaderPageStat.md5.in_(batch_md5s),
+                KOReaderPageStat.device_key != device_key,
             )
+            foreign = self._scope_koreader_user(foreign_query, KOReaderPageStat, uid).all()
             foreign_fingerprints = {
                 (item.md5, float(item.start_time), float(item.duration)) for item in foreign
             }
@@ -1666,7 +1745,7 @@ class DatabaseService:
             if fresh_rows:
                 stmt = sqlite_insert(KOReaderPageStat).values(fresh_rows)
                 stmt = stmt.on_conflict_do_nothing(
-                    index_elements=["md5", "device_key", "page", "start_time"]
+                    index_elements=["md5", "user_id", "device_key", "page", "start_time"]
                 )
                 result = session.execute(stmt)
                 inserted = max(int(result.rowcount or 0), 0)
@@ -1682,6 +1761,8 @@ class DatabaseService:
         exclude_device_key: str,
         md5s: Optional[set[str]] = None,
         since: Optional[float] = None,
+        user_id: int = None,
+        limit: int = 10000,
     ) -> dict:
         """Page-stat events from all devices except the requesting one, for cross-device merging.
 
@@ -1695,29 +1776,36 @@ class DatabaseService:
         exclude_device_key = str(exclude_device_key or "").strip()
         if not exclude_device_key:
             return {"page_stats": [], "watermark": since}
+        uid = self._resolve_uid(user_id)
+        limit = max(min(int(limit or 10000), 10000), 1)
 
         with self.get_session() as session:
             query = session.query(KOReaderPageStat).filter(
                 KOReaderPageStat.device_key != exclude_device_key
             )
+            query = self._scope_koreader_user(query, KOReaderPageStat, uid)
             if md5s:
                 query = query.filter(KOReaderPageStat.md5.in_(md5s))
             if since is not None:
                 query = query.filter(
                     KOReaderPageStat.uploaded_at >= datetime.utcfromtimestamp(float(since))
                 )
-            rows = query.order_by(KOReaderPageStat.start_time.asc()).all()
+            rows = query.order_by(KOReaderPageStat.uploaded_at.asc(), KOReaderPageStat.id.asc()).limit(limit + 1).all()
+            truncated = len(rows) > limit
+            if truncated:
+                rows = rows[:limit]
             if not rows:
-                return {"page_stats": [], "watermark": since}
+                return {"page_stats": [], "watermark": since, "truncated": False}
 
             fallback_keys = {(row.md5, row.device_key) for row in rows if not row.total_pages}
             fallback_pages: dict[tuple[str, str], int] = {}
             if fallback_keys:
-                meta_rows = (
-                    session.query(KOReaderBookStat.md5, KOReaderBookStat.device_key, KOReaderBookStat.pages)
-                    .filter(KOReaderBookStat.md5.in_({md5 for md5, _ in fallback_keys}))
-                    .all()
-                )
+                meta_query = session.query(
+                    KOReaderBookStat.md5,
+                    KOReaderBookStat.device_key,
+                    KOReaderBookStat.pages,
+                ).filter(KOReaderBookStat.md5.in_({md5 for md5, _ in fallback_keys}))
+                meta_rows = self._scope_koreader_user(meta_query, KOReaderBookStat, uid).all()
                 for meta in meta_rows:
                     if meta.pages and int(meta.pages) > 0:
                         fallback_pages[(meta.md5, meta.device_key)] = int(meta.pages)
@@ -1739,9 +1827,14 @@ class DatabaseService:
                     "duration": float(row.duration or 0),
                     "total_pages": total_pages,
                 })
-            return {"page_stats": results, "watermark": watermark}
+            return {"page_stats": results, "watermark": watermark, "truncated": truncated}
 
-    def get_merged_koreader_book_meta(self, exclude_device_key: str, md5s: set[str]) -> list[dict]:
+    def get_merged_koreader_book_meta(
+        self,
+        exclude_device_key: str,
+        md5s: set[str],
+        user_id: int = None,
+    ) -> list[dict]:
         """Canonical book metadata (md5, title, authors, pages) for the given md5s.
 
         Drawn from other devices' uploaded book stats so a device that never opened a
@@ -1754,9 +1847,11 @@ class DatabaseService:
         md5s = {str(m).strip() for m in (md5s or set()) if str(m).strip()}
         if not md5s:
             return []
+        uid = self._resolve_uid(user_id)
 
         with self.get_session() as session:
             query = session.query(KOReaderBookStat).filter(KOReaderBookStat.md5.in_(md5s))
+            query = self._scope_koreader_user(query, KOReaderBookStat, uid)
             if exclude_device_key:
                 query = query.filter(KOReaderBookStat.device_key != exclude_device_key)
             rows = query.all()
@@ -1784,6 +1879,625 @@ class DatabaseService:
         last_updated = row.last_updated.timestamp() if row.last_updated else 0.0
         return (pages, last_updated)
 
+    # ------------------------------------------------------------------
+    # KOReader annotation hub (highlights/notes sync between devices + web)
+    # ------------------------------------------------------------------
+
+    _ANNOTATION_APPLY_CAP = 200  # per book per exchange round; devices loop rounds
+
+    @staticmethod
+    def _normalize_xpointer_for_key(pos0) -> str:
+        """Canonicalize a KOReader xpointer so the identity key is stable across
+        the create -> transmit -> apply -> re-read cycle.
+
+        crengine re-serializes xpointers when it re-validates an externally
+        applied annotation (dropping a trailing ``.0`` text offset, adding or
+        stripping ``[1]`` sibling indexes), so the raw pos0 differs between the
+        authoring device and a receiving device for the SAME highlight. Keying
+        identity on the raw pos0 makes a receiving device's re-serialized copy
+        look like a different (missing) annotation, which the deletion detector
+        then tombstones. Normalizing identically on the device AND the bridge
+        keeps the key stable. Mirrors the KOReader convention used by the
+        Grimmory plugin. The RAW pos0 is preserved separately for positioning —
+        this is used ONLY for the identity hash.
+        """
+        if not pos0:
+            return ""
+        text = str(pos0).replace("[1]", "")
+        if text.endswith(".0"):
+            text = text[:-2]
+        return text
+
+    @staticmethod
+    def compute_annotation_key(datetime_str: str, pos0: str) -> str:
+        """Stable identity key: md5('<datetime>|<normalized-pos0>'). Both the
+        device and the bridge normalize identically so the key survives
+        crengine's xpointer re-serialization."""
+        import hashlib
+        raw = f"{datetime_str or ''}|{DatabaseService._normalize_xpointer_for_key(pos0)}"
+        return hashlib.md5(raw.encode("utf-8"), usedforsecurity=False).hexdigest()
+
+    @staticmethod
+    def _bookorbit_annotation_key(datetime_str: str, pos0: str) -> str:
+        """Key in BookOrbit's koplugin convention: md5('<datetime>|<raw-pos0>'),
+        NO normalization. BookOrbit hashes the exact pos0 the bridge uploaded,
+        so the key list the bridge sends it must use the raw pos0 too — the
+        internal normalized identity would not match BookOrbit's side."""
+        import hashlib
+        raw = f"{datetime_str or ''}|{pos0 or ''}"
+        return hashlib.md5(raw.encode("utf-8"), usedforsecurity=False).hexdigest()
+
+    @staticmethod
+    def _annotation_entry_fields(entry: dict) -> dict:
+        """Normalize an incoming annotation entry's content fields."""
+        def _s(key, maxlen=None):
+            value = entry.get(key)
+            if value is None:
+                return None
+            value = str(value)
+            return value[:maxlen] if maxlen else value
+
+        pageno = entry.get("pageno")
+        try:
+            pageno = int(pageno) if pageno is not None else None
+        except (TypeError, ValueError):
+            pageno = None
+
+        return {
+            "datetime_updated": _s("datetimeUpdated", 19) or _s("datetime_updated", 19),
+            "pos_format": (_s("posFormat", 16) or _s("pos_format", 16) or "xpointer"),
+            "pos0": _s("pos0", 4000),
+            "pos1": _s("pos1", 4000),
+            "drawer": _s("drawer", 16),
+            "color": _s("color", 30),
+            "text": _s("text"),
+            "note": _s("note"),
+            "chapter": _s("chapter", 500),
+            "pageno": pageno,
+        }
+
+    @staticmethod
+    def _annotation_content_differs(row: KoreaderAnnotation, fields: dict) -> bool:
+        for key in ("pos0", "pos1", "drawer", "color", "text", "note", "chapter", "pageno", "datetime_updated"):
+            if getattr(row, key) != fields.get(key):
+                return True
+        return False
+
+    @staticmethod
+    def _doc_fragment_index(pos0) -> Optional[int]:
+        match = re.search(r"/DocFragment\[(\d+)\]", str(pos0 or ""))
+        return int(match.group(1)) if match else None
+
+    def _match_spoke_row_by_content(self, session, user_id, doc_md5: str, fields: dict) -> Optional[KoreaderAnnotation]:
+        """Fallback identity match for lossy-position spokes: a CFI round-trip
+        never reproduces the device's xpointer serialization, so ann_key
+        lookups miss. Match by the highlighted text within the same
+        DocFragment instead — only when the match is unambiguous."""
+        text = fields.get("text")
+        if not text:
+            return None
+        candidates = (
+            session.query(KoreaderAnnotation)
+            .filter(
+                KoreaderAnnotation.md5 == doc_md5,
+                KoreaderAnnotation.user_id == user_id,
+                KoreaderAnnotation.deleted == False,  # noqa: E712
+                KoreaderAnnotation.text == text,
+            )
+            .all()
+        )
+        fragment = self._doc_fragment_index(fields.get("pos0"))
+        if fragment is not None:
+            candidates = [r for r in candidates if self._doc_fragment_index(r.pos0) == fragment]
+        return candidates[0] if len(candidates) == 1 else None
+
+    @staticmethod
+    def _annotation_response_entry(row: KoreaderAnnotation) -> dict:
+        return {
+            "serverId": row.id,
+            "version": row.version,
+            "datetime": row.datetime,
+            "datetimeUpdated": row.datetime_updated,
+            "drawer": row.drawer,
+            "color": row.color,
+            "text": row.text,
+            "note": row.note,
+            "chapter": row.chapter,
+            "pageno": row.pageno,
+            "posFormat": row.pos_format,
+            "pos0": row.pos0,
+            "pos1": row.pos1,
+        }
+
+    @staticmethod
+    def _get_device_state(session, annotation_id: int, device_key: str) -> Optional[KoreaderAnnotationDeviceState]:
+        return (
+            session.query(KoreaderAnnotationDeviceState)
+            .filter(
+                KoreaderAnnotationDeviceState.annotation_id == annotation_id,
+                KoreaderAnnotationDeviceState.device_key == device_key,
+            )
+            .first()
+        )
+
+    def _set_device_state(self, session, annotation_id: int, device_key: str,
+                          acked_version: int = None, ack_deleted: bool = None) -> None:
+        state = self._get_device_state(session, annotation_id, device_key)
+        if state is None:
+            state = KoreaderAnnotationDeviceState(annotation_id=annotation_id, device_key=device_key)
+            session.add(state)
+        if acked_version is not None:
+            state.acked_version = max(int(state.acked_version or 0), int(acked_version))
+        if ack_deleted is not None:
+            state.ack_deleted = bool(ack_deleted)
+        state.updated_at = utcnow()
+
+    def exchange_koreader_annotations(self, user_id, device_key: str, books: list[dict]) -> dict:
+        """Two-way annotation exchange for one device (mirrors the BookOrbit protocol).
+
+        Per book ``{hash, keys: [{k, dt}], keysComplete, changes: [entry...]}``:
+        upserts the device's changed entries, tombstones entries the device
+        deleted (key missing from a complete key list for an annotation this
+        device previously had), then returns the per-device delta
+        ``{hash, toApply: {add, edit, delete}}`` computed from ack state.
+        """
+        device_key = str(device_key or "").strip()
+        if not device_key:
+            return {"books": []}
+
+        response_books = []
+        with self.get_session() as session:
+            for book in books or []:
+                doc_md5 = str(book.get("hash") or "").strip().lower()
+                if not doc_md5:
+                    continue
+
+                incoming_changes = book.get("changes") or []
+                incoming_keys = book.get("keys") or []
+                keys_complete = bool(book.get("keysComplete"))
+
+                # 1. Upsert this device's changed entries.
+                for entry in incoming_changes:
+                    if not isinstance(entry, dict):
+                        continue
+                    dt = str(entry.get("datetime") or "").strip()
+                    fields = self._annotation_entry_fields(entry)
+                    if not dt or not fields["pos0"]:
+                        continue
+                    ann_key = self.compute_annotation_key(dt, fields["pos0"])
+                    row = (
+                        session.query(KoreaderAnnotation)
+                        .filter(
+                            KoreaderAnnotation.md5 == doc_md5,
+                            KoreaderAnnotation.user_id == user_id,
+                            KoreaderAnnotation.ann_key == ann_key,
+                        )
+                        .first()
+                    )
+                    if row is None:
+                        row = KoreaderAnnotation(
+                            md5=doc_md5, user_id=user_id, ann_key=ann_key,
+                            datetime=dt, source_device=device_key, **fields,
+                        )
+                        session.add(row)
+                        session.flush()
+                        self._set_device_state(session, row.id, device_key, acked_version=row.version)
+                        continue
+
+                    if row.deleted:
+                        state = self._get_device_state(session, row.id, device_key)
+                        if state is not None and state.ack_deleted:
+                            # The device saw the tombstone and re-created the
+                            # highlight afterwards — resurrect it.
+                            row.deleted = False
+                            row.deleted_at = None
+                            for key, value in fields.items():
+                                setattr(row, key, value)
+                            row.source_device = device_key
+                            row.version = int(row.version or 1) + 1
+                            row.updated_at = utcnow()
+                            self._set_device_state(session, row.id, device_key,
+                                                   acked_version=row.version, ack_deleted=False)
+                        # else: another device deleted it and this device hasn't
+                        # heard yet — the delete wins; its re-upload is stale.
+                        continue
+
+                    if self._annotation_content_differs(row, fields):
+                        incoming_dt = fields.get("datetime_updated") or dt
+                        current_dt = row.datetime_updated or row.datetime
+                        if incoming_dt >= current_dt:
+                            for key, value in fields.items():
+                                setattr(row, key, value)
+                            row.source_device = device_key
+                            row.version = int(row.version or 1) + 1
+                            row.updated_at = utcnow()
+                    self._set_device_state(session, row.id, device_key, acked_version=row.version)
+
+                # 2. Deletion detection: keys this device previously had but no
+                # longer lists (only trustworthy when the key list is complete).
+                if keys_complete:
+                    present_keys = {
+                        str(k.get("k") or "").strip().lower()
+                        for k in incoming_keys if isinstance(k, dict)
+                    }
+                    present_keys.discard("")
+                    candidates = (
+                        session.query(KoreaderAnnotation)
+                        .filter(
+                            KoreaderAnnotation.md5 == doc_md5,
+                            KoreaderAnnotation.user_id == user_id,
+                            KoreaderAnnotation.deleted == False,  # noqa: E712
+                        )
+                        .all()
+                    )
+                    for row in candidates:
+                        if row.ann_key in present_keys:
+                            continue
+                        state = self._get_device_state(session, row.id, device_key)
+                        device_knew_it = (
+                            row.source_device == device_key
+                            or (state is not None and int(state.acked_version or 0) > 0)
+                        )
+                        if not device_knew_it:
+                            continue
+                        row.deleted = True
+                        row.deleted_at = utcnow()
+                        row.version = int(row.version or 1) + 1
+                        row.updated_at = utcnow()
+                        self._set_device_state(session, row.id, device_key,
+                                               acked_version=row.version, ack_deleted=True)
+
+                # 3. Per-device delta.
+                response_books.append({
+                    "hash": doc_md5,
+                    "toApply": self._compute_annotation_delta(session, user_id, doc_md5, device_key),
+                })
+
+            session.commit()
+        return {"books": response_books}
+
+    def _compute_annotation_delta(self, session, user_id, doc_md5: str, device_key: str) -> dict:
+        adds, edits, deletes = [], [], []
+        rows = (
+            session.query(KoreaderAnnotation)
+            .filter(
+                KoreaderAnnotation.md5 == doc_md5,
+                KoreaderAnnotation.user_id == user_id,
+            )
+            .order_by(KoreaderAnnotation.id)
+            .all()
+        )
+        for row in rows:
+            state = self._get_device_state(session, row.id, device_key)
+            if row.deleted:
+                if state is not None and int(state.acked_version or 0) > 0 and not state.ack_deleted:
+                    deletes.append({"serverId": row.id, "datetime": row.datetime})
+                continue
+            acked = int(state.acked_version or 0) if state is not None else 0
+            if acked >= int(row.version or 1):
+                continue
+            entry = self._annotation_response_entry(row)
+            if acked == 0:
+                adds.append(entry)
+            else:
+                edits.append(entry)
+            if len(adds) + len(edits) + len(deletes) >= self._ANNOTATION_APPLY_CAP:
+                break
+        return {"add": adds, "edit": edits, "delete": deletes}
+
+    def ack_koreader_annotations(self, user_id, device_key: str, books: list[dict]) -> dict:
+        """Record which exchanged annotations a device actually applied/deleted.
+
+        A 'failed' status is recorded like 'applied' so the entry is not re-sent
+        forever (the device kept the text; it just couldn't anchor it)."""
+        device_key = str(device_key or "").strip()
+        if not device_key:
+            return {"acked": 0}
+
+        acked = 0
+        with self.get_session() as session:
+            for book in books or []:
+                for item in (book.get("applied") or []):
+                    try:
+                        server_id = int(item.get("serverId"))
+                        version = int(item.get("version") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    row = session.query(KoreaderAnnotation).filter(
+                        KoreaderAnnotation.id == server_id,
+                        KoreaderAnnotation.user_id == user_id,
+                    ).first()
+                    if row is None:
+                        continue
+                    self._set_device_state(session, server_id, device_key,
+                                           acked_version=version or row.version)
+                    acked += 1
+                for item in (book.get("deleted") or []):
+                    try:
+                        server_id = int(item.get("serverId"))
+                    except (TypeError, ValueError):
+                        continue
+                    row = session.query(KoreaderAnnotation).filter(
+                        KoreaderAnnotation.id == server_id,
+                        KoreaderAnnotation.user_id == user_id,
+                    ).first()
+                    if row is None:
+                        continue
+                    self._set_device_state(session, server_id, device_key, ack_deleted=True)
+                    acked += 1
+            session.commit()
+        return {"acked": acked}
+
+    # -- BookOrbit spoke helpers (the bridge acts as a device against BookOrbit) --
+
+    def get_annotation_md5s_for_user(self, user_id) -> list[str]:
+        """Distinct document md5s that have annotations for a user (incl. tombstones)."""
+        with self.get_session() as session:
+            rows = (
+                session.query(KoreaderAnnotation.md5)
+                .filter(KoreaderAnnotation.user_id == user_id)
+                .distinct()
+                .all()
+            )
+            return [r[0] for r in rows]
+
+    def get_annotation_spoke_state(self, user_id, doc_md5: str, spoke_key: str,
+                                   server_id_field: str = "bookorbit_server_id",
+                                   version_field: str = "bookorbit_version",
+                                   exclude_if_set: str = None) -> dict:
+        """Everything the spoke needs to build one exchange call for one book:
+        alive keys, changed entries (version above the spoke's ack), and the
+        spoke's pending tombstone acks.
+
+        ``exclude_if_set`` omits rows with that field non-null from ``changes``
+        (they still contribute keys) — used so rows owned by one Grimmory store
+        are never exported into the other."""
+        doc_md5 = str(doc_md5 or "").strip().lower()
+        with self.get_session() as session:
+            rows = (
+                session.query(KoreaderAnnotation)
+                .filter(
+                    KoreaderAnnotation.md5 == doc_md5,
+                    KoreaderAnnotation.user_id == user_id,
+                )
+                .all()
+            )
+            keys, changes, pending_delete_acks, pending_deletes = [], [], [], []
+            for row in rows:
+                state = self._get_device_state(session, row.id, spoke_key)
+                acked = int(state.acked_version or 0) if state is not None else 0
+                if row.deleted:
+                    # Deletions propagate to the spoke by key omission; remember
+                    # rows whose tombstone the spoke hasn't processed yet.
+                    if not (state is not None and state.ack_deleted):
+                        pending_delete_acks.append(row.id)
+                        spoke_id = getattr(row, server_id_field, None)
+                        if spoke_id is not None:
+                            pending_deletes.append({"_id": row.id, "serverId": int(spoke_id)})
+                    continue
+                # BookOrbit hashes the raw pos0 it received; send its convention.
+                keys.append({"k": self._bookorbit_annotation_key(row.datetime, row.pos0), "dt": row.datetime})
+                if exclude_if_set is not None and getattr(row, exclude_if_set, None) is not None:
+                    continue
+                if acked < int(row.version or 1):
+                    entry = self._annotation_response_entry(row)
+                    entry["_id"] = row.id  # internal: for post-upload ack bookkeeping
+                    entry["_spoke_server_id"] = getattr(row, server_id_field, None)
+                    entry["_spoke_version"] = getattr(row, version_field, None)
+                    changes.append(entry)
+            return {
+                "keys": keys,
+                "changes": changes,
+                "pending_delete_acks": pending_delete_acks,
+                "pending_deletes": pending_deletes,
+            }
+
+    def apply_spoke_annotations(self, user_id, doc_md5: str, spoke_key: str,
+                                adds: list[dict], edits: list[dict], deletes: list[dict],
+                                server_id_field: str = "bookorbit_server_id",
+                                version_field: str = "bookorbit_version",
+                                synced_at_field: str = "bookorbit_synced_at",
+                                trust_positions: bool = True) -> dict:
+        """Apply a spoke's (e.g. BookOrbit's) toApply delta into the canonical store.
+
+        ``trust_positions=False`` is for spokes whose positions are lossy
+        projections (Grimmory converts xpointer<->CFI, so a pulled pos0 never
+        matches the device's serialization byte-for-byte). For those, a pull
+        must never rewrite a matched row's identity (datetime/pos0/pos1/
+        ann_key) — rewriting the key makes the device's next complete key list
+        look like a deletion and the row gets tombstoned everywhere. Only the
+        spoke-editable content (note/color/drawer) is merged, unmatched rows
+        fall back to a text-within-fragment match before creating anything,
+        and tombstoned rows are never revived by a stale remote echo.
+
+        Returns the ack payload data: applied [{serverId, version}] and deleted
+        [{serverId}] to report back to the spoke."""
+        doc_md5 = str(doc_md5 or "").strip().lower()
+        applied_acks, deleted_acks = [], []
+        with self.get_session() as session:
+            for entry in list(adds or []) + list(edits or []):
+                if not isinstance(entry, dict):
+                    continue
+                dt = str(entry.get("datetime") or "").strip()
+                fields = self._annotation_entry_fields(entry)
+                spoke_id = entry.get("serverId")
+                spoke_version = entry.get("version")
+                if not dt or not fields["pos0"] or spoke_id is None:
+                    continue
+
+                row = None
+                if spoke_id is not None:
+                    row = (
+                        session.query(KoreaderAnnotation)
+                        .filter(
+                            KoreaderAnnotation.user_id == user_id,
+                            getattr(KoreaderAnnotation, server_id_field) == int(spoke_id),
+                        )
+                        .first()
+                    )
+                ann_key = self.compute_annotation_key(dt, fields["pos0"])
+                if row is None:
+                    row = (
+                        session.query(KoreaderAnnotation)
+                        .filter(
+                            KoreaderAnnotation.md5 == doc_md5,
+                            KoreaderAnnotation.user_id == user_id,
+                            KoreaderAnnotation.ann_key == ann_key,
+                        )
+                        .first()
+                    )
+                if row is None and not trust_positions:
+                    row = self._match_spoke_row_by_content(session, user_id, doc_md5, fields)
+
+                if row is not None and row.deleted and not trust_positions:
+                    # Stale remote echo of a locally tombstoned annotation —
+                    # never revive through a lossy spoke; the push loop deletes
+                    # the remote copy instead.
+                    continue
+
+                if row is None:
+                    row = KoreaderAnnotation(
+                        md5=doc_md5, user_id=user_id, ann_key=ann_key,
+                        datetime=dt, source_device=spoke_key, **fields,
+                    )
+                    setattr(row, server_id_field, int(spoke_id))
+                    if spoke_version is not None:
+                        setattr(row, version_field, int(spoke_version))
+                    setattr(row, synced_at_field, utcnow())
+                    session.add(row)
+                    session.flush()
+                    self._set_device_state(session, row.id, spoke_key, acked_version=row.version)
+                else:
+                    setattr(row, server_id_field, int(spoke_id))
+                    if spoke_version is not None:
+                        setattr(row, version_field, int(spoke_version))
+                    setattr(row, synced_at_field, utcnow())
+                    if row.deleted:
+                        row.deleted = False
+                        row.deleted_at = None
+                    if trust_positions:
+                        if self._annotation_content_differs(row, fields):
+                            for key, value in fields.items():
+                                setattr(row, key, value)
+                            row.source_device = spoke_key
+                            row.version = int(row.version or 1) + 1
+                            row.updated_at = utcnow()
+                        # The ann_key follows pos0 edits so device key lists stay consistent.
+                        row.ann_key = ann_key
+                    else:
+                        # Identity (datetime/pos0/pos1/ann_key) stays canonical:
+                        # the spoke's round-tripped position is a lossy
+                        # projection, not an edit. Merge only what the spoke
+                        # can legitimately change.
+                        content_keys = ("drawer", "color", "note")
+                        if any(getattr(row, key) != fields.get(key) for key in content_keys):
+                            for key in content_keys:
+                                setattr(row, key, fields.get(key))
+                            row.datetime_updated = fields.get("datetime_updated") or row.datetime_updated
+                            row.source_device = spoke_key
+                            row.version = int(row.version or 1) + 1
+                            row.updated_at = utcnow()
+                    self._set_device_state(session, row.id, spoke_key, acked_version=row.version)
+                applied_acks.append({
+                    "serverId": int(spoke_id),
+                    "version": int(spoke_version or 1),
+                    "status": "applied",
+                })
+
+            for entry in deletes or []:
+                spoke_id = entry.get("serverId") if isinstance(entry, dict) else None
+                if spoke_id is None:
+                    continue
+                row = (
+                    session.query(KoreaderAnnotation)
+                    .filter(
+                        KoreaderAnnotation.user_id == user_id,
+                        getattr(KoreaderAnnotation, server_id_field) == int(spoke_id),
+                    )
+                    .first()
+                )
+                if row is not None and not row.deleted:
+                    row.deleted = True
+                    row.deleted_at = utcnow()
+                    row.version = int(row.version or 1) + 1
+                    row.updated_at = utcnow()
+                    self._set_device_state(session, row.id, spoke_key,
+                                           acked_version=row.version, ack_deleted=True)
+                deleted_acks.append({"serverId": int(spoke_id), "status": "applied"})
+
+            session.commit()
+        return {"applied": applied_acks, "deleted": deleted_acks}
+
+    def mark_spoke_annotations_uploaded(self, user_id, spoke_key: str,
+                                        annotation_ids: list[int],
+                                        tombstone_ids: list[int] = None,
+                                        server_id_field: str = "bookorbit_server_id",
+                                        version_field: str = "bookorbit_version",
+                                        synced_at_field: str = "bookorbit_synced_at",
+                                        server_ids_by_annotation_id: dict = None,
+                                        versions_by_annotation_id: dict = None) -> None:
+        """Record that the spoke accepted our uploaded changes / processed our
+        key-omission deletions, so they are not re-sent every cycle."""
+        with self.get_session() as session:
+            for ann_id in annotation_ids or []:
+                row = session.query(KoreaderAnnotation).filter(
+                    KoreaderAnnotation.id == int(ann_id),
+                    KoreaderAnnotation.user_id == user_id,
+                ).first()
+                if row is not None:
+                    ann_key = str(ann_id)
+                    server_ids = server_ids_by_annotation_id or {}
+                    versions = versions_by_annotation_id or {}
+                    if ann_key in server_ids and server_ids[ann_key] is not None:
+                        setattr(row, server_id_field, int(server_ids[ann_key]))
+                    elif ann_id in server_ids and server_ids[ann_id] is not None:
+                        setattr(row, server_id_field, int(server_ids[ann_id]))
+                    if ann_key in versions and versions[ann_key] is not None:
+                        setattr(row, version_field, int(versions[ann_key]))
+                    elif ann_id in versions and versions[ann_id] is not None:
+                        setattr(row, version_field, int(versions[ann_id]))
+                    self._set_device_state(session, row.id, spoke_key, acked_version=row.version)
+                    setattr(row, synced_at_field, utcnow())
+            for ann_id in tombstone_ids or []:
+                row = session.query(KoreaderAnnotation).filter(
+                    KoreaderAnnotation.id == int(ann_id),
+                    KoreaderAnnotation.user_id == user_id,
+                ).first()
+                if row is not None:
+                    self._set_device_state(session, row.id, spoke_key, ack_deleted=True)
+            session.commit()
+
+    def get_spoke_server_ids_for_book(self, user_id, doc_md5: str,
+                                      server_id_field: str = "bookorbit_server_id") -> list[int]:
+        """Known remote annotation ids for a spoke/book, excluding local tombstones."""
+        doc_md5 = str(doc_md5 or "").strip().lower()
+        with self.get_session() as session:
+            rows = (
+                session.query(getattr(KoreaderAnnotation, server_id_field))
+                .filter(
+                    KoreaderAnnotation.md5 == doc_md5,
+                    KoreaderAnnotation.user_id == user_id,
+                    KoreaderAnnotation.deleted == False,  # noqa: E712
+                    getattr(KoreaderAnnotation, server_id_field).isnot(None),
+                )
+                .all()
+            )
+            return [int(r[0]) for r in rows if r[0] is not None]
+
+    def get_user_annotations_for_book(self, user_id, doc_md5: str, include_deleted: bool = False) -> list:
+        """All annotation rows for a (user, document) — dashboard/tests helper."""
+        doc_md5 = str(doc_md5 or "").strip().lower()
+        with self.get_session() as session:
+            query = session.query(KoreaderAnnotation).filter(
+                KoreaderAnnotation.md5 == doc_md5,
+                KoreaderAnnotation.user_id == user_id,
+            )
+            if not include_deleted:
+                query = query.filter(KoreaderAnnotation.deleted == False)  # noqa: E712
+            rows = query.order_by(KoreaderAnnotation.datetime).all()
+            session.expunge_all()
+            return rows
+
     @staticmethod
     def _local_date_from_epoch(timestamp: float, tz_name: str) -> str:
         return datetime.fromtimestamp(float(timestamp), ZoneInfo(tz_name)).date().isoformat()
@@ -1808,20 +2522,30 @@ class DatabaseService:
 
     def _get_koreader_book_links(self, session) -> dict:
         links = {}
+        uid = self._resolve_uid(None)
 
-        linked_docs = session.query(KosyncDocument).filter(
-            KosyncDocument.linked_abs_id.isnot(None)
-        ).all()
+        linked_docs_query = session.query(KosyncDocument).filter(KosyncDocument.linked_abs_id.isnot(None))
+        if uid is not None:
+            linked_docs_query = linked_docs_query.filter(
+                (KosyncDocument.user_id == uid) | (KosyncDocument.user_id.is_(None))
+            )
+        linked_docs = linked_docs_query.all()
         if linked_docs:
             linked_abs_ids = {doc.linked_abs_id for doc in linked_docs if doc.linked_abs_id}
-            books = session.query(Book).filter(Book.abs_id.in_(linked_abs_ids)).all()
+            books_query = session.query(Book).filter(Book.abs_id.in_(linked_abs_ids))
+            if uid is not None:
+                books_query = books_query.join(UserBook, UserBook.abs_id == Book.abs_id).filter(UserBook.user_id == uid)
+            books = books_query.all()
             books_by_id = {book.abs_id: book for book in books}
             for doc in linked_docs:
                 book = books_by_id.get(doc.linked_abs_id)
                 if book and doc.document_hash:
                     links.setdefault(str(doc.document_hash), book)
 
-        direct_books = session.query(Book).filter(Book.kosync_doc_id.isnot(None)).all()
+        direct_books_query = session.query(Book).filter(Book.kosync_doc_id.isnot(None))
+        if uid is not None:
+            direct_books_query = direct_books_query.join(UserBook, UserBook.abs_id == Book.abs_id).filter(UserBook.user_id == uid)
+        direct_books = direct_books_query.all()
         for book in direct_books:
             if book.kosync_doc_id:
                 links.setdefault(str(book.kosync_doc_id), book)
@@ -1829,7 +2553,9 @@ class DatabaseService:
         return links
 
     def _get_all_koreader_active_md5s(self, session) -> set[str]:
-        rows = session.query(KOReaderPageStat.md5).distinct().all()
+        uid = self._resolve_uid(None)
+        query = session.query(KOReaderPageStat.md5)
+        rows = self._scope_koreader_user(query, KOReaderPageStat, uid).distinct().all()
         return {
             str(row[0]).strip()
             for row in rows
@@ -1840,7 +2566,13 @@ class DatabaseService:
         if not md5s:
             return {}
 
-        rows = session.query(KOReaderBookStat).filter(KOReaderBookStat.md5.in_(md5s)).order_by(
+        uid = self._resolve_uid(None)
+        query = self._scope_koreader_user(
+            session.query(KOReaderBookStat).filter(KOReaderBookStat.md5.in_(md5s)),
+            KOReaderBookStat,
+            uid,
+        )
+        rows = query.order_by(
             KOReaderBookStat.last_updated.desc(),
             KOReaderBookStat.id.desc(),
         ).all()
@@ -1884,8 +2616,9 @@ class DatabaseService:
         if not md5s:
             return []
 
+        uid = self._resolve_uid(None)
         query = session.query(KOReaderPageStat.start_time, KOReaderPageStat.duration)
-        query = query.filter(KOReaderPageStat.md5.in_(md5s))
+        query = self._scope_koreader_user(query, KOReaderPageStat, uid).filter(KOReaderPageStat.md5.in_(md5s))
         if start_date is not None:
             start_epoch = datetime.combine(
                 start_date,
@@ -1927,7 +2660,9 @@ class DatabaseService:
         if not md5s:
             return set()
 
-        rows = session.query(KOReaderPageStat.start_time).filter(KOReaderPageStat.md5.in_(md5s)).all()
+        uid = self._resolve_uid(None)
+        query = session.query(KOReaderPageStat.start_time).filter(KOReaderPageStat.md5.in_(md5s))
+        rows = self._scope_koreader_user(query, KOReaderPageStat, uid).all()
         return {
             datetime.fromisoformat(self._local_date_from_epoch(row.start_time, tz_name)).date()
             for row in rows
@@ -1944,15 +2679,20 @@ class DatabaseService:
 
             from sqlalchemy import func
 
+            uid = self._resolve_uid(None)
             total_seconds = int(
-                session.query(func.coalesce(func.sum(KOReaderPageStat.duration), 0))
+                self._scope_koreader_user(
+                    session.query(func.coalesce(func.sum(KOReaderPageStat.duration), 0)),
+                    KOReaderPageStat,
+                    uid,
+                )
                 .filter(KOReaderPageStat.md5.in_(md5s))
                 .scalar()
                 or 0
             )
             pages_read = self._koreader_pages_read(session, md5s)
             books_tracked = int(
-                session.query(KOReaderPageStat.md5)
+                self._scope_koreader_user(session.query(KOReaderPageStat.md5), KOReaderPageStat, uid)
                 .filter(KOReaderPageStat.md5.in_(md5s))
                 .distinct()
                 .count()
@@ -2066,14 +2806,15 @@ class DatabaseService:
                 }
 
             contexts = self._build_koreader_book_contexts(session, md5s)
-            rows = (
+            uid = self._resolve_uid(None)
+            rows_query = (
                 session.query(KOReaderPageStat)
                 .filter(KOReaderPageStat.md5.in_(md5s))
                 .filter(KOReaderPageStat.start_time >= start_epoch)
                 .filter(KOReaderPageStat.start_time < end_epoch)
                 .order_by(KOReaderPageStat.start_time.asc())
-                .all()
             )
+            rows = self._scope_koreader_user(rows_query, KOReaderPageStat, uid).all()
 
             if not rows:
                 return {
@@ -2155,14 +2896,15 @@ class DatabaseService:
                 }
 
             contexts = self._build_koreader_book_contexts(session, md5s)
-            rows = (
+            uid = self._resolve_uid(None)
+            rows_query = (
                 session.query(KOReaderPageStat)
                 .filter(KOReaderPageStat.md5.in_(md5s))
                 .filter(KOReaderPageStat.start_time >= start_epoch)
                 .filter(KOReaderPageStat.start_time < end_epoch)
                 .order_by(KOReaderPageStat.start_time.asc())
-                .all()
             )
+            rows = self._scope_koreader_user(rows_query, KOReaderPageStat, uid).all()
 
             day_buckets = {}
             for row in rows:
@@ -2213,9 +2955,13 @@ class DatabaseService:
 
             contexts = self._build_koreader_book_contexts(session, md5s)
             sample_size = max(int(limit or 10) * 400, 4000)
-            rows = (
+            uid = self._resolve_uid(None)
+            rows_query = (
                 session.query(KOReaderPageStat)
                 .filter(KOReaderPageStat.md5.in_(md5s))
+            )
+            rows = (
+                self._scope_koreader_user(rows_query, KOReaderPageStat, uid)
                 .order_by(KOReaderPageStat.start_time.desc())
                 .limit(sample_size)
                 .all()
@@ -2340,14 +3086,15 @@ class DatabaseService:
             s["endTime"] = int(s["endTime"])
         return sessions
 
-    @staticmethod
-    def _distinct_pages_count(session, md5s, start_epoch=None, end_epoch=None) -> int:
+    def _distinct_pages_count(self, session, md5s, start_epoch=None, end_epoch=None) -> int:
         """Count distinct (md5, page) screen-pages in an optional time window."""
         if not md5s:
             return 0
+        uid = self._resolve_uid(None)
         query = session.query(KOReaderPageStat.md5, KOReaderPageStat.page).filter(
             KOReaderPageStat.md5.in_(md5s)
         )
+        query = self._scope_koreader_user(query, KOReaderPageStat, uid)
         if start_epoch is not None:
             query = query.filter(KOReaderPageStat.start_time >= start_epoch)
         if end_epoch is not None:
@@ -2398,11 +3145,12 @@ class DatabaseService:
             if not md5s:
                 return buckets
             tz = ZoneInfo(tz_name)
-            rows = (
+            uid = self._resolve_uid(None)
+            rows_query = (
                 session.query(KOReaderPageStat.start_time, KOReaderPageStat.duration)
                 .filter(KOReaderPageStat.md5.in_(md5s))
-                .all()
             )
+            rows = self._scope_koreader_user(rows_query, KOReaderPageStat, uid).all()
             for row in rows:
                 hour = datetime.fromtimestamp(float(row.start_time), tz).hour
                 buckets[hour]["seconds"] += int(max(row.duration or 0, 0))
@@ -2421,11 +3169,12 @@ class DatabaseService:
             for md5, ctx in contexts.items():
                 keys_md5[ctx["bookKey"]].add(md5)
 
-            rows = (
+            uid = self._resolve_uid(None)
+            rows_query = (
                 session.query(KOReaderPageStat.md5, KOReaderPageStat.start_time, KOReaderPageStat.duration)
                 .filter(KOReaderPageStat.md5.in_(md5s))
-                .all()
             )
+            rows = self._scope_koreader_user(rows_query, KOReaderPageStat, uid).all()
             agg = {}
             for row in rows:
                 ctx = contexts.get(row.md5)
@@ -2467,12 +3216,13 @@ class DatabaseService:
             ctx = contexts[next(iter(md5s))]
             metadata = self._get_latest_koreader_book_metadata(session, md5s)
 
-            rows = (
+            uid = self._resolve_uid(None)
+            rows_query = (
                 session.query(KOReaderPageStat)
                 .filter(KOReaderPageStat.md5.in_(md5s))
                 .order_by(KOReaderPageStat.start_time.asc())
-                .all()
             )
+            rows = self._scope_koreader_user(rows_query, KOReaderPageStat, uid).all()
             if not rows:
                 return None
 
@@ -2509,11 +3259,12 @@ class DatabaseService:
 
     def _koreader_available_years(self, session, md5s, tz_name: str) -> list[int]:
         from sqlalchemy import func
-        bounds = (
+        uid = self._resolve_uid(None)
+        bounds_query = (
             session.query(func.min(KOReaderPageStat.start_time), func.max(KOReaderPageStat.start_time))
             .filter(KOReaderPageStat.md5.in_(md5s))
-            .first()
         )
+        bounds = self._scope_koreader_user(bounds_query, KOReaderPageStat, uid).first()
         if not bounds or bounds[0] is None:
             return []
         tz = ZoneInfo(tz_name)
@@ -2539,7 +3290,8 @@ class DatabaseService:
             tz = ZoneInfo(tz_name)
             start_epoch = datetime(year, 1, 1, tzinfo=tz).timestamp()
             end_epoch = datetime(year + 1, 1, 1, tzinfo=tz).timestamp()
-            rows = (
+            uid = self._resolve_uid(None)
+            rows_query = (
                 session.query(
                     KOReaderPageStat.md5, KOReaderPageStat.page,
                     KOReaderPageStat.start_time, KOReaderPageStat.duration,
@@ -2547,8 +3299,8 @@ class DatabaseService:
                 .filter(KOReaderPageStat.md5.in_(md5s))
                 .filter(KOReaderPageStat.start_time >= start_epoch)
                 .filter(KOReaderPageStat.start_time < end_epoch)
-                .all()
             )
+            rows = self._scope_koreader_user(rows_query, KOReaderPageStat, uid).all()
 
             months = [{"month": m, "seconds": 0, "pages": 0, "finished": 0} for m in range(1, 13)]
             month_pages = [set() for _ in range(12)]

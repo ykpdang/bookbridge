@@ -5,6 +5,7 @@ import logging
 from src.api.storyteller_api import StorytellerAPIClient
 from src.db.models import Book, State
 from src.utils.ebook_utils import EbookParser
+from src.utils.progress_metadata import parse_service_timestamp
 from src.sync_clients.sync_client_interface import SyncClient, LocatorResult, SyncResult, UpdateProgressRequest, ServiceState
 
 logger = logging.getLogger(__name__)
@@ -141,6 +142,11 @@ class StorytellerSyncClient(SyncClient):
             delta = abs(st_pct - prev_storyteller_pct)
 
         current = {"pct": st_pct, "ts": st_ts, "href": st_href}
+        # Storyteller's position timestamp (epoch ms) doubles as the service's
+        # own "position last changed" signal; 0 (unstarted) parses to None.
+        service_updated_at = parse_service_timestamp(st_ts)
+        if service_updated_at is not None:
+            current["service_updated_at"] = service_updated_at
         if st_frag:
             current["frag"] = st_frag
             current["fragment"] = st_frag

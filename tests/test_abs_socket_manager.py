@@ -120,22 +120,62 @@ class TestABSSocketManagerStart(unittest.TestCase):
         self.db = MagicMock()
         self.sync = MagicMock()
 
-    def test_start_builds_listener_per_target(self):
-        """start() constructs and launches one listener per target."""
+    def test_start_supervises_one_thread_per_target(self):
+        """start() launches one supervised thread per target (global + user 2);
+        listeners are constructed inside the supervisor, not in start()."""
         self.db.list_users.return_value = [_user(2)]
         registry = MagicMock()
         registry.get_clients.return_value = _bundle("caitlin-token")
         mgr = ABSSocketManager(self.db, self.sync, user_client_registry=registry)
 
-        with patch("src.services.abs_socket_manager.ABSSocketListener") as MockListener, \
-             patch("src.services.abs_socket_manager.threading.Thread") as MockThread:
+        with patch("src.services.abs_socket_manager.threading.Thread") as MockThread:
             mgr.start()
 
-        # One listener for global, one for user 2.
-        self.assertEqual(MockListener.call_count, 2)
-        user_ids = {c.kwargs.get("user_id") for c in MockListener.call_args_list}
-        self.assertEqual(user_ids, {None, 2})
         self.assertEqual(MockThread.call_count, 2)
+        for c in MockThread.call_args_list:
+            self.assertEqual(c.kwargs["target"], mgr._supervise)
+        supervised_user_ids = {c.kwargs["args"][0] for c in MockThread.call_args_list}
+        self.assertEqual(supervised_user_ids, {None, 2})
+
+    def test_supervise_restarts_listener_until_stopped(self):
+        """A listener that exits is re-created and restarted; the loop ends when
+        stop() is signalled — the core fix for the engineio teardown death."""
+        mgr = ABSSocketManager(self.db, self.sync, user_client_registry=None)
+        mgr._restart_base_secs = 0
+        mgr._restart_max_secs = 0
+        mgr._healthy_session_secs = 0
+        starts = {"n": 0}
+        built = []
+
+        class _FakeListener:
+            def __init__(self, **kwargs):
+                built.append(kwargs)
+
+            def start(self_inner):
+                starts["n"] += 1
+                if starts["n"] >= 3:
+                    mgr._stop_event.set()  # stop after the 3rd (re)start
+
+            def stop(self_inner):
+                pass
+
+        with patch("src.services.abs_socket_manager.ABSSocketListener", _FakeListener):
+            mgr._supervise(None, "http://abs.local", "admin-token", "global")
+
+        self.assertEqual(starts["n"], 3)   # initial + 2 restarts
+        self.assertEqual(len(built), 3)    # a fresh listener each iteration
+        self.assertTrue(all(b["user_id"] is None for b in built))
+
+    def test_stop_signals_event_and_disconnects_current_listeners(self):
+        """stop() sets the stop event and disconnects the running listener(s)."""
+        mgr = ABSSocketManager(self.db, self.sync, user_client_registry=None)
+        listener = MagicMock()
+        mgr._current_listeners["global"] = listener
+
+        mgr.stop()
+
+        self.assertTrue(mgr._stop_event.is_set())
+        listener.stop.assert_called_once()
 
     def test_start_no_targets_logs_and_returns(self):
         """With no token at all, start() launches nothing."""

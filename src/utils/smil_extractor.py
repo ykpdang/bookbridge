@@ -5,9 +5,10 @@ import re
 import zipfile
 import urllib.parse
 from pathlib import Path
-from xml.etree import ElementTree as ET
 from typing import Optional, List, Dict, Tuple
 from bs4 import BeautifulSoup
+from defusedxml import ElementTree as ET
+from defusedxml.common import DefusedXmlException
 
 logger = logging.getLogger(__name__)
 
@@ -536,7 +537,7 @@ class SmilExtractor:
             for rootfile in root.iter():
                 if rootfile.tag.endswith('rootfile'):
                     return rootfile.get('full-path')
-        except (KeyError, UnicodeDecodeError, ET.ParseError) as e:
+        except (KeyError, UnicodeDecodeError, ET.ParseError, DefusedXmlException) as e:
             logger.debug(f"Failed to read OPF path from container.xml: {e}")
         return None
 

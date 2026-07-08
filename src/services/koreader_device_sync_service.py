@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
+from src.utils.cache_paths import safe_cache_path
 from src.utils.logging_utils import sanitize_log_data
 
 logger = logging.getLogger(__name__)
@@ -327,12 +328,12 @@ class KOReaderDeviceSyncService:
         try:
             return Path(self.ebook_parser.resolve_book_path(source_filename))
         except FileNotFoundError:
-            cached_path = self.epub_cache_dir / source_filename
-            if cached_path.exists():
+            cached_path = safe_cache_path(self.epub_cache_dir, source_filename)
+            if cached_path and cached_path.exists():
                 return cached_path
         except Exception:
-            cached_path = self.epub_cache_dir / source_filename
-            if cached_path.exists():
+            cached_path = safe_cache_path(self.epub_cache_dir, source_filename)
+            if cached_path and cached_path.exists():
                 return cached_path
         return None
 
@@ -342,7 +343,10 @@ class KOReaderDeviceSyncService:
             return source_path
 
         self.epub_cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_path = self.epub_cache_dir / source_filename
+        cache_path = safe_cache_path(self.epub_cache_dir, source_filename)
+        if cache_path is None:
+            logger.warning("KOReader device-sync refused unsafe cache filename '%s'", sanitize_log_data(source_filename))
+            return None
 
         if self._download_from_booklore(book, source_filename, cache_path):
             return cache_path

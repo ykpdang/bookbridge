@@ -1455,6 +1455,25 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
         self.assertIn('previewMatchSubmit(', html)
         self.assertIn('mappingForm.requestSubmit(forgeBtn);', html)
 
+    def test_kosync_document_review_lives_on_add_update_book(self):
+        index_html = self._read_template_source('index.html')
+        add_book_html = self._read_template_source('add_book.html')
+
+        self.assertIn('Add / Update Book', index_html)
+        self.assertNotIn('Reader Docs', index_html)
+        self.assertNotIn("{{ url_for('add_book') }}#kosync-documents", index_html)
+        self.assertIn('id="kosync-documents"', add_book_html)
+        self.assertIn('Reader Documents', add_book_html)
+        self.assertIn('/api/me/kosync-documents', add_book_html)
+
+    def test_kosync_link_panel_suggests_filename_matches(self):
+        add_book_html = self._read_template_source('add_book.html')
+
+        self.assertIn('function kosyncMatchScore(', add_book_html)
+        self.assertIn('KOSYNC_LIKELY_MATCH_THRESHOLD', add_book_html)
+        self.assertIn('likely match', add_book_html)
+        self.assertIn('`File: ${doc.filename}`', add_book_html)
+
     def test_batch_match_template_has_submit_feedback_hooks(self):
         html = self._read_template_source('batch_match.html')
 
@@ -1801,8 +1820,8 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
     @patch('src.web_server.requests.post')
     def test_test_connection_storyteller_uses_post_payload_not_saved_env(self, mock_post):
         def fake_post(url, data=None, headers=None, timeout=None):
-            self.assertEqual(url, 'http://typed-storyteller/api/token')
-            self.assertEqual(data, {'username': 'typed-user', 'password': 'wrong-pass'})
+            self.assertEqual(url, 'http://typed-storyteller/api/v2/token')
+            self.assertEqual(data, {'usernameOrEmail': 'typed-user', 'password': 'wrong-pass'})
             self.assertEqual(headers, {'Content-Type': 'application/x-www-form-urlencoded'})
             self.assertEqual(timeout, 10)
             return _http_response(401)

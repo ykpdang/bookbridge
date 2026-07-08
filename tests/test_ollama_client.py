@@ -20,6 +20,7 @@ class _EnvGuard(unittest.TestCase):
     OLLAMA_KEYS = [
         "OLLAMA_ENABLED", "OLLAMA_URL", "OLLAMA_EMBED_MODEL", "OLLAMA_CHAT_MODEL",
         "OLLAMA_KEEP_ALIVE", "OLLAMA_NUM_CTX",
+        "LLM_PROVIDER", "LLM_EMBED_MODEL", "LLM_CHAT_MODEL", "LLM_NUM_CTX",
     ]
 
     def setUp(self):
@@ -28,6 +29,10 @@ class _EnvGuard(unittest.TestCase):
         os.environ["OLLAMA_URL"] = "http://ollama:11434"
         os.environ["OLLAMA_EMBED_MODEL"] = "nomic-embed-text"
         os.environ["OLLAMA_CHAT_MODEL"] = "qwen2.5:14b"
+        os.environ.pop("LLM_PROVIDER", None)
+        os.environ.pop("LLM_EMBED_MODEL", None)
+        os.environ.pop("LLM_CHAT_MODEL", None)
+        os.environ.pop("LLM_NUM_CTX", None)
         os.environ.pop("OLLAMA_KEEP_ALIVE", None)
         os.environ.pop("OLLAMA_NUM_CTX", None)
 

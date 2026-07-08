@@ -78,6 +78,54 @@ def test_generate_alignment_map(service):
     assert alignment_map[0]['char'] == 0
     assert alignment_map[0]['ts'] == 0.0
 
+def _stub_alignment_row(mock_db, alignment_map):
+    session = mock_db.get_session()
+    session.__enter__.return_value = session
+    if alignment_map is None:
+        session.query.return_value.filter_by.return_value.first.return_value = None
+    else:
+        entry = MagicMock()
+        entry.alignment_map_json = json.dumps(alignment_map)
+        session.query.return_value.filter_by.return_value.first.return_value = entry
+    return session
+
+
+def test_get_alignment_caches_parsed_map(service, mock_db):
+    mock_map = [{'char': 0, 'ts': 0.0}, {'char': 100, 'ts': 10.0}]
+    _stub_alignment_row(mock_db, mock_map)
+    mock_db.get_session.reset_mock()
+
+    first = service._get_alignment("test_id")
+    second = service._get_alignment("test_id")
+
+    assert first == mock_map
+    assert second is first  # served from cache, no re-parse
+    assert mock_db.get_session.call_count == 1  # DB hit only on the first call
+
+
+def test_save_alignment_invalidates_cache(service, mock_db):
+    stale_map = [{'char': 0, 'ts': 0.0}]
+    fresh_map = [{'char': 0, 'ts': 0.0}, {'char': 50, 'ts': 5.0}]
+    session = _stub_alignment_row(mock_db, stale_map)
+
+    assert service._get_alignment("test_id") == stale_map
+
+    session.query.return_value.filter_by.return_value.first.return_value = None
+    service._save_alignment("test_id", fresh_map, align_method="lexical")
+
+    _stub_alignment_row(mock_db, fresh_map)
+    assert service._get_alignment("test_id") == fresh_map
+
+
+def test_get_alignment_missing_row_is_not_cached(service, mock_db):
+    _stub_alignment_row(mock_db, None)
+    assert service._get_alignment("test_id") is None
+
+    mock_map = [{'char': 0, 'ts': 0.0}]
+    _stub_alignment_row(mock_db, mock_map)
+    assert service._get_alignment("test_id") == mock_map
+
+
 def test_get_time_for_text(service, mock_db):
     # Mock _get_alignment return
     mock_map = [

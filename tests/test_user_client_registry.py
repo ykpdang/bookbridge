@@ -49,6 +49,35 @@ class TestUserClientRegistry(unittest.TestCase):
         bundle = self.registry.get_clients(u.id)
         self.assertEqual(bundle.abs_client.token, "")
 
+    def test_regular_bundle_does_not_inherit_global_provider_accounts(self):
+        env = {
+            "BOOKLORE_SERVER": "https://grimmory.example",
+            "BOOKLORE_ENABLED": "true",
+            "BOOKLORE_USER": "global-grimmory",
+            "BOOKLORE_PASSWORD": "global-password",
+            "CWA_SERVER": "https://cwa.example",
+            "CWA_ENABLED": "true",
+            "CWA_USERNAME": "global-cwa",
+            "CWA_PASSWORD": "global-password",
+            "HARDCOVER_ENABLED": "true",
+            "HARDCOVER_TOKEN": "global-hardcover",
+        }
+        old = {key: os.environ.get(key) for key in env}
+        try:
+            os.environ.update(env)
+            u = self.svc.create_user("no-global-providers", "pw")
+            bundle = self.registry.get_clients(u.id)
+
+            self.assertFalse(bundle.booklore_client.is_configured())
+            self.assertFalse(bundle.cwa_client.is_configured())
+            self.assertFalse(bundle.hardcover_client.is_configured())
+        finally:
+            for key, value in old.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
     def test_admin_bundle_falls_back_to_global_when_unset(self):
         u = self.svc.create_user("admin2", "pw", role="admin")
         bundle = self.registry.get_clients(u.id)

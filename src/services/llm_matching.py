@@ -6,9 +6,10 @@ model returns something unusable, they fall back to the caller's existing behavi
 """
 
 import logging
-import os
 import re
 from typing import Any, List, Optional, Tuple
+
+from src.api.llm_settings import llm_setting_truthy
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +45,12 @@ JUDGE_SCHEMA: dict = {
 
 
 def tracker_match_enabled() -> bool:
-    return os.environ.get("OLLAMA_TRACKER_MATCH", "false").lower() == "true"
+    return llm_setting_truthy("OLLAMA_TRACKER_MATCH", "false")
 
 
 def library_match_enabled() -> bool:
     """Gates LLM match rescue for library managers (Grimmory, BookOrbit)."""
-    return os.environ.get("OLLAMA_LIBRARY_MATCH", "false").lower() == "true"
+    return llm_setting_truthy("OLLAMA_LIBRARY_MATCH", "false")
 
 
 def _ready(ollama_client: Any) -> bool:

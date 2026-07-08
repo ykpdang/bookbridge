@@ -677,7 +677,7 @@
                 rel="noopener noreferrer">📚 Docs</a>
             <a href="/" class="btn">← Dashboard</a>
             <a href="/logs" class="btn">📊 Logs</a>
-            <a href="{{ url_for('add_book') }}" class="btn">Add Book</a>
+            <a href="{{ url_for('add_book') }}" class="btn">Add / Update Book</a>
             <a href="/suggestions" class="btn">💡 Suggestions</a>
         </div>
     </div>
@@ -851,13 +851,20 @@
                         <div class="help-text">Wait this many seconds after KoReader stops sending PUTs before running the sync cycle.</div>
                     </div>
                     <div class="checkbox-wrapper full-width">
+                        <input type="checkbox" id="koreader_annotation_sync" name="KOREADER_ANNOTATION_SYNC" {% if
+                            get_bool('KOREADER_ANNOTATION_SYNC') %}checked{% endif %}>
+                        <label for="koreader_annotation_sync">Sync highlights &amp; notes between devices</label>
+                        <div class="help-text">Relay KOReader highlights/notes between your devices through the bridge
+                            (BridgeSync plugin required on each device). Deletions and note edits propagate too.</div>
+                    </div>
+                    <div class="checkbox-wrapper full-width">
                         <input type="checkbox" id="kosync_pct" name="KOSYNC_USE_PERCENTAGE_FROM_SERVER" {% if
                             get_bool('KOSYNC_USE_PERCENTAGE_FROM_SERVER') %}checked{% endif %}>
                         <label for="kosync_pct">Use Percentage from Server (Ignore Text Matching)</label>
                         <div class="help-text">Syncs by raw percentage instead of text/sentence alignment for
                             <em>already-linked</em> books. It does <strong>not</strong> bypass the document-hash →
                             book lookup: a book whose KOReader hash isn't linked to a mapping still needs linking
-                            (Settings → KOSync Documents) before any sync — percentage or text — can happen.</div>
+                            from Add / Update Book -> Reader Documents before any sync — percentage or text — can happen.</div>
                     </div>
 
                     <!-- Separator -->
@@ -969,6 +976,8 @@
                             {% if get_bool('GRIMMORY_READING_SESSIONS') %}checked{% endif %}>
                         <label for="grimmory_sessions">Record Reading Sessions</label>
                     </div>
+
+                    <!-- Highlight sync is per-user: Settings → Users → (user) → Integrations → Grimmory. -->
 
                     <!-- Separator -->
                     <div class="full-width" style="margin: 10px 0; border-top: 1px solid rgba(255,255,255,0.1);"></div>
@@ -1105,6 +1114,19 @@
                                 value="{{ get_val('BOOKORBIT_SHELF_WATCH_RESCAN_HOURS', '24') }}">
                             <div class="help-text">Books on the watch collection with no audio candidate are re-scanned no more often than this.</div>
                         </div>
+                    </div>
+
+                    <!-- Annotation / highlight sync -->
+                    <div class="full-width" style="margin: 10px 0; border-top: 1px solid rgba(255,255,255,0.1);"></div>
+                    <h4 class="full-width" style="font-size: 14px; color: #fff; margin-bottom: -10px;">Highlight Sync</h4>
+                    <div class="form-group">
+                        <label>Highlight Sync Interval (minutes)</label>
+                        <input type="number" min="0" name="BOOKORBIT_ANNOTATION_SYNC_MINUTES"
+                            value="{{ get_val('BOOKORBIT_ANNOTATION_SYNC_MINUTES', '15') }}">
+                        <div class="help-text">Sync highlights/notes between your devices and BookOrbit's web reader
+                            every N minutes (0 disables). Each user also needs their BookOrbit <strong>KOReader sync</strong>
+                            username &amp; password set in Settings → Users → (user) → Integrations — the same
+                            credentials BookOrbit's own KOReader plugin uses.</div>
                     </div>
                 </div>
             </div>
@@ -1365,11 +1387,12 @@
 
             <div class="tab-panel" data-panel="ai">
 
-            <!-- Ollama (Local LLM) -->
+            <!-- AI / LLM Provider -->
             <div class="settings-section">
                 {% set ollama_enabled = get_bool('OLLAMA_ENABLED') %}
+                {% set llm_provider = get_val('LLM_PROVIDER') or 'ollama' %}
                 <div class="section-header">
-                    <h3>Ollama (Local LLM)</h3>
+                    <h3>AI / LLM Provider</h3>
                     <button class="btn btn-sm" type="button" onclick="testConnection('ollama', this)">🔗 Test</button>
                     <div class="toggle-switch-wrapper">
                         <span class="toggle-label">Enable</span>
@@ -1384,25 +1407,46 @@
                 <div id="ollama_body" class="section-body {% if not ollama_enabled %}collapsed{% endif %}">
                     <div class="full-width">
                         <p class="help-text">
-                            Use a local Ollama server to semantically improve book-match suggestions and rescue
-                            failed audio↔text alignments. All features below are off until you enable them, and fall
-                            back to the existing behavior if Ollama is unreachable.
+                            Use Ollama, OpenAI, or an OpenAI-compatible local endpoint such as llama-server or
+                            llama-swap to improve book-match suggestions and rescue failed audio/text alignments.
+                            All features below fall back to existing behavior if the provider is unreachable.
                         </p>
+                    </div>
+                    <div class="form-group full-width">
+                        <label>Provider</label>
+                        <select name="LLM_PROVIDER">
+                            <option value="ollama" {% if llm_provider == 'ollama' %}selected{% endif %}>Ollama</option>
+                            <option value="openai" {% if llm_provider == 'openai' %}selected{% endif %}>OpenAI</option>
+                            <option value="openai_compatible" {% if llm_provider == 'openai_compatible' %}selected{% endif %}>OpenAI-compatible (llama-server / llama-swap)</option>
+                        </select>
+                        <div class="help-text">Ollama remains the default. llama-server and llama-swap use the OpenAI-compatible option.</div>
                     </div>
                     <div class="form-group full-width">
                         <label>Ollama Server URL</label>
                         <input type="text" name="OLLAMA_URL" value="{{ get_val('OLLAMA_URL') }}">
                         <div class="help-text">e.g. http://ollama:11434 (container DNS) or http://localhost:11434</div>
                     </div>
+                    <div class="form-group full-width">
+                        <label>OpenAI-Compatible Base URL</label>
+                        <input type="text" name="LLM_BASE_URL" value="{{ get_val('LLM_BASE_URL') }}">
+                        <div class="help-text">Used for OpenAI-compatible providers. e.g. http://localhost:8080/v1</div>
+                    </div>
+                    <div class="form-group full-width">
+                        <label>API Key</label>
+                        <input type="password" name="LLM_API_KEY" value="{{ get_val('LLM_API_KEY') }}">
+                        <div class="help-text">Required for OpenAI. Optional for local OpenAI-compatible servers.</div>
+                    </div>
                     <div class="form-group">
                         <label>Embedding Model</label>
-                        <input type="text" name="OLLAMA_EMBED_MODEL" value="{{ get_val('OLLAMA_EMBED_MODEL') }}">
-                        <div class="help-text">e.g. nomic-embed-text (run: ollama pull nomic-embed-text)</div>
+                        <input type="text" name="LLM_EMBED_MODEL"
+                            value="{{ get_val('LLM_EMBED_MODEL') or get_val('OLLAMA_EMBED_MODEL') }}">
+                        <div class="help-text">e.g. nomic-embed-text for Ollama/local, text-embedding-3-small for OpenAI.</div>
                     </div>
                     <div class="form-group">
                         <label>Chat / Judge Model</label>
-                        <input type="text" name="OLLAMA_CHAT_MODEL" value="{{ get_val('OLLAMA_CHAT_MODEL') }}">
-                        <div class="help-text">e.g. qwen2.5:14b</div>
+                        <input type="text" name="LLM_CHAT_MODEL"
+                            value="{{ get_val('LLM_CHAT_MODEL') or get_val('OLLAMA_CHAT_MODEL') }}">
+                        <div class="help-text">e.g. qwen2.5:14b for Ollama/local, gpt-4o-mini for OpenAI.</div>
                     </div>
                     <div class="form-group">
                         <label>Keep Alive</label>
@@ -1412,9 +1456,9 @@
                     </div>
                     <div class="form-group">
                         <label>Chat Context Length (num_ctx)</label>
-                        <input type="number" name="OLLAMA_NUM_CTX" value="{{ get_val('OLLAMA_NUM_CTX') }}">
-                        <div class="help-text">Context window for judge calls. Empty = server default. Raise if
-                            judge prompts get truncated; costs VRAM.</div>
+                        <input type="number" name="LLM_NUM_CTX"
+                            value="{{ get_val('LLM_NUM_CTX') or get_val('OLLAMA_NUM_CTX') }}">
+                        <div class="help-text">Used by Ollama judge calls. Empty = server default. Raise if judge prompts get truncated; costs VRAM.</div>
                     </div>
 
                     <div class="checkbox-wrapper full-width">
@@ -1556,6 +1600,22 @@
                         <input type="number" min="1" name="KOREADER_SESSION_GAP_MINUTES"
                             value="{{ get_val('KOREADER_SESSION_GAP_MINUTES') or '30' }}">
                         <small>Idle gap that splits KOReader page events into separate reading sessions on the stats page.</small>
+                    </div>
+                    <div class="checkbox-wrapper full-width">
+                        <input type="checkbox" id="sync_freshness_guards" name="SYNC_FRESHNESS_GUARDS" {% if
+                            get_bool('SYNC_FRESHNESS_GUARDS') %}checked{% endif %}>
+                        <label for="sync_freshness_guards">Freshness Guards (recommended)</label>
+                        <div class="help-text">Use each service's own "position last changed" timestamp to (1) ignore
+                            stale re-readings that pretend to be fresh movement and (2) block a client that is
+                            materially behind a much newer position from rolling everyone back. Disable only to
+                            restore pure percentage-delta leader selection.</div>
+                    </div>
+                    <div class="form-group">
+                        <label>Rollback Veto Tolerance (Seconds)</label>
+                        <input type="number" min="0" name="SYNC_ROLLBACK_VETO_SECONDS"
+                            value="{{ get_val('SYNC_ROLLBACK_VETO_SECONDS') or '600' }}">
+                        <small>A behind client is only vetoed when the peer's position is at least this much newer —
+                            keep generous to absorb clock differences between services.</small>
                     </div>
                     <div class="checkbox-wrapper full-width">
                         <input type="checkbox" id="xpath_fallback" name="XPATH_FALLBACK_TO_PREVIOUS_SEGMENT" {% if
@@ -1868,8 +1928,14 @@
                         <div class="form-group full-width">
                             <label>Whisper.cpp Server URL</label>
                             <input type="text" name="WHISPER_CPP_URL" value="{{ get_val('WHISPER_CPP_URL', '') }}"
-                                placeholder="http://192.168.178.132:11080/audio/transcriptions" />
-                            <div class="help-text">Example: http://HOST:11080/audio/transcriptions</div>
+                                placeholder="http://192.168.178.132:8080/v1/audio/transcriptions" />
+                            <div class="help-text">Full endpoint URL, including the path — e.g.
+                                <code>http://HOST:8080/v1/audio/transcriptions</code>. Works with whisper.cpp
+                                server and OpenAI-compatible proxies (e.g. llama-swap). Inside Docker, do not use
+                                <code>localhost</code> — use the host's LAN IP or the whisper container's service name.
+                                Set this here in the UI: dashboard settings are stored in the database and take
+                                precedence over <code>docker-compose</code> environment variables.
+                            </div>
                         </div>
                     </div>
 
@@ -1926,7 +1992,8 @@
                             </datalist>
                             <div class="help-text">Model name for Local Whisper and Whisper.cpp Server. Pick a common
                                 model from the suggestions or enter a custom whisper.cpp model name. Larger = better
-                                accuracy but slower.
+                                accuracy but slower. For the Whisper.cpp Server, this must match the model id the
+                                server (or llama-swap) exposes — a mismatched id makes the server reject the request.
                             </div>
                         </div>
                     </div>
@@ -2168,7 +2235,11 @@
             hardcover: ['HARDCOVER_ENABLED', 'HARDCOVER_TOKEN'],
             storygraph: ['STORYGRAPH_ENABLED', 'STORYGRAPH_SESSION_COOKIE', 'STORYGRAPH_REMEMBER_USER_TOKEN'],
             telegram: ['TELEGRAM_ENABLED', 'TELEGRAM_BOT_TOKEN'],
-            ollama: ['OLLAMA_ENABLED', 'OLLAMA_URL', 'OLLAMA_EMBED_MODEL', 'OLLAMA_CHAT_MODEL'],
+            ollama: [
+                'OLLAMA_ENABLED', 'LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_API_KEY',
+                'LLM_EMBED_MODEL', 'LLM_CHAT_MODEL',
+                'OLLAMA_URL', 'OLLAMA_EMBED_MODEL', 'OLLAMA_CHAT_MODEL'
+            ],
         };
 
         function getTestConnectionPayload(service) {

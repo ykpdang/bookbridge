@@ -1,9 +1,10 @@
 """Tests for the settings Test button backend for Ollama (_test_ollama)."""
 
+import os
 import unittest
 from unittest.mock import patch, MagicMock
 
-from src.web_server import _test_ollama, _ollama_show_info
+from src.web_server import _test_llm_provider, _test_ollama, _ollama_show_info
 
 
 def _resp(status_code, payload=None):
@@ -53,6 +54,45 @@ class TestOllamaTestEndpoint(unittest.TestCase):
             result = _test_ollama(True, "http://x", "nomic-embed-text", "qwen2.5:14b")
         self.assertTrue(result["ok"])
         self.assertIn("does not report embedding capability", result["message"])
+
+
+class TestLLMProviderTestEndpoint(unittest.TestCase):
+    def test_openai_requires_api_key(self):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}, clear=False):
+            result = _test_llm_provider(
+                True, "openai", "", "", "", "", "http://ollama:11434", "", ""
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("Missing OpenAI API key", result["message"])
+
+    def test_openai_compatible_accepts_no_api_key(self):
+        payload = {"data": [{"id": "embed"}, {"id": "chat"}]}
+        with patch("src.web_server.requests.get", return_value=_resp(200, payload)) as get:
+            result = _test_llm_provider(
+                True, "openai_compatible", "http://llama:8080/v1", "", "embed", "chat",
+                "http://ollama:11434", "", ""
+            )
+        self.assertTrue(result["ok"])
+        self.assertNotIn("Authorization", get.call_args.kwargs["headers"])
+
+    def test_openai_compatible_reports_missing_models(self):
+        payload = {"data": [{"id": "other"}]}
+        with patch("src.web_server.requests.get", return_value=_resp(200, payload)):
+            result = _test_llm_provider(
+                True, "openai_compatible", "http://llama:8080/v1", "", "embed", "chat",
+                "http://ollama:11434", "", ""
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("not listed", result["message"])
+
+    def test_ollama_provider_uses_legacy_probe(self):
+        with patch("src.web_server._test_ollama", return_value={"ok": True, "message": "ollama"}) as probe:
+            result = _test_llm_provider(
+                True, "ollama", "", "", "generic-embed", "generic-chat",
+                "http://ollama:11434", "old-embed", "old-chat"
+            )
+        self.assertTrue(result["ok"])
+        probe.assert_called_once_with(True, "http://ollama:11434", "generic-embed", "generic-chat")
 
 
 class TestOllamaShowInfo(unittest.TestCase):

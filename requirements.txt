@@ -11,6 +11,7 @@ tqdm>=4.66,<5
 gTTS>=2.2,<3
 flask>=3.0,<4
 lxml>=5.0,<6
+defusedxml>=0.7,<1
 dependency-injector>=4.41,<5
 sqlalchemy>=2.0,<3
 alembic>=1.13,<2

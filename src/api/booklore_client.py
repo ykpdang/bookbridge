@@ -104,7 +104,10 @@ class BookloreClient:
         # Whether the server exposes the paginated /api/v1/books/page endpoint.
         # None = unprobed; True = paginate; False = fall back to flat /api/v1/books.
         self._paginated_scan_supported = None
-        self._load_cache()
+        if self.is_configured():
+            self._load_cache()
+        else:
+            logger.debug("Grimmory: client not configured; skipping cached library load")
 
     def _load_cache(self):
         """Load cache from DB, migrating legacy JSON if needed."""
@@ -262,10 +265,15 @@ class BookloreClient:
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         url = f"{self.base_url}{endpoint}"
         try:
-            if method.upper() == "GET":
+            method_upper = method.upper()
+            if method_upper == "GET":
                 response = self.session.get(url, headers=headers, timeout=request_timeout)
-            elif method.upper() == "POST":
+            elif method_upper == "POST":
                 response = self.session.post(url, headers=headers, json=json_data, timeout=request_timeout)
+            elif method_upper == "PUT":
+                response = self.session.put(url, headers=headers, json=json_data, timeout=request_timeout)
+            elif method_upper == "DELETE":
+                response = self.session.delete(url, headers=headers, timeout=request_timeout)
             else: return None
 
             if response.status_code == 401:
@@ -277,10 +285,14 @@ class BookloreClient:
                     logger.warning(f"Grimmory: _make_request returning None after 401 retry (no token) for {method} {endpoint}")
                     return None
                 headers["Authorization"] = f"Bearer {token}"
-                if method.upper() == "GET":
+                if method_upper == "GET":
                     response = self.session.get(url, headers=headers, timeout=request_timeout)
-                else:
+                elif method_upper == "POST":
                     response = self.session.post(url, headers=headers, json=json_data, timeout=request_timeout)
+                elif method_upper == "PUT":
+                    response = self.session.put(url, headers=headers, json=json_data, timeout=request_timeout)
+                elif method_upper == "DELETE":
+                    response = self.session.delete(url, headers=headers, timeout=request_timeout)
             return response
         except Exception as e:
             logger.error(f"âŒ Grimmory API request failed: {e}")
@@ -1658,6 +1670,153 @@ class BookloreClient:
             return None
 
     @staticmethod
+    def _normalize_annotation(raw_annotation):
+        if not isinstance(raw_annotation, dict):
+            return None
+        return {
+            "id": raw_annotation.get("id"),
+            "bookId": raw_annotation.get("bookId"),
+            "createdAt": raw_annotation.get("createdAt"),
+            "updatedAt": raw_annotation.get("updatedAt"),
+            "cfi": raw_annotation.get("cfi"),
+            "text": raw_annotation.get("text"),
+            "note": raw_annotation.get("note"),
+            "chapterTitle": raw_annotation.get("chapterTitle"),
+            "color": raw_annotation.get("color"),
+            "style": raw_annotation.get("style"),
+        }
+
+    def get_annotations(self, book_id):
+        """Return Grimmory reader annotations for one book, scoped by auth user."""
+        response = self._make_request("GET", f"/api/v1/annotations/book/{book_id}")
+        if response is None or response.status_code != 200:
+            logger.warning(
+                "Grimmory: annotation list failed for book %s status=%s body=%s",
+                book_id,
+                response.status_code if response is not None else "no-response",
+                self._response_text_preview(response, 300) if response is not None else "<unavailable>",
+            )
+            return None
+        data = self._parse_json_response(response, f"Grimmory annotations for book {book_id}")
+        if not isinstance(data, list):
+            return []
+        return [ann for ann in (self._normalize_annotation(item) for item in data) if ann]
+
+    def create_annotation(self, book_id, cfi, chapter_title, text, color, style, note=None):
+        payload = {
+            "bookId": int(book_id),
+            "cfi": cfi,
+            "chapterTitle": chapter_title,
+            "text": text,
+            "color": color,
+            "style": style,
+            "note": note,
+        }
+        response = self._make_request("POST", "/api/v1/annotations", payload)
+        if response is None or response.status_code not in (200, 201):
+            logger.warning(
+                "Grimmory: annotation create failed for book %s status=%s body=%s",
+                book_id,
+                response.status_code if response is not None else "no-response",
+                self._response_text_preview(response, 300) if response is not None else "<unavailable>",
+            )
+            return None
+        data = self._parse_json_response(response, f"Grimmory create annotation for book {book_id}")
+        return self._normalize_annotation(data) or data
+
+    def update_annotation(self, annotation_id, color, style, note=None):
+        payload = {"color": color, "style": style, "note": note}
+        response = self._make_request("PUT", f"/api/v1/annotations/{annotation_id}", payload)
+        if response is None or response.status_code not in (200, 204):
+            logger.warning(
+                "Grimmory: annotation update failed for id %s status=%s body=%s",
+                annotation_id,
+                response.status_code if response is not None else "no-response",
+                self._response_text_preview(response, 300) if response is not None else "<unavailable>",
+            )
+            return False
+        return True
+
+    def delete_annotation(self, annotation_id):
+        response = self._make_request("DELETE", f"/api/v1/annotations/{annotation_id}")
+        if response is None:
+            return False
+        if response.status_code in (200, 204, 404):
+            return True
+        logger.warning(
+            "Grimmory: annotation delete failed for id %s status=%s body=%s",
+            annotation_id,
+            response.status_code,
+            self._response_text_preview(response, 300),
+        )
+        return False
+
+    # ------------------------------------------------------------------
+    # Reader notes (book_notes_v2) — the store Grimmory's OWN web reader
+    # writes its highlight-with-note flow to. Separate id space from
+    # /api/v1/annotations.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_book_note(raw_note):
+        if not isinstance(raw_note, dict):
+            return None
+        return {
+            "id": raw_note.get("id"),
+            "bookId": raw_note.get("bookId"),
+            "createdAt": raw_note.get("createdAt"),
+            "updatedAt": raw_note.get("updatedAt"),
+            "cfi": raw_note.get("cfi"),
+            "selectedText": raw_note.get("selectedText"),
+            "noteContent": raw_note.get("noteContent"),
+            "chapterTitle": raw_note.get("chapterTitle"),
+            "color": raw_note.get("color"),
+        }
+
+    def get_book_notes(self, book_id):
+        """Return Grimmory web-reader notes (book_notes_v2) for one book."""
+        response = self._make_request("GET", f"/api/v2/book-notes/book/{book_id}")
+        if response is None or response.status_code != 200:
+            logger.warning(
+                "Grimmory: book-note list failed for book %s status=%s body=%s",
+                book_id,
+                response.status_code if response is not None else "no-response",
+                self._response_text_preview(response, 300) if response is not None else "<unavailable>",
+            )
+            return None
+        data = self._parse_json_response(response, f"Grimmory book notes for book {book_id}")
+        if not isinstance(data, list):
+            return []
+        return [note for note in (self._normalize_book_note(item) for item in data) if note]
+
+    def update_book_note(self, note_id, note_content, color):
+        payload = {"noteContent": note_content, "color": color}
+        response = self._make_request("PUT", f"/api/v2/book-notes/{note_id}", payload)
+        if response is None or response.status_code not in (200, 204):
+            logger.warning(
+                "Grimmory: book-note update failed for id %s status=%s body=%s",
+                note_id,
+                response.status_code if response is not None else "no-response",
+                self._response_text_preview(response, 300) if response is not None else "<unavailable>",
+            )
+            return False
+        return True
+
+    def delete_book_note(self, note_id):
+        response = self._make_request("DELETE", f"/api/v2/book-notes/{note_id}")
+        if response is None:
+            return False
+        if response.status_code in (200, 204, 404):
+            return True
+        logger.warning(
+            "Grimmory: book-note delete failed for id %s status=%s body=%s",
+            note_id,
+            response.status_code,
+            self._response_text_preview(response, 300),
+        )
+        return False
+
+    @staticmethod
     def _to_progress_fraction(raw_pct):
         """Convert Grimmory percentage (0-100) to fraction (0-1) safely."""
         if raw_pct in (None, ""):
@@ -1765,6 +1924,41 @@ class BookloreClient:
         if not book:
             return None, None
         return self._get_progress_by_book_id(book['id'])
+
+    def get_progress_rich(self, ebook_filename):
+        """Progress plus Grimmory's own metadata for a filename, or None.
+
+        Returns ``{pct, cfi, href, last_read_time, status, content_source_pct}``
+        — lastReadTime is Grimmory's ISO timestamp of the last position change
+        and readStatus its reading status (verified live 2026-07-02). EPUB books
+        carry cfi/href from epubProgress; PDF/CBX fall back to percentage-only.
+        """
+        book = self.find_book_by_filename(ebook_filename)
+        if not book:
+            return None
+        response = self._make_request("GET", f"/api/v1/books/{book['id']}")
+        if not response or response.status_code != 200:
+            return None
+        data = self._parse_json_response(response, f"Grimmory rich progress for book {book['id']}")
+        if not isinstance(data, dict):
+            return None
+
+        book_type = str(
+            data.get('primaryFile', {}).get('bookType')
+            or data.get('bookType')
+            or ''
+        ).upper()
+        progress_key = {'EPUB': 'epubProgress', 'PDF': 'pdfProgress', 'CBX': 'cbxProgress'}.get(book_type)
+        progress = (data.get(progress_key) or {}) if progress_key else {}
+
+        return {
+            "pct": self._to_progress_fraction(progress.get('percentage', 0)),
+            "cfi": progress.get('cfi') if book_type == 'EPUB' else None,
+            "href": progress.get('href') if book_type == 'EPUB' else None,
+            "last_read_time": data.get('lastReadTime'),
+            "status": data.get('readStatus'),
+            "content_source_pct": progress.get('contentSourceProgressPercent'),
+        }
 
     def get_audiobook_cover_bytes(self, book_id):
         response = self._make_request("GET", f"/api/v1/audiobooks/{book_id}/cover")

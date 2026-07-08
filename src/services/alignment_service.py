@@ -16,6 +16,7 @@ from typing import List, Dict, Optional, Tuple
 from src.utils.time_utils import utcnow
 
 from src.db.models import BookAlignment
+from src.utils.ebook_utils import LRUCache
 from src.utils.polisher import Polisher
 from src.utils.logging_utils import time_execution
 
@@ -30,6 +31,8 @@ class AlignmentService:
         self.database_service = database_service
         self.polisher = polisher
         self.ollama_client = ollama_client
+        # Parsed alignment maps for the actively-synced books; see _get_alignment.
+        self._alignment_cache = LRUCache(capacity=self._env_int("ALIGNMENT_CACHE_SIZE", 3))
 
     def _ollama_ready(self) -> bool:
         client = self.ollama_client
@@ -37,19 +40,32 @@ class AlignmentService:
 
     @staticmethod
     def _env_true(key: str, default: str = "true") -> bool:
+        if key.startswith("OLLAMA_"):
+            from src.api.llm_settings import llm_setting_truthy
+            return llm_setting_truthy(key, default)
         return os.environ.get(key, default).lower() == "true"
 
     @staticmethod
     def _env_float(key: str, default: float) -> float:
+        if key.startswith("OLLAMA_"):
+            from src.api.llm_settings import llm_setting_value
+            raw = llm_setting_value(key, str(default))
+        else:
+            raw = os.environ.get(key, default)
         try:
-            return float(os.environ.get(key, default))
+            return float(raw)
         except (TypeError, ValueError):
             return default
 
     @staticmethod
     def _env_int(key: str, default: int) -> int:
+        if key.startswith("OLLAMA_"):
+            from src.api.llm_settings import llm_setting_value
+            raw = llm_setting_value(key, str(default))
+        else:
+            raw = os.environ.get(key, default)
         try:
-            return int(float(os.environ.get(key, default)))
+            return int(float(raw))
         except (TypeError, ValueError):
             return default
 
@@ -745,12 +761,25 @@ class AlignmentService:
             
             # Context manager handles commit
             logger.info(f"   💾 Saved alignment for {abs_id} to DB.")
+        self._alignment_cache.delete(abs_id)
 
     def _get_alignment(self, abs_id: str) -> Optional[List[Dict]]:
+        # A long book's map is a 10-15MB JSON blob, and this runs several
+        # times per sync cycle (duration, normalization, locator mapping) —
+        # re-reading and re-parsing it each call dominated cycle time. All
+        # callers treat the returned list as read-only, so sharing the cached
+        # object is safe. Invalidated on _save_alignment; an entry whose row
+        # is deleted outside the service (book unlink/delete) lingers but is
+        # unreachable until a re-alignment stores a fresh map.
+        cached = self._alignment_cache.get(abs_id)
+        if cached is not None:
+            return cached
         with self.database_service.get_session() as session:
             entry = session.query(BookAlignment).filter_by(abs_id=abs_id).first()
             if entry:
-                return json.loads(entry.alignment_map_json)
+                alignment = json.loads(entry.alignment_map_json)
+                self._alignment_cache.put(abs_id, alignment)
+                return alignment
             return None
     def get_book_duration(self, abs_id: str) -> Optional[float]:
         """Get the total duration of the book from its alignment map."""

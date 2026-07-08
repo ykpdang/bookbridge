@@ -2,7 +2,53 @@
 
 <!-- markdownlint-disable MD024 -->
 
-All notable changes to ABS-KoSync Enhanced will be documented in this file.
+All notable changes to BookBridge will be documented in this file.
+
+## [7.1.0] - 2026-07-08
+
+The headline is **a fuller reading-state bridge**: BookBridge now moves highlights, notes, web-reader activity, audiobook progress, and richer freshness metadata together instead of treating sync as only "who has the latest percentage?"
+
+Highlight and note sync requires the **BridgeSync KOReader plugin from this release or newer**. Older BridgeSync builds and plain KOSync clients continue syncing reading position, but they do not have the annotation exchange, sweep, or close-capture support.
+
+### What's New
+
+- **Highlights and notes now have their own sync hub.** KOReader highlights and margin notes can move between devices and the Grimmory and BookOrbit web readers through the updated BridgeSync plugin. Each reader's annotations stay scoped to their own account, deletions travel with the same care as additions, and stable xpointer keys keep one device from erasing another device's highlights just because the same passage was represented slightly differently.
+
+- **BridgeSync grew into a real annotation companion.** The latest KOReader plugin now has explicit **Sync Highlights** and **Sweep All Highlights** actions, captures new annotations when a book closes, scrubs JSON-null note sentinels that could crash KOReader, and uses atomic self-updates so plugin upgrades are less fragile.
+
+- **Every reader can download the KOReader plugin.** The BridgeSync plugin download now appears on each user's Account page, so regular readers do not need admin Settings access to install or update their device plugin.
+
+- **BookOrbit-hosted audiobooks now participate in sync.** Listening progress for BookOrbit audiobooks is read, written, converted across multi-file tracks, and recorded as BookOrbit reading-session activity, so BookOrbit can act as either the ebook side, the audiobook side, or both.
+
+- **Combined audiobook+ebook entries cover ABS ebooks too.** Audiobookshelf ebook progress now participates when a book has both audio and ebook state, instead of being left out once the mapping also included an audiobook.
+
+- **Progress decisions use richer service metadata.** The bridge now persists service-native update timestamps, status, and locator metadata. Leader selection uses that data to suppress stale reappearing states and veto obvious rollback candidates while still allowing genuine rereads or forward movement.
+
+- **KOSync document linking lives in Add / Update Book.** Readers can now review recent unlinked KOSync document hashes, connect them to one of their books, copy the hash, unlink it, or delete stale entries from the same place they already match and repair book links.
+
+- **AI features can use OpenAI or any OpenAI-compatible server.** The optional LLM layer (smarter match suggestions and audio↔text alignment rescue) is no longer Ollama-only — point it at OpenAI or a local OpenAI-compatible endpoint such as llama-server or llama-swap via the new provider selector in Settings. Existing Ollama setups keep working unchanged, and every feature still falls back to normal behavior when the provider is unreachable.
+
+### What Changed
+
+- **Annotation sync is source-aware and account-aware.** BookOrbit ownership is guarded before web-reader annotations are relayed, Grimmory web notes use their own sub-spoke so notes survive round trips, and lossy spoke pulls no longer rewrite identity keys.
+
+- **Storyteller sync understands the newer API shape.** BookBridge now talks to Storyteller's current v2 token and position endpoints while keeping a legacy fallback, and the poller notices meaningful locator changes even when the rounded percentage has not changed.
+
+- **Alignment lookups are faster on repeat syncs.** Parsed alignment maps are cached and refreshed when a map is rebuilt, which avoids repeatedly reparsing large books during the same sync cycle.
+
+- **Add / Update Book clears after queueing.** The search box now empties when you add a book to the queue, so you can go straight into your next search.
+
+- **Settings point users to the right place.** Grimmory highlight sync is configured in each reader's Integrations, matching the per-user credential model introduced in 7.0.0. The admin integrations view also gives clearer KOReader and BookOrbit setup notes.
+
+### Fixed
+
+- **Audiobookshelf listeners recover on their own.** A dropped Audiobookshelf Socket.IO connection now revives itself instead of quietly going silent until the next restart.
+
+- **Same-folder suggestions are stricter.** Split-root libraries no longer create misleading same-folder suggestions when the folder context is not actually the same book, and selected source paths stay anchored so duplicate-looking filenames do not drift to the wrong file.
+
+- **Connection tests live where the credentials do.** The test buttons on the general settings gave inconsistent results because logins are now per-reader; they have been removed, and each reader tests connections from their own Integrations page.
+
+- **BridgeSync self-updates find the plugin metadata reliably.** The updater now locates `_meta.lua` instead of assuming a specific zip layout.
 
 ## [7.0.0]
 

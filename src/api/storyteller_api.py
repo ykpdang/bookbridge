@@ -1,18 +1,20 @@
 # [START FILE: abs-kosync-enhanced/storyteller_api.py]
+import base64
+import logging
+import mimetypes
 import os
 import re
 import time
-import base64
 import zipfile
-import mimetypes
-import logging
-import requests
-from typing import Optional, Dict, Tuple
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Dict, Optional, Tuple
 from urllib.parse import unquote
 
-from src.utils.logging_utils import sanitize_log_data
+import requests
+
 from src.sync_clients.sync_client_interface import LocatorResult
+from src.utils.logging_utils import sanitize_log_data
 from src.utils.user_config import resolve_setting
 
 logger = logging.getLogger(__name__)
@@ -58,26 +60,76 @@ class StorytellerAPIClient:
         # instead of being cleanly skipped.
         return bool(self.base_url and self.username and self.password)
 
+    @staticmethod
+    def _token_expiry_epoch(expires_in) -> float:
+        """Convert Storyteller's millisecond token TTL into an epoch timestamp."""
+        try:
+            ttl_seconds = float(expires_in) / 1000.0
+        except (TypeError, ValueError):
+            ttl_seconds = 15 * 60
+        return time.time() + max(ttl_seconds - 30, 60)
+
+    @staticmethod
+    def _coerce_float(value, *, percentage: bool = False) -> Optional[float]:
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return None
+        if percentage and result > 1.0:
+            result = result / 100.0
+        return result
+
+    @staticmethod
+    def _coerce_int(value) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _coerce_timestamp(value) -> int:
+        numeric = StorytellerAPIClient._coerce_int(value)
+        if numeric is not None:
+            return numeric
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return int(parsed.timestamp() * 1000)
+            except ValueError:
+                pass
+        return 0
+
     def _get_fresh_token(self) -> Optional[str]:
         if self._token and time.time() < self._token_expire_timestamp:
             return self._token
         if not self.username or not self.password:
-            # logger.warning("Storyteller API: No credentials configured")
             return None
-        try:
-            response = requests.post(
-                f"{self.base_url}/api/token",
-                data={"username": self.username, "password": self.password},
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                timeout=10
-            )
-            if response.status_code == 200:
-                data = response.json()
-                self._token = data.get("access_token")
-                self._token_expire_timestamp = data.get("expires_in") / 1000
-                return self._token
-        except Exception as e:
-            logger.error(f"❌ Storyteller login error: {e}")
+
+        attempts = [
+            ("/api/v2/token", {"usernameOrEmail": self.username, "password": self.password}),
+            ("/api/token", {"username": self.username, "password": self.password}),
+        ]
+        for endpoint, payload in attempts:
+            try:
+                response = requests.post(
+                    f"{self.base_url}{endpoint}",
+                    data=payload,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    timeout=10
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    token = data.get("access_token")
+                    if token:
+                        self._token = token
+                        self._token_expire_timestamp = self._token_expiry_epoch(data.get("expires_in"))
+                        return self._token
+                elif response.status_code not in (400, 404, 405, 422):
+                    logger.debug(f"Storyteller login via {endpoint} returned {response.status_code}")
+            except Exception as e:
+                logger.error(f"Storyteller login error via {endpoint}: {e}")
         return None
 
     def _make_request(self, method: str, endpoint: str, json_data: dict = None) -> Optional[requests.Response]:
@@ -197,27 +249,34 @@ class StorytellerAPIClient:
         response = self._make_request("GET", f"/api/v2/books/{book_uuid}/positions")
         if response and response.status_code == 200:
             data = response.json()
+            if isinstance(data.get("position"), dict) and not data.get("locator"):
+                data = data["position"]
+
             locator = data.get('locator', {})
+            if not isinstance(locator, dict):
+                locator = {}
             locations = locator.get('locations', {})
-            chapter_progression = locations.get("progression")
-            if chapter_progression is not None:
-                try:
-                    chapter_progression = float(chapter_progression)
-                except (TypeError, ValueError):
-                    chapter_progression = None
+            if not isinstance(locations, dict):
+                locations = {}
+
+            chapter_progression = self._coerce_float(locations.get("progression"))
             fragments = locations.get("fragments")
+            if isinstance(fragments, str):
+                fragments = [fragments]
             if not isinstance(fragments, list):
                 fragments = []
-            position = locations.get("position")
-            try:
-                if position is not None:
-                    position = int(position)
-            except (TypeError, ValueError):
-                position = None
+            position = self._coerce_int(locations.get("position"))
+            pct = self._coerce_float(locations.get('totalProgression'))
+            if pct is None:
+                pct = self._coerce_float(data.get("progress"), percentage=True)
+            if pct is None:
+                pct = self._coerce_float(data.get("percentage"), percentage=True)
+            if pct is None:
+                pct = 0.0
 
             return {
-                "pct": float(locations.get('totalProgression', 0)),
-                "ts": int(data.get('timestamp', 0)),
+                "pct": pct,
+                "ts": self._coerce_timestamp(data.get('timestamp') or data.get("updatedAt")),
                 "href": locator.get('href'),
                 "type": locator.get("type"),
                 "frag": fragments[0] if fragments else None,
@@ -226,8 +285,8 @@ class StorytellerAPIClient:
                 "chapter_progress": chapter_progression,
                 "position": position,
                 "match_index": position,
-                "cfi": locations.get("cfi"),
-                "css_selector": locations.get("cssSelector"),
+                "cfi": locations.get("cfi") or locations.get("partialCfi"),
+                "css_selector": locations.get("cssSelector") or locations.get("css_selector"),
             }
 
         return None
@@ -403,10 +462,9 @@ class StorytellerAPIClient:
             if rich_locator.chapter_progress is not None:
                 locator["locations"]["progression"] = rich_locator.chapter_progress
             if rich_locator.cfi:
-                locator["locations"]["cfi"] = rich_locator.cfi
+                locator["locations"]["partialCfi"] = rich_locator.cfi
 
         return {
-            "uuid": book_uuid,
             "timestamp": int(time.time() * 1000),
             "locator": locator,
         }
@@ -422,7 +480,7 @@ class StorytellerAPIClient:
             "chapter_progress": locations.get("progression"),
             "total_progression": locations.get("totalProgression"),
             "position": locations.get("position"),
-            "cfi": locations.get("cfi"),
+            "cfi": locations.get("cfi") or locations.get("partialCfi"),
             "css_selector": locations.get("cssSelector"),
         }
 

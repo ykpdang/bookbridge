@@ -318,6 +318,13 @@ class SuggestionsService:
         ".epub", ".pdf", ".mobi", ".azw", ".azw3", ".cbz", ".cbr",
         ".m4b", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wav",
     })
+    _EQUIVALENT_LIBRARY_ROOTS = frozenset({
+        "books",
+        "ebooks",
+        "audiobooks",
+        "linker_books",
+        "storyteller_library",
+    })
 
     @classmethod
     def _parent_dir_key(cls, raw_path: Any) -> str:
@@ -345,13 +352,24 @@ class SuggestionsService:
             return ""
         return "/".join(part.lower() for part in parts)
 
-    @staticmethod
-    def _same_directory_key(left_key: str, right_key: str) -> bool:
+    @classmethod
+    def _drop_equivalent_library_root(cls, parts: List[str]) -> List[str]:
+        if parts and parts[0] in cls._EQUIVALENT_LIBRARY_ROOTS:
+            return parts[1:]
+        return parts
+
+    @classmethod
+    def _same_directory_key(cls, left_key: str, right_key: str) -> bool:
         if not left_key or not right_key:
             return False
         left_parts = left_key.split("/")
         right_parts = right_key.split("/")
         if left_key == right_key:
+            return min(len(left_parts), len(right_parts)) >= 2
+
+        left_parts = cls._drop_equivalent_library_root(left_parts)
+        right_parts = cls._drop_equivalent_library_root(right_parts)
+        if left_parts == right_parts:
             return min(len(left_parts), len(right_parts)) >= 2
 
         shorter_len = min(len(left_parts), len(right_parts))
@@ -494,12 +512,18 @@ class SuggestionsService:
 
     @staticmethod
     def _env_true(key: str) -> bool:
-        return os.environ.get(key, "false").lower() == "true"
+        from src.api.llm_settings import llm_setting_truthy
+        return llm_setting_truthy(key, "false") if key.startswith("OLLAMA_") else os.environ.get(key, "false").lower() == "true"
 
     @staticmethod
     def _env_float(key: str, default: float) -> float:
+        if key.startswith("OLLAMA_"):
+            from src.api.llm_settings import llm_setting_value
+            raw = llm_setting_value(key, str(default))
+        else:
+            raw = os.environ.get(key, default)
         try:
-            return float(os.environ.get(key, default))
+            return float(raw)
         except (TypeError, ValueError):
             return default
 
@@ -538,7 +562,11 @@ class SuggestionsService:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def _embed_model_name(self) -> str:
-        return str(getattr(self.ollama_client, "embed_model", "") or "")
+        return str(
+            getattr(self.ollama_client, "cache_key", None)
+            or getattr(self.ollama_client, "embed_model", "")
+            or ""
+        )
 
     def _load_embeddings_from_db(self, missing: List[str]) -> List[str]:
         """Fill the per-scan cache from the persistent table; returns texts still missing.

@@ -360,6 +360,10 @@ class BookOrbitClient:
     def _hit_is_ebook(hit: dict) -> bool:
         return any(str(f).lower() in _EBOOK_FORMATS for f in (hit.get("formats") or []))
 
+    @staticmethod
+    def _hit_is_audiobook(hit: dict) -> bool:
+        return any(str(f).lower() in _AUDIO_FORMATS for f in (hit.get("formats") or []))
+
     def search_any(self, search_term: str, limit: int = 20) -> list:
         """Metadata search across all formats (ebook + audiobook), no per-book
         detail enrichment. Used for fast "do I own this title?" availability checks.
@@ -382,6 +386,49 @@ class BookOrbitClient:
             )
             if enriched:
                 out.append(enriched)
+        return out
+
+    def search_audiobooks(self, search_term: str, limit: int = 20) -> list:
+        """Audiobook picker search: ``{id, title, authors, duration_seconds, num_files}``.
+
+        With a query, runs the server-side metadata search, keeps audio-format
+        hits, and enriches just those few with duration/track-count from the
+        per-book detail. An empty query lists every cached audiobook WITHOUT
+        detail enrichment (a detail call per book would hit the request
+        throttle on a large library — mirrors get_all_ebooks).
+        """
+        safe_term = str(search_term or "").strip()
+        if not safe_term:
+            return [
+                {"id": info.get("id"), "title": info.get("title") or "",
+                 "authors": info.get("authors") or "",
+                 "duration_seconds": None, "num_files": None}
+                for info in self.get_all_books()
+                if info.get("kind") == "audiobook"
+            ]
+
+        out = []
+        for hit in self._search_raw(safe_term, limit):
+            if not isinstance(hit, dict) or not self._hit_is_audiobook(hit):
+                continue
+            if hit.get("id") is None:
+                continue
+            info = self.get_audiobook_info(hit["id"]) or {}
+            tracks = info.get("tracks") or []
+            total_size = 0
+            for t in tracks:
+                try:
+                    total_size += int(t.get("size_bytes") or 0)
+                except (TypeError, ValueError):
+                    continue
+            out.append({
+                "id": hit["id"],
+                "title": hit.get("title") or "",
+                "authors": self._format_authors(hit.get("authors")),
+                "duration_seconds": info.get("duration_seconds"),
+                "num_files": len(tracks),
+                "total_size_bytes": total_size,
+            })
         return out
 
     def get_all_ebooks(self) -> list:
@@ -615,21 +662,34 @@ class BookOrbitClient:
     # ------------------------------------------------------------------
 
     def get_ebook_progress(self, book_id) -> tuple:
-        """Returns (pct_fraction 0-1, cfi). (None, None) only on a real failure.
+        """Returns (pct_fraction 0-1, cfi). (None, None) only on a real failure."""
+        rich = self.get_ebook_progress_rich(book_id)
+        if rich is None:
+            return None, None
+        return rich["pct"], rich["cfi"]
+
+    def get_ebook_progress_rich(self, book_id) -> Optional[dict]:
+        """Ebook progress plus BookOrbit's own metadata, or None on failure.
 
         GET /books/:id/progress returns a LIST of per-file entries
-        ``[{fileId, cfi, pageNumber, percentage, updatedAt}]`` (percentage 0-100).
-        An unstarted book returns one entry at percentage 0 — that must read as
-        0.0 (a writable follower), NOT None (which would drop BookOrbit from sync
-        and deadlock its first write).
+        ``[{fileId, cfi, pageNumber, percentage, updatedAt, koreaderProgress,
+        koboLocation*}]`` (percentage 0-100; updatedAt null until started;
+        koreaderProgress is a native KOReader xpointer when the book syncs via
+        BookOrbit's own kosync — all verified live 2026-07-02). An unstarted
+        book must read as the 0.0 baseline (a writable follower), NOT None
+        (which would drop BookOrbit from sync and deadlock its first write).
         """
+        baseline = {
+            "pct": 0.0, "cfi": None, "updated_at": None,
+            "file_id": None, "page_number": None, "koreader_progress": None,
+        }
         resp = self._make_request("GET", f"/api/v1/books/{book_id}/progress")
         if not resp:
-            return None, None
+            return None
         if resp.status_code == 204:
-            return 0.0, None
+            return dict(baseline)
         if resp.status_code != 200:
-            return None, None
+            return None
         data = self._parse_json(resp)
         if isinstance(data, dict):
             entries = [data]
@@ -638,7 +698,7 @@ class BookOrbitClient:
         else:
             entries = []
         if not entries:
-            return 0.0, None
+            return dict(baseline)
 
         if len(entries) == 1:
             chosen = entries[0]
@@ -649,7 +709,14 @@ class BookOrbitClient:
 
         raw_pct = chosen.get("percentage")
         pct = self._to_pct_fraction(raw_pct) if raw_pct is not None else 0.0
-        return (pct if pct is not None else 0.0), chosen.get("cfi")
+        return {
+            "pct": pct if pct is not None else 0.0,
+            "cfi": chosen.get("cfi"),
+            "updated_at": chosen.get("updatedAt"),
+            "file_id": chosen.get("fileId"),
+            "page_number": chosen.get("pageNumber"),
+            "koreader_progress": chosen.get("koreaderProgress"),
+        }
 
     def update_ebook_progress(
         self, book_info: dict, percentage: float, locator: Optional[LocatorResult] = None
@@ -676,25 +743,63 @@ class BookOrbitClient:
     # ------------------------------------------------------------------
 
     def get_audiobook_info(self, book_id) -> Optional[dict]:
-        """Returns {'duration_seconds', 'primary_file_id', 'filename', 'chapters'} or None."""
+        """Returns {'duration_seconds', 'primary_file_id', 'filename', 'chapters',
+        'tracks'} or None.
+
+        ``tracks`` lists every audio file in the book detail's array order — the
+        order the BookOrbit player plays them in (it filters detail.files to audio
+        formats without re-sorting). A multi-file audiobook has one entry per
+        track; the player's stored positionSeconds is relative to currentFileId's
+        track, so callers need these per-track durations to reconstruct absolute
+        timestamps.
+        """
         detail = self.get_book_detail(book_id)
         if not detail:
             return None
         pf = self._primary_file(detail, kind="audiobook")
         audio_meta = detail.get("audioMetadata") or {}
+
+        tracks = []
+        for f in detail.get("files") or []:
+            if not isinstance(f, dict):
+                continue
+            if (f.get("format") or "").lower() not in _AUDIO_FORMATS:
+                continue
+            try:
+                track_duration = float(f.get("durationSeconds") or 0.0)
+            except (TypeError, ValueError):
+                track_duration = 0.0
+            tracks.append({
+                "id": f.get("id"),
+                "filename": f.get("filename"),
+                "format": (f.get("format") or "").lower(),
+                "duration_seconds": track_duration,
+                "size_bytes": f.get("sizeBytes"),
+                # BookOrbit and the bridge share the /books mount, so this
+                # container path often resolves locally (staging fast path).
+                "absolute_path": f.get("absolutePath"),
+            })
+
+        # Whole-book duration: audioMetadata total, else the track sum (the
+        # primary file alone under-reports on multi-file books), else primary.
         duration = audio_meta.get("durationSeconds")
+        if duration is None and tracks:
+            duration = sum(t["duration_seconds"] for t in tracks) or None
         if duration is None and pf:
             duration = pf.get("durationSeconds")
+
         return {
             "duration_seconds": duration,
             "primary_file_id": (pf or {}).get("id"),
             "filename": (pf or {}).get("filename"),
             "chapters": audio_meta.get("chapters") or [],
+            "tracks": tracks,
         }
 
     # Unstarted-audiobook baseline: a writable follower at 0, NOT None (None would
     # drop BookOrbit from sync and deadlock its first write — mirrors get_ebook_progress).
-    _AUDIO_UNSTARTED = {"pct": 0.0, "position_seconds": 0.0, "current_file_id": None}
+    _AUDIO_UNSTARTED = {"pct": 0.0, "position_seconds": 0.0, "current_file_id": None,
+                        "updated_at": None}
 
     def get_audiobook_progress(self, book_id) -> Optional[dict]:
         """Returns {'pct': 0-1, 'position_seconds': float, 'current_file_id': int} or None.
@@ -723,6 +828,7 @@ class BookOrbitClient:
             "pct": pct,
             "position_seconds": position_seconds,
             "current_file_id": data.get("currentFileId"),
+            "updated_at": data.get("updatedAt"),
         }
 
     def update_audiobook_progress(
@@ -767,6 +873,115 @@ class BookOrbitClient:
         status = resp.status_code if resp else "no response"
         logger.error("BookOrbit ebook download failed: file %s status=%s", file_id, status)
         return None
+
+    def download_file_to_path(self, file_id, output_path) -> bool:
+        """Stream-download any book file (audio tracks included) directly to disk.
+
+        Audio files run to hundreds of MB, so this never buffers the body in
+        memory the way download_book does for ebooks.
+        """
+        token = self._get_fresh_token()
+        if not token:
+            return False
+        url = f"{self._get_base_url()}/api/v1/books/files/{file_id}/download"
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            with self.session.get(url, headers=headers, stream=True, timeout=300) as resp:
+                if resp.status_code != 200:
+                    logger.error(
+                        "BookOrbit file download failed: file_id=%s status=%s",
+                        file_id, resp.status_code,
+                    )
+                    return False
+                output_path = Path(output_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(output_path, "wb") as handle:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if chunk:
+                            handle.write(chunk)
+                return True
+        except Exception as e:
+            logger.error("BookOrbit file download error: file_id=%s: %s", file_id, e)
+            return False
+
+    def get_cover_bytes(self, book_id) -> tuple:
+        """Fetch a book's cover image. Returns (bytes, content_type) or (None, None)."""
+        resp = self._make_request("GET", f"/api/v1/books/{book_id}/cover")
+        if not resp or resp.status_code != 200:
+            return None, None
+        return resp.content, resp.headers.get("Content-Type", "image/jpeg")
+
+    # ------------------------------------------------------------------
+    # KOReader annotation exchange (kosync-style header auth, NOT JWT)
+    # ------------------------------------------------------------------
+
+    _KOSYNC_DEVICE_ID = "bookbridge-hub"
+    _KOSYNC_DEVICE_MODEL = "BookBridge"
+
+    @staticmethod
+    def normalize_kosync_key(value: str) -> str:
+        """BookOrbit's KOReader auth key is md5(sync password); accept either the
+        plain password or the already-hashed 32-hex key."""
+        import hashlib
+        value = str(value or "").strip()
+        if not value:
+            return ""
+        if len(value) == 32 and all(c in "0123456789abcdef" for c in value.lower()):
+            return value.lower()
+        # BookOrbit's KOReader plugin protocol requires MD5(password) auth keys.
+        return hashlib.md5(value.encode("utf-8")).hexdigest()  # nosec B324
+
+    def _koreader_plugin_request(self, kosync_user: str, kosync_key: str,
+                                 path: str, payload: dict) -> Optional[dict]:
+        """POST to a BookOrbit /koreader/plugin endpoint with x-auth headers."""
+        if not kosync_user or not kosync_key:
+            return None
+        url = f"{self._get_base_url()}{path}"
+        headers = {
+            "x-auth-user": kosync_user,
+            "x-auth-key": kosync_key,
+            "Content-Type": "application/json",
+        }
+        try:
+            resp = self.session.post(url, headers=headers, json=payload, timeout=30)
+        except Exception as exc:
+            logger.error("BookOrbit koreader request failed (%s): %s", path, exc)
+            return None
+        if resp.status_code not in (200, 201):
+            logger.warning(
+                "BookOrbit koreader request %s returned %s: %s",
+                path, resp.status_code, (resp.text or "")[:200],
+            )
+            return None
+        return self._parse_json(resp) or {}
+
+    def _koreader_device_fields(self) -> dict:
+        from src.utils.time_utils import utcnow
+        return {
+            "deviceId": self._KOSYNC_DEVICE_ID,
+            "deviceModel": self._KOSYNC_DEVICE_MODEL,
+            "pluginVersion": "bridge-1.0",
+            "deviceTime": utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def koreader_exchange_annotations(self, kosync_user: str, kosync_key: str,
+                                      books: list) -> Optional[dict]:
+        """Two-way annotation exchange (the bridge acts as a KOReader device).
+
+        Returns ``{results: [{hash, toApply: {add, edit, delete}, more, ...}],
+        unmatched: [hash...]}`` or None on failure."""
+        payload = dict(self._koreader_device_fields(), books=books)
+        return self._koreader_plugin_request(
+            kosync_user, kosync_key, "/api/v1/koreader/plugin/annotations/exchange", payload
+        )
+
+    def koreader_exchange_annotations_ack(self, kosync_user: str, kosync_key: str,
+                                          books: list) -> bool:
+        payload = dict(self._koreader_device_fields(), books=books)
+        result = self._koreader_plugin_request(
+            kosync_user, kosync_key, "/api/v1/koreader/plugin/annotations/exchange-ack", payload
+        )
+        return result is not None
 
     # ------------------------------------------------------------------
     # Reading sessions (per file)

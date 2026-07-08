@@ -7,7 +7,7 @@ from src.api.api_clients import ABSClient
 from src.db.models import Book, State
 from src.sync_clients.sync_client_interface import SyncClient, SyncResult, UpdateProgressRequest, ServiceState
 from src.utils.ebook_utils import EbookParser
-from src.utils.ebook_utils import EbookParser
+from src.utils.progress_metadata import parse_service_timestamp
 from src.utils.transcriber import AudioTranscriber
 from pathlib import Path
 
@@ -46,10 +46,12 @@ class ABSSyncClient(SyncClient):
         if bulk_context and abs_id in bulk_context:
             item_data = bulk_context[abs_id]
             abs_ts = item_data.get('currentTime', 0)
+            abs_last_update = item_data.get('lastUpdate')
             # Note: Still need to convert to percentage using transcript
         else:
             response = self.abs_client.get_progress(abs_id)
             abs_ts = response.get('currentTime') if response is not None else None
+            abs_last_update = response.get('lastUpdate') if response is not None else None
 
         if abs_ts is None:
             logger.info("🔍 ABS timestamp is None, probably not started the book yet")
@@ -67,8 +69,15 @@ class ABSSyncClient(SyncClient):
         
         delta = abs(abs_ts - prev_abs_ts) if abs_ts and prev_abs_ts else abs(abs_ts - prev_abs_ts) if abs_ts else 0
 
+        current = {'pct': abs_pct, 'ts': abs_ts}
+        # ABS mediaProgress.lastUpdate (epoch ms) — the service's own
+        # "position last changed" signal.
+        service_updated_at = parse_service_timestamp(abs_last_update)
+        if service_updated_at is not None:
+            current['service_updated_at'] = service_updated_at
+
         return ServiceState(
-            current={'pct': abs_pct, 'ts': abs_ts},
+            current=current,
             previous_pct=prev_abs_pct,
             delta=delta,
             threshold=self.delta_abs_thresh,

@@ -14,6 +14,7 @@ from src.api.cwa_sync_api import CWASyncApi, STATUS_READING, STATUS_FINISHED, ST
 from src.api.cwa_client import CWAClient
 from src.db.models import Book, State
 from src.utils.ebook_utils import EbookParser
+from src.utils.progress_metadata import parse_service_timestamp
 from src.sync_clients.sync_client_interface import (
     SyncClient, SyncResult, UpdateProgressRequest, ServiceState,
 )
@@ -76,6 +77,13 @@ class CWASyncClient(SyncClient):
             current["href"] = state["href"]
         if state.get("frag"):
             current["frag"] = state["frag"]
+        # Rich metadata (capture-only): the bookmark's own modification time is
+        # the position-freshness signal; status is Kobo's reading status.
+        service_updated_at = parse_service_timestamp(state.get("bookmark_last_modified"))
+        if service_updated_at is not None:
+            current["service_updated_at"] = service_updated_at
+        if state.get("status"):
+            current["status"] = state["status"]
 
         return ServiceState(
             current=current,

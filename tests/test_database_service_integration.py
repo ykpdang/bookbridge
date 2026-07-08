@@ -559,6 +559,76 @@ class TestDatabaseServiceIntegration(unittest.TestCase):
         self.assertEqual(by_md5['md5-x']['authors'], 'Herbert')
         self.assertEqual(by_md5['md5-y']['pages'], 300)
 
+    def test_koreader_stats_are_scoped_per_user(self):
+        """Same md5/device stats can exist for two users without merge or echo leaks."""
+        from src.db.models import KOReaderBookStat, KOReaderPageStat
+
+        user_a = self.db_service.create_user("koreader_stats_a", "pw", role="admin")
+        user_b = self.db_service.create_user("koreader_stats_b", "pw", role="user")
+        md5 = "shared-md5"
+        base = datetime.now(ZoneInfo("UTC")).replace(hour=14, minute=0, second=0, microsecond=0)
+        event_time = base.timestamp()
+
+        self.assertEqual(self.db_service.upsert_koreader_book_stats(
+            device="Kobo", device_id="same-device",
+            books=[{"md5": md5, "title": "A Title", "authors": "A", "pages": 100}],
+            user_id=user_a.id,
+        ), 1)
+        self.assertEqual(self.db_service.upsert_koreader_book_stats(
+            device="Kobo", device_id="same-device",
+            books=[{"md5": md5, "title": "B Title", "authors": "B", "pages": 200}],
+            user_id=user_b.id,
+        ), 1)
+
+        result_a = self.db_service.bulk_insert_koreader_page_stats(
+            device="Kobo", device_id="device-a",
+            page_stats=[{"md5": md5, "page": 1, "start_time": event_time, "duration": 60, "total_pages": 100}],
+            user_id=user_a.id,
+        )
+        self.assertEqual(result_a["accepted"], 1)
+
+        # Same fingerprint from another user is genuine activity, not an echo of user A.
+        result_b_same_fingerprint = self.db_service.bulk_insert_koreader_page_stats(
+            device="Kindle", device_id="device-b",
+            page_stats=[{"md5": md5, "page": 2, "start_time": event_time, "duration": 60, "total_pages": 200}],
+            user_id=user_b.id,
+        )
+        self.assertEqual(result_b_same_fingerprint["accepted"], 1)
+        self.assertEqual(result_b_same_fingerprint["echoes"], 0)
+
+        # Same user's re-upload from another device is still treated as a merge echo.
+        result_a_echo = self.db_service.bulk_insert_koreader_page_stats(
+            device="Kindle", device_id="device-c",
+            page_stats=[{"md5": md5, "page": 3, "start_time": event_time, "duration": 60, "total_pages": 120}],
+            user_id=user_a.id,
+        )
+        self.assertEqual(result_a_echo["accepted"], 0)
+        self.assertEqual(result_a_echo["echoes"], 1)
+
+        self.db_service.bulk_insert_koreader_page_stats(
+            device="Kobo", device_id="device-d",
+            page_stats=[{"md5": md5, "page": 4, "start_time": event_time + 120, "duration": 30, "total_pages": 200}],
+            user_id=user_b.id,
+        )
+
+        with self.db_service.get_session() as session:
+            self.assertEqual(session.query(KOReaderBookStat).filter_by(md5=md5).count(), 2)
+            self.assertEqual(session.query(KOReaderPageStat).filter_by(md5=md5).count(), 3)
+
+        merged_b = self.db_service.get_merged_koreader_page_stats(
+            exclude_device_key="device-b",
+            user_id=user_b.id,
+        )
+        self.assertEqual([row["page"] for row in merged_b["page_stats"]], [4])
+        self.assertEqual({row["total_pages"] for row in merged_b["page_stats"]}, {200})
+
+        meta_b = self.db_service.get_merged_koreader_book_meta(
+            exclude_device_key="device-b",
+            md5s={md5},
+            user_id=user_b.id,
+        )
+        self.assertEqual(meta_b, [{"md5": md5, "title": "B Title", "authors": "B", "pages": 200}])
+
         # The requesting device's own metadata is excluded.
         self.db_service.upsert_koreader_book_stats(
             device='Solo', device_id='device-b',

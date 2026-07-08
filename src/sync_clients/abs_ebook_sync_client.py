@@ -26,8 +26,16 @@ class ABSEbookSyncClient(SyncClient):
         return os.getenv("SYNC_ABS_EBOOK_CAN_BE_LEADER", "true").lower() == "true"
 
     def get_supported_sync_types(self) -> set:
-        """ABS ebook client only syncs ebooks."""
-        return {'ebook'}
+        """ABS ebook participates in both audiobook (cross-format) and ebook-only modes.
+
+        Combined audiobook+ebook entries sync in 'audiobook' mode; advertising only
+        'ebook' excluded this client from them, so ABS ebook progress was never read
+        or written for same-folder/combined matches (issue #300). Mirrors the other
+        ebook-capable clients (KoSync, Storyteller, Grimmory, BookOrbit, CWA). No
+        supports_book gate is needed: get_service_state returns None when the ABS item
+        has no ebookProgress, which drops this client from books without an ABS ebook.
+        """
+        return {'audiobook', 'ebook'}
 
     def get_service_state(self, book: Book, prev_state: Optional[State], title_snip: str = "", bulk_context: dict = None) -> Optional[ServiceState]:
         # [FIX] Prefer specific ebook item ID if it exists (Tri-Link), otherwise fallback to primary ID (Standard)

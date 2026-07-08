@@ -16,9 +16,15 @@ _writes_lock = threading.Lock()
 
 _DEFAULT_SUPPRESSION_WINDOW = 60  # seconds
 
+# GC horizon for stored writes. Deliberately independent of any caller's
+# suppression window: readers enforce their own window at read time, and some
+# (the client poller) look back a full poll interval — a cleanup keyed to a
+# shorter caller's window would purge entries another reader still needs.
+_MAX_RETENTION_SECONDS = 3600
 
-def _cleanup_stale_locked(now: float, suppression_window: int) -> None:
-    stale = [k for k, v in _recent_writes.items() if now - v[0] > suppression_window]
+
+def _cleanup_stale_locked(now: float) -> None:
+    stale = [k for k, v in _recent_writes.items() if now - v[0] > _MAX_RETENTION_SECONDS]
     for k in stale:
         del _recent_writes[k]
 
@@ -64,7 +70,7 @@ def get_recent_write(client_name: str, abs_id: str, suppression_window: int = _D
         now = time.time()
         entry = _recent_writes.get(key)
         if not entry:
-            _cleanup_stale_locked(now, suppression_window)
+            _cleanup_stale_locked(now)
             return None
 
         last_write_ts, pct = entry
@@ -72,7 +78,7 @@ def get_recent_write(client_name: str, abs_id: str, suppression_window: int = _D
         if age < suppression_window:
             return {"ts": last_write_ts, "age": age, "pct": pct}
 
-        _cleanup_stale_locked(now, suppression_window)
+        _cleanup_stale_locked(now)
         return None
 
 

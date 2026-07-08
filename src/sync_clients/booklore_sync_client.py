@@ -5,6 +5,7 @@ import logging
 from src.api.booklore_client import BookloreClient
 from src.db.models import Book, State
 from src.utils.ebook_utils import EbookParser
+from src.utils.progress_metadata import parse_service_timestamp
 from src.sync_clients.sync_client_interface import SyncClient, SyncResult, UpdateProgressRequest, ServiceState
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,19 @@ class BookloreSyncClient(SyncClient):
     def get_service_state(self, book: Book, prev_state: Optional[State], title_snip: str = "", bulk_context: dict = None) -> Optional[ServiceState]:
         # FIX: Use original filename if available (Tri-Link), otherwise standard filename
         epub = self._resolve_epub_filename(book)
-        bl_pct, bl_cfi = self.booklore_client.get_progress(epub)
+
+        # Rich read when available (adds href + Grimmory's own lastReadTime and
+        # readStatus); non-dict results (older/mocked clients) fall back to the
+        # classic (pct, cfi) tuple.
+        rich = None
+        if hasattr(self.booklore_client, "get_progress_rich"):
+            candidate = self.booklore_client.get_progress_rich(epub)
+            if isinstance(candidate, dict):
+                rich = candidate
+        if rich is not None:
+            bl_pct, bl_cfi = rich.get("pct"), rich.get("cfi")
+        else:
+            bl_pct, bl_cfi = self.booklore_client.get_progress(epub)
 
         if bl_pct is None:
             logger.warning("⚠️ Grimmory percentage is None - returning None for service state")
@@ -61,8 +74,18 @@ class BookloreSyncClient(SyncClient):
 
         delta = abs(bl_pct - prev_booklore_pct)
 
+        current = {"pct": bl_pct, "cfi": bl_cfi}
+        if rich is not None:
+            if rich.get("href"):
+                current["href"] = rich["href"]
+            service_updated_at = parse_service_timestamp(rich.get("last_read_time"))
+            if service_updated_at is not None:
+                current["service_updated_at"] = service_updated_at
+            if rich.get("status"):
+                current["status"] = rich["status"]
+
         return ServiceState(
-            current={"pct": bl_pct, "cfi": bl_cfi},
+            current=current,
             previous_pct=prev_booklore_pct,
             delta=delta,
             threshold=self.delta_kosync_thresh,

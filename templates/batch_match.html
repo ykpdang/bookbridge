@@ -453,6 +453,11 @@
             color: #81c784;
         }
 
+        .source-badge.bookorbit {
+            background: rgba(0, 188, 212, 0.2);
+            color: #4dd0e1;
+        }
+
         .source-badge.abs {
             background: rgba(102, 126, 234, 0.2);
             color: #93a5f6;
@@ -804,7 +809,7 @@
             <a href="/" class="btn">← Dashboard</a>
             <a href="/logs" class="btn">📊 Logs</a>
             <a href="/settings" class="btn">⚙️ Settings</a>
-            <a href="{{ url_for('add_book') }}" class="btn">Add Book</a>
+            <a href="{{ url_for('add_book') }}" class="btn">Add / Update Book</a>
             <a href="/suggestions" class="btn">💡 Suggestions</a>
         </div>
     </div>

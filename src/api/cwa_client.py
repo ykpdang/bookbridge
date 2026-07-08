@@ -3,7 +3,7 @@ import re
 import requests
 import logging
 import base64
-import xml.etree.ElementTree as ET
+from defusedxml import ElementTree as ET
 from urllib.parse import quote
 
 from src.utils.user_config import resolve_setting

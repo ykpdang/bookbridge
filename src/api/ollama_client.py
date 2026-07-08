@@ -13,6 +13,8 @@ from typing import List, Optional
 
 import requests
 
+from src.api.llm_settings import llm_setting_truthy, llm_setting_value
+
 logger = logging.getLogger(__name__)
 
 # Judge responses are tiny JSON objects; cap generation so a confused model
@@ -52,11 +54,15 @@ class OllamaClient:
 
     @property
     def embed_model(self) -> str:
-        return os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+        return llm_setting_value("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
     @property
     def chat_model(self) -> str:
-        return os.environ.get("OLLAMA_CHAT_MODEL", "qwen2.5:14b")
+        return llm_setting_value("OLLAMA_CHAT_MODEL", "qwen2.5:14b")
+
+    @property
+    def cache_key(self) -> str:
+        return f"ollama|{self.base_url}|{self.embed_model}"
 
     @property
     def keep_alive(self) -> str:
@@ -64,13 +70,13 @@ class OllamaClient:
 
     def is_configured(self) -> bool:
         return (
-            os.environ.get("OLLAMA_ENABLED", "false").lower() == "true"
+            llm_setting_truthy("OLLAMA_ENABLED", "false")
             and bool(self.base_url)
         )
 
     def _chat_options(self) -> dict:
         options = {"temperature": 0.0, "num_predict": _JUDGE_NUM_PREDICT}
-        raw_ctx = os.environ.get("OLLAMA_NUM_CTX", "").strip()
+        raw_ctx = llm_setting_value("OLLAMA_NUM_CTX", "").strip()
         if raw_ctx:
             try:
                 options["num_ctx"] = int(raw_ctx)

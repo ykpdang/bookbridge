@@ -17,7 +17,7 @@ from src.api.bookorbit_client import BookOrbitClient
 from src.api.cwa_client import CWAClient
 from src.api.cwa_sync_api import CWASyncApi
 from src.api.hardcover_client import HardcoverClient
-from src.api.ollama_client import OllamaClient
+from src.api.llm_client import create_llm_client
 from src.api.storygraph_client import StorygraphClient
 from src.api.storyteller_api import StorytellerAPIClient
 from src.db.database_service import DatabaseService
@@ -30,7 +30,7 @@ from src.services.library_service import LibraryService # [NEW]
 from src.services.migration_service import MigrationService # [NEW]
 from src.services.forge_service import ForgeService
 from src.services.koreader_device_sync_service import KOReaderDeviceSyncService
-from src.services.audio_source_adapters import ABSAudioSourceAdapter, BookLoreAudioSourceAdapter
+from src.services.audio_source_adapters import ABSAudioSourceAdapter, BookLoreAudioSourceAdapter, BookOrbitAudioSourceAdapter
 from src.services.calibre_identifier_resolver import CalibreIdentifierResolver
 from src.services.book_mapping_service import BookMappingService
 from src.services.shelf_watch_service import ShelfWatchService
@@ -97,7 +97,9 @@ class Container(containers.DeclarativeContainer):
         )
     )
 
-    ollama_client = providers.Singleton(OllamaClient)
+    # Historical provider name kept for compatibility with existing services; the
+    # object is now selected by LLM_PROVIDER.
+    ollama_client = providers.Singleton(create_llm_client)
 
     booklore_client = providers.Singleton(
         BookloreClient,
@@ -283,9 +285,16 @@ class Container(containers.DeclarativeContainer):
         data_dir=data_dir,
     )
 
+    bookorbit_audio_source_adapter = providers.Singleton(
+        BookOrbitAudioSourceAdapter,
+        bookorbit_client=bookorbit_client,
+        data_dir=data_dir,
+    )
+
     audio_source_adapters = providers.Dict(
         ABS=abs_audio_source_adapter,
         BookLore=booklore_audio_source_adapter,
+        BookOrbit=bookorbit_audio_source_adapter,
     )
 
     # Sync clients dictionary for reuse

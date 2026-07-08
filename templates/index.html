@@ -2073,7 +2073,7 @@
             <a href="/settings" class="btn">⚙️ Settings</a>
             <a href="/stats" class="btn">📊 Stats</a>
             {% endif %}
-            <a href="{{ url_for('add_book') }}" class="btn btn-primary">Add Book</a>
+            <a href="{{ url_for('add_book') }}" class="btn btn-primary">Add / Update Book</a>
             {% if is_admin %}
             <a href="/suggestions" class="btn">💡 Suggestions</a>
             {% endif %}
@@ -2937,6 +2937,9 @@
             document.body.addEventListener('click', e => {
                 if (e.target.classList.contains('modal-overlay')) refreshPaused = false;
             });
+            window.resumeDashboardRefresh = function () {
+                refreshPaused = false;
+            };
 
             setTimeout(refreshDashboard, 30000);
         </script>

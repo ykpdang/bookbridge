@@ -459,6 +459,7 @@ class TestMatchPathsRegression(unittest.TestCase):
                 "audiobook_id": "ab-1",
                 "ebook_filename": "batch.epub",
                 "ebook_display_name": "Batch Book",
+                "ebook_source_path": "/books/Author/Batch/batch.epub",
             },
         )
         self.assertEqual(add_response.status_code, 302)
@@ -479,6 +480,10 @@ class TestMatchPathsRegression(unittest.TestCase):
         self.assertEqual(processed_book.abs_id, "ab-1")
         self.assertEqual(processed_book.ebook_filename, "batch.epub")
         self.assertEqual(processed_book.kosync_doc_id, "hash-batch-1")
+        self.assertEqual(
+            _mock_kosync.call_args.kwargs.get("source_path"),
+            "/books/Author/Batch/batch.epub",
+        )
 
         self.assertEqual(web_server._load_match_queue(), [])
 
@@ -981,6 +986,7 @@ class TestMatchPathsRegression(unittest.TestCase):
                 "audiobook_id": "ab-1",
                 "ebook_filename": "suggested.epub",
                 "ebook_display_name": "Suggested Book",
+                "ebook_source_path": "/books/Author/Suggested/suggested.epub",
             },
         )
         self.assertEqual(add_response.status_code, 302)
@@ -997,9 +1003,13 @@ class TestMatchPathsRegression(unittest.TestCase):
         self.assertTrue(process_response.location.endswith("/"))
 
         self.mock_container.mock_database_service.save_book.assert_called_once()
+        self.assertEqual(
+            _mock_kosync.call_args.kwargs.get("source_path"),
+            "/books/Author/Suggested/suggested.epub",
+        )
         self.assertEqual(web_server._load_match_queue(), [])
 
-    @patch("src.web_server._create_or_update_booklore_audio_mapping", return_value=(Mock(abs_id="booklore:42"), None, None))
+    @patch("src.web_server._create_or_update_library_audio_mapping", return_value=(Mock(abs_id="booklore:42"), None, None))
     def test_suggestions_queue_add_and_process_booklore_audio(self, _mock_booklore_mapping):
         add_response = self.client.post(
             "/suggestions",
@@ -1017,6 +1027,7 @@ class TestMatchPathsRegression(unittest.TestCase):
                 "ebook_display_name": "BookLore Suggested",
                 "ebook_source": "BookLore",
                 "ebook_source_id": "6798",
+                "ebook_source_path": "/books/BookLore/booklore-suggested.epub",
             },
         )
         self.assertEqual(add_response.status_code, 302)
@@ -1037,6 +1048,7 @@ class TestMatchPathsRegression(unittest.TestCase):
         self.assertEqual(call_kwargs["ebook_filename"], "booklore-suggested.epub")
         self.assertEqual(call_kwargs["ebook_source"], "BookLore")
         self.assertEqual(call_kwargs["ebook_source_id"], "6798")
+        self.assertEqual(call_kwargs["ebook_source_path"], "/books/BookLore/booklore-suggested.epub")
 
         self.mock_container.mock_database_service.save_book.assert_not_called()
         self.assertEqual(web_server._load_match_queue(), [])
