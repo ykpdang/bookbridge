@@ -917,5 +917,44 @@ class HardcoverClient:
                 return True
             return False
 
+    # ------------------------------------------------------------------
+    # Annotations via private_notes
+    # ------------------------------------------------------------------
+
+    def get_user_book_id(self, hardcover_book_id: int) -> Optional[int]:
+        """Return the user_book.id for the current user + book, or None."""
+        uid = self.get_user_id()
+        if not uid or not hardcover_book_id:
+            return None
+        result = self.query(
+            """
+            query GetUserBook($bookId: Int!, $userId: Int!) {
+                user_books(where: {book_id: {_eq: $bookId}, user_id: {_eq: $userId}}) {
+                    id
+                }
+            }
+            """,
+            {"bookId": hardcover_book_id, "userId": uid},
+        )
+        rows = (result or {}).get("user_books") or []
+        return int(rows[0]["id"]) if rows else None
+
+    def update_private_notes(self, user_book_id: int, notes_text: str) -> bool:
+        """Replace the private_notes field on a user_book with the given text block."""
+        result = self.query(
+            """
+            mutation UpdatePrivateNotes($id: Int!, $notes: String) {
+                update_user_books_by_pk(
+                    pk_columns: {id: $id},
+                    _set: {private_notes: $notes}
+                ) {
+                    id
+                }
+            }
+            """,
+            {"id": user_book_id, "notes": notes_text},
+        )
+        return bool((result or {}).get("update_user_books_by_pk"))
+
 
 # [END FILE]

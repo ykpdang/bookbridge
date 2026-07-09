@@ -666,6 +666,13 @@ class KoreaderAnnotation(Base):
     # Grimmory reader-note (book_notes_v2) id — a separate remote store with its
     # own id space; a row mirrors at most one of annotations/notes per field.
     booklore_note_id = Column(Integer, nullable=True, index=True)
+    # Readest spoke bookkeeping
+    readest_note_id = Column(String(32), nullable=True, index=True)
+    readest_synced_at = Column(DateTime, nullable=True)
+    readest_deleted_at = Column(DateTime, nullable=True)
+    # Hardcover spoke bookkeeping (highlight id on hardcover.app)
+    hardcover_highlight_id = Column(Integer, nullable=True, index=True)
+    hardcover_synced_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, index=True)
 
