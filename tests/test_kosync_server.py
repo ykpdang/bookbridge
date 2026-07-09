@@ -23,7 +23,7 @@ if os.path.exists(TEST_DIR):
     shutil.rmtree(TEST_DIR)
 os.makedirs(TEST_DIR, exist_ok=True)
 
-from src.db.models import KosyncDocument, Book, ReadingSession, Setting, State
+from src.db.models import KosyncDocument, Book, ReadingSession, Setting, State, HardcoverDetails
 # Initialize DB service with test path
 from src.db.database_service import DatabaseService
 
@@ -243,10 +243,13 @@ class TestKosyncEndpoints(unittest.TestCase):
              session.query(KosyncDocument).delete()
              session.query(Setting).delete()
              session.query(State).delete()
+             session.query(HardcoverDetails).delete()
              session.query(Book).delete()
         if web_server.database_service.count_users() == 0:
             web_server.database_service.create_user("admin", "secret", role="admin")
         kosync_server._kosync_device_session_registry = None
+        with kosync_server._hardcover_list_mapping_cache_lock:
+            kosync_server._hardcover_list_mapping_cache.clear()
         with kosync_server._kosync_open_sessions_lock:
             kosync_server._kosync_open_sessions.clear()
         with kosync_server._kosync_debounce_lock:
@@ -792,6 +795,114 @@ class TestKosyncEndpoints(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         ids = [b["abs_id"] for b in response.get_json()["books"]]
         self.assertEqual(ids, ["mine"])
+
+    def test_device_sync_manifest_uses_hardcover_lists_for_user_collections(self):
+        from src.api import kosync_server
+        from src import web_server
+
+        svc = web_server.database_service
+        admin_id = svc._default_user_id()
+        svc.save_book(Book(abs_id="hc-mine", abs_title="Mine", ebook_filename="m.epub",
+                           status="active", user_id=admin_id))
+        svc.save_book(Book(abs_id="hc-unmatched", abs_title="Unmatched", ebook_filename="u.epub",
+                           status="active", user_id=admin_id))
+        svc.save_hardcover_details(HardcoverDetails(
+            abs_id="hc-mine",
+            hardcover_book_id="101",
+            hardcover_edition_id="201",
+            hardcover_pages=300,
+            matched_by="test",
+        ))
+        svc.set_user_credential(admin_id, "HARDCOVER_ENABLED", "true")
+        svc.set_user_credential(admin_id, "HARDCOVER_TOKEN", "user-token")
+
+        fake_client = MagicMock()
+        fake_client.is_configured.return_value = True
+        fake_client.get_user_lists.return_value = [
+            {"id": 1, "name": "Owned"},
+            {"id": 2, "name": "Sci-Fi"},
+        ]
+        fake_client.get_list_book_memberships.return_value = [
+            {"list_id": "1", "book_id": 101},
+            {"list_id": 2, "book_id": 101},
+        ]
+
+        manifest = {
+            "generated_at": 1,
+            "revision": "abc",
+            "delete_mode": "mirror",
+            "books": [
+                {"abs_id": "hc-mine", "title": "Mine", "filename": "m.epub",
+                 "content_hash": "h1", "download_path": "/x", "size": 1},
+                {"abs_id": "hc-unmatched", "title": "Unmatched", "filename": "u.epub",
+                 "content_hash": "h2", "download_path": "/y", "size": 1,
+                 "shelves": ["Old Source"]},
+            ],
+        }
+
+        with patch.dict(os.environ, {
+            "DEVICE_SYNC_COLLECTION_SOURCE": "hardcover",
+            "DEVICE_SYNC_HARDCOVER_LISTS": "all",
+            "DEVICE_SYNC_HARDCOVER_LIST_NAMES": "",
+        }, clear=False), \
+             patch.object(kosync_server, "HardcoverClient", return_value=fake_client):
+            scoped = kosync_server._scope_manifest_to_user(manifest, admin_id)
+            scoped_again = kosync_server._scope_manifest_to_user(manifest, admin_id)
+
+        by_id = {item["abs_id"]: item for item in scoped["books"]}
+        self.assertEqual(by_id["hc-mine"]["shelves"], ["Owned", "Sci-Fi"])
+        self.assertNotIn("shelves", by_id["hc-unmatched"])
+        self.assertNotEqual(scoped["revision"], "abc")
+        fake_client.get_user_lists.assert_called_once()
+        fake_client.get_list_book_memberships.assert_called_once_with([1, 2])
+        self.assertEqual(scoped_again["books"][0]["shelves"], ["Owned", "Sci-Fi"])
+
+    def test_device_sync_manifest_can_limit_hardcover_lists_by_name(self):
+        from src.api import kosync_server
+        from src import web_server
+
+        svc = web_server.database_service
+        admin_id = svc._default_user_id()
+        svc.save_book(Book(abs_id="hc-selected", abs_title="Selected", ebook_filename="s.epub",
+                           status="active", user_id=admin_id))
+        svc.save_hardcover_details(HardcoverDetails(
+            abs_id="hc-selected",
+            hardcover_book_id="101",
+            hardcover_edition_id="201",
+            matched_by="test",
+        ))
+        svc.set_user_credential(admin_id, "HARDCOVER_ENABLED", "true")
+        svc.set_user_credential(admin_id, "HARDCOVER_TOKEN", "user-token")
+
+        fake_client = MagicMock()
+        fake_client.is_configured.return_value = True
+        fake_client.get_user_lists.return_value = [
+            {"id": 1, "name": "Owned"},
+            {"id": 2, "name": "Sci-Fi"},
+        ]
+        fake_client.get_list_book_memberships.return_value = [
+            {"list_id": 2, "book_id": 101},
+        ]
+        manifest = {
+            "generated_at": 1,
+            "revision": "abc",
+            "delete_mode": "mirror",
+            "books": [
+                {"abs_id": "hc-selected", "title": "Selected", "filename": "s.epub",
+                 "content_hash": "h1", "download_path": "/x", "size": 1},
+            ],
+        }
+
+        with patch.dict(os.environ, {
+            "DEVICE_SYNC_COLLECTION_SOURCE": "hardcover",
+            "DEVICE_SYNC_HARDCOVER_LISTS": "selected",
+            "DEVICE_SYNC_HARDCOVER_LIST_NAMES": "Sci-Fi",
+        }, clear=False), \
+             patch.object(kosync_server, "HardcoverClient", return_value=fake_client):
+            scoped = kosync_server._scope_manifest_to_user(manifest, admin_id)
+
+        self.assertEqual(scoped["books"][0]["shelves"], ["Sci-Fi"])
+        fake_client.get_list_book_memberships.assert_called_once_with([2])
 
     def test_device_sync_download_blocks_another_users_book(self):
         from src.api import kosync_server

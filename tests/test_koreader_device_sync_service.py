@@ -148,6 +148,21 @@ class TestKOReaderDeviceSyncService(unittest.TestCase):
         item = manifest["books"][0]
         self.assertEqual(item["shelves"], ["Sci-fi Horror", "Dark Fiction"])
 
+    def test_manifest_revision_changes_when_shelves_change(self):
+        base_item = {
+            "abs_id": "abs-1",
+            "filename": "Book.epub",
+            "content_hash": "hash-1",
+            "size": 123,
+        }
+
+        without_shelves = self.service._compute_revision([dict(base_item)])
+        with_shelves = self.service._compute_revision([
+            {**base_item, "shelves": ["Owned", "Sci-Fi"]}
+        ])
+
+        self.assertNotEqual(without_shelves, with_shelves)
+
     def test_manifest_no_shelves_when_disabled(self):
         self._write_book_file("plain.epub")
         self.db.save_book(

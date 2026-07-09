@@ -763,6 +763,43 @@ class HardcoverClient:
         rows = (result or {}).get("lists") or []
         return rows[0] if rows else None
 
+    def get_user_lists(self) -> List[Dict]:
+        """Return the current user's Hardcover lists."""
+        user_id = self.get_user_id()
+        if not user_id:
+            return []
+        result = self.query(
+            """
+            query GetUserLists($userId: Int!) {
+                lists(where: {user_id: {_eq: $userId}}, order_by: {name: asc}, limit: 1000) {
+                    id
+                    name
+                }
+            }
+            """,
+            {"userId": int(user_id)},
+        )
+        return (result or {}).get("lists") or []
+
+    def get_list_book_memberships(self, list_ids: list[int]) -> List[Dict]:
+        """Return list/book memberships for the given Hardcover list ids."""
+        ids = [int(list_id) for list_id in (list_ids or []) if list_id]
+        if not ids:
+            return []
+        result = self.query(
+            """
+            query GetListBookMemberships($listIds: [Int!]) {
+                list_books(where: {list_id: {_in: $listIds}}, limit: 10000) {
+                    id
+                    list_id
+                    book_id
+                }
+            }
+            """,
+            {"listIds": ids},
+        )
+        return (result or {}).get("list_books") or []
+
     def create_list(self, name: str, description: str = "") -> Optional[Dict]:
         """Create a private unranked Hardcover list for the current user."""
         list_name = str(name or "").strip()

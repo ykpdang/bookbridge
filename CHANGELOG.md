@@ -8,6 +8,8 @@ All notable changes to BookBridge will be documented in this file.
 
 ### What's New
 
+- **Hardcover lists can now create KOReader collections.** BridgeSync-managed KOReader manifests can use either Grimmory shelves or Hardcover lists as the collection source. Hardcover collection mapping is per-user, only applies to books already matched in BookBridge, supports all lists or selected list names, and refreshes on a daily cache.
+
 - **Grimmory shelves can now create Hardcover lists.** When enabled in Settings -> Hardcover.app, newly matched Grimmory-backed books are added to Hardcover lists named from their Grimmory shelf membership, mirroring the shelf-to-KOReader-collection flow. The sync is additive only and can use all shelves, magic shelves only, or regular shelves only, with optional list prefixes and excluded shelf names.
 
 ## [7.1.0] - 2026-07-08

@@ -480,6 +480,7 @@ class KOReaderDeviceSyncService:
                 "filename": item["filename"],
                 "content_hash": item["content_hash"],
                 "size": item["size"],
+                "shelves": item.get("shelves") or [],
             }
             for item in sorted(items, key=lambda value: value["abs_id"])
         ]

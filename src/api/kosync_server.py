@@ -18,10 +18,12 @@ from typing import Optional
 
 from flask import Blueprint, jsonify, request, send_file, g
 
+from src.api.hardcover_client import HardcoverClient
 from src.utils.cache_paths import safe_cache_path
 from src.utils.kosync_headers import hash_kosync_key
 from src.utils.time_utils import utcnow
 from src.utils.user_context import set_current_user_id, reset_current_user_id
+from src.utils.user_config import _ALLOW_GLOBAL_FALLBACK_KEY
 from src.utils.string_utils import calculate_similarity, clean_book_title
 from src.services.llm_matching import judge_best_candidate
 from src.db.models import State
@@ -52,6 +54,9 @@ _manifest_cache: Optional[dict] = None
 _manifest_cache_lock = threading.Lock()
 _manifest_rebuild_event = threading.Event()
 _manifest_prebuilder_started = False
+_hardcover_list_mapping_cache: dict = {}
+_hardcover_list_mapping_cache_lock = threading.Lock()
+_HARDCOVER_LIST_MAPPING_TTL_SECONDS = 86400
 
 # KoSync PUT debounce state
 _kosync_debounce: dict = {}  # {(abs_id, user_id): {'last_event': float, 'title': str, 'synced': bool, 'user_id', 'abs_id'}}
@@ -137,6 +142,9 @@ def signal_manifest_rebuild() -> None:
 
 def _build_shelf_mapping_for_cache() -> Optional[dict]:
     """Fetch the Booklore shelf mapping — same logic as the manifest endpoint."""
+    collection_source = os.environ.get("DEVICE_SYNC_COLLECTION_SOURCE", "grimmory").lower()
+    if collection_source != "grimmory":
+        return None
     collections_mode = os.environ.get("DEVICE_SYNC_COLLECTIONS", "off").lower()
     if collections_mode == "off" or not _container:
         return None
@@ -179,11 +187,124 @@ def _compute_manifest_revision(items) -> str:
             "filename": item.get("filename"),
             "content_hash": item.get("content_hash"),
             "size": item.get("size"),
+            "shelves": item.get("shelves") or [],
         }
         for item in sorted(items, key=lambda value: str(value.get("abs_id")))
     ]
     payload = json.dumps(digest_items, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _device_collection_source() -> str:
+    source = os.environ.get("DEVICE_SYNC_COLLECTION_SOURCE", "grimmory").strip().lower()
+    if source not in {"off", "grimmory", "hardcover"}:
+        source = "off"
+    if source == "grimmory" and os.environ.get("DEVICE_SYNC_COLLECTIONS", "off").lower() == "off":
+        return "off"
+    return source
+
+
+def _split_csv(value: str) -> list[str]:
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def _hardcover_list_cache_key(user_id, credentials: Optional[dict]) -> tuple:
+    token = ""
+    if credentials:
+        token = str(credentials.get("HARDCOVER_TOKEN") or "")
+    elif user_id is None:
+        token = os.environ.get("HARDCOVER_TOKEN", "")
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16] if token else ""
+    mode = os.environ.get("DEVICE_SYNC_HARDCOVER_LISTS", "all").strip().lower()
+    names = tuple(sorted(_split_csv(os.environ.get("DEVICE_SYNC_HARDCOVER_LIST_NAMES", ""))))
+    return (user_id, token_hash, mode, names)
+
+
+def _hardcover_credentials_for_manifest(user_id):
+    if user_id is None or _database_service is None:
+        return None
+    try:
+        credentials = _database_service.get_user_credentials(user_id)
+    except Exception as e:
+        logger.warning("Manifest Hardcover list credentials lookup failed (user_id=%s): %s", user_id, e)
+        return {_ALLOW_GLOBAL_FALLBACK_KEY: False}
+    credentials[_ALLOW_GLOBAL_FALLBACK_KEY] = False
+    return credentials
+
+
+def _build_hardcover_list_mapping(user_id) -> Optional[dict[str, list[str]]]:
+    """Return Hardcover book id -> list names for the manifest user, cached daily."""
+    credentials = _hardcover_credentials_for_manifest(user_id)
+    cache_key = _hardcover_list_cache_key(user_id, credentials)
+    now = time.time()
+    with _hardcover_list_mapping_cache_lock:
+        cached = _hardcover_list_mapping_cache.get(cache_key)
+        if cached and (now - cached["time"]) < _HARDCOVER_LIST_MAPPING_TTL_SECONDS:
+            return cached["mapping"]
+
+    try:
+        client = HardcoverClient(credentials=credentials)
+        if not client.is_configured():
+            return None
+        lists = client.get_user_lists()
+        mode = os.environ.get("DEVICE_SYNC_HARDCOVER_LISTS", "all").strip().lower()
+        if mode == "selected":
+            selected = {name.lower() for name in _split_csv(os.environ.get("DEVICE_SYNC_HARDCOVER_LIST_NAMES", ""))}
+            lists = [entry for entry in lists if str(entry.get("name") or "").strip().lower() in selected]
+        if not lists:
+            mapping = {}
+        else:
+            list_names = {
+                int(entry["id"]): str(entry.get("name") or "").strip()
+                for entry in lists
+                if entry.get("id") and str(entry.get("name") or "").strip()
+            }
+            memberships = client.get_list_book_memberships(list(list_names.keys()))
+            mapping = {}
+            for row in memberships:
+                book_id = str(row.get("book_id") or "").strip()
+                try:
+                    list_id = int(row.get("list_id"))
+                except (TypeError, ValueError):
+                    continue
+                if not book_id or list_id not in list_names:
+                    continue
+                mapping.setdefault(book_id, [])
+                list_name = list_names[list_id]
+                if list_name not in mapping[book_id]:
+                    mapping[book_id].append(list_name)
+        with _hardcover_list_mapping_cache_lock:
+            _hardcover_list_mapping_cache[cache_key] = {"time": now, "mapping": mapping}
+        return mapping
+    except Exception as e:
+        logger.warning("Manifest Hardcover list mapping failed (user_id=%s): %s", user_id, e)
+        with _hardcover_list_mapping_cache_lock:
+            cached = _hardcover_list_mapping_cache.get(cache_key)
+        return cached["mapping"] if cached else None
+
+
+def _apply_hardcover_list_collections(manifest: dict, user_id) -> None:
+    mapping = _build_hardcover_list_mapping(user_id)
+    if mapping is None or _database_service is None:
+        return
+    for item in manifest.get("books") or []:
+        abs_id = str(item.get("abs_id") or "")
+        if not abs_id:
+            continue
+        try:
+            details = _database_service.get_hardcover_details(abs_id)
+        except Exception:
+            details = None
+        hardcover_book_id = str(getattr(details, "hardcover_book_id", "") or "").strip()
+        if not hardcover_book_id:
+            item.pop("shelves", None)
+            continue
+        item["shelves"] = mapping.get(hardcover_book_id) or ["Unsorted"]
+
+
+def _apply_user_collection_source(manifest: dict, user_id) -> None:
+    if _device_collection_source() == "hardcover":
+        _apply_hardcover_list_collections(manifest, user_id)
 
 
 def _scope_manifest_to_user(manifest, user_id):
@@ -194,8 +315,14 @@ def _scope_manifest_to_user(manifest, user_id):
     by ownership and recompute the revision over the trimmed set. `user_id` None
     (single-user install / no accounts) serves the manifest unscoped; when the
     user owns the whole manifest the original (revision included) is returned."""
-    if not manifest or user_id is None or _database_service is None:
+    if not manifest or _database_service is None:
         return manifest
+    if user_id is None:
+        scoped = dict(manifest)
+        scoped["books"] = [dict(item) for item in manifest.get("books") or []]
+        _apply_user_collection_source(scoped, user_id)
+        scoped["revision"] = _compute_manifest_revision(scoped["books"])
+        return scoped
     try:
         owned_ids = {
             str(book.abs_id)
@@ -205,12 +332,13 @@ def _scope_manifest_to_user(manifest, user_id):
         logger.warning("Manifest user-scoping failed (user_id=%s): %s", user_id, e)
         return manifest
     all_books = manifest.get("books") or []
-    books = [item for item in all_books if str(item.get("abs_id")) in owned_ids]
-    if len(books) == len(all_books):
+    books = [dict(item) for item in all_books if str(item.get("abs_id")) in owned_ids]
+    if len(books) == len(all_books) and _device_collection_source() != "hardcover":
         return manifest
     scoped = dict(manifest)
     scoped["books"] = books
-    scoped["revision"] = _compute_manifest_revision(books)
+    _apply_user_collection_source(scoped, user_id)
+    scoped["revision"] = _compute_manifest_revision(scoped["books"])
     return scoped
 
 

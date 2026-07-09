@@ -153,6 +153,48 @@ class TestHardcoverClient(unittest.TestCase):
 
         self.client.add_book_to_list.assert_called_once_with(21, 41, edition_id=51)
 
+    def test_get_user_lists_returns_list_rows(self):
+        self.client.get_user_id = Mock(return_value=7)
+        self.client.query = Mock(return_value={
+            "lists": [
+                {"id": 11, "name": "Owned"},
+                {"id": 12, "name": "Sci-Fi"},
+            ]
+        })
+
+        result = self.client.get_user_lists()
+
+        self.assertEqual(result, [{"id": 11, "name": "Owned"}, {"id": 12, "name": "Sci-Fi"}])
+        variables = self.client.query.call_args[0][1]
+        self.assertEqual(variables["userId"], 7)
+
+    def test_get_list_book_memberships_queries_selected_lists(self):
+        self.client.query = Mock(return_value={
+            "list_books": [
+                {"id": 31, "list_id": 11, "book_id": 41},
+                {"id": 32, "list_id": 12, "book_id": 42},
+            ]
+        })
+
+        result = self.client.get_list_book_memberships([11, 12])
+
+        self.assertEqual(
+            result,
+            [
+                {"id": 31, "list_id": 11, "book_id": 41},
+                {"id": 32, "list_id": 12, "book_id": 42},
+            ],
+        )
+        variables = self.client.query.call_args[0][1]
+        self.assertEqual(variables["listIds"], [11, 12])
+
+    def test_get_list_book_memberships_skips_empty_list_ids(self):
+        self.client.query = Mock()
+
+        self.assertEqual(self.client.get_list_book_memberships([]), [])
+
+        self.client.query.assert_not_called()
+
 
 class TestHardcoverAuthorGate(unittest.TestCase):
     """search_by_title_author must not commit a same-title/wrong-author book."""
