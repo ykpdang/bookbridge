@@ -19,9 +19,17 @@ logger = logging.getLogger(__name__)
 class BookFusionSyncClient(SyncClient):
     """Progress sync client for BookFusion-hosted ebooks."""
 
-    def __init__(self, bookfusion_client: BookFusionClient, ebook_parser: EbookParser) -> None:
+    def __init__(
+        self,
+        bookfusion_client: BookFusionClient,
+        ebook_parser: EbookParser,
+        database_service=None,
+        user_id: int = None,
+    ) -> None:
         super().__init__(ebook_parser)
         self.client = bookfusion_client
+        self._db = database_service
+        self._user_id = user_id
         self.delta_thresh = float(os.getenv("SYNC_DELTA_KOSYNC_PERCENT", 1)) / 100.0
 
     def is_configured(self) -> bool:
@@ -31,19 +39,24 @@ class BookFusionSyncClient(SyncClient):
         return self.client.check_connection()
 
     def get_supported_sync_types(self) -> set:
-        return {"ebook"}
+        """BookFusion participates in both audiobook and ebook sync modes.
+
+        Combined audiobook+ebook entries sync in 'audiobook' mode; advertising
+        only 'ebook' excluded this client from them, so BookFusion progress was
+        never read or written for tri-linked books. Mirrors the other
+        ebook-capable clients (KoSync, Storyteller, Grimmory, BookOrbit, CWA).
+        """
+        return {"audiobook", "ebook"}
 
     @staticmethod
     def _resolve_epub_filename(book: Book) -> Optional[str]:
         return getattr(book, "original_ebook_filename", None) or getattr(book, "ebook_filename", None)
 
-    @staticmethod
-    def _bookfusion_id(book: Book):
-        direct = getattr(book, "bookfusion_id", None)
-        if direct not in (None, ""):
-            return direct
-        if (getattr(book, "ebook_source", "") or "").strip().lower() == "bookfusion":
-            return getattr(book, "ebook_source_id", None)
+    def _bookfusion_id(self, book: Book) -> Optional[str]:
+        if self._db is not None and hasattr(self._db, "resolve_bookfusion_id"):
+            resolved = self._db.resolve_bookfusion_id(self._user_id, book)
+            if resolved not in (None, ""):
+                return str(resolved)
         return None
 
     def supports_book(self, book: Book) -> bool:

@@ -1,8 +1,12 @@
 import unittest
+import tempfile
 from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from src.api.bookfusion_client import BookFusionClient
+from src.db.database_service import DatabaseService
+from src.db.models import Book
 from src.sync_clients.bookfusion_sync_client import BookFusionSyncClient
 from src.sync_clients.sync_client_interface import LocatorResult, UpdateProgressRequest
 from src.services.bookfusion_annotation_sync import BookFusionAnnotationSync
@@ -10,10 +14,11 @@ from src.utils.bookfusion_offsets import BookFusionOffsetMapper, utf16_len
 
 
 class _Resp:
-    def __init__(self, status_code=200, data=None, text=""):
+    def __init__(self, status_code=200, data=None, text="", content=b""):
         self.status_code = status_code
         self._data = data
         self.text = text
+        self.content = content
 
     def json(self):
         return self._data
@@ -51,6 +56,29 @@ class BookFusionClientTest(unittest.TestCase):
         self.assertEqual(client._creds["BOOKFUSION_ACCESS_TOKEN"], "tok-123")
         self.assertEqual(client._creds["BOOKFUSION_ENABLED"], "true")
 
+    def test_download_book_fetches_presigned_url_bytes(self):
+        client = BookFusionClient(
+            credentials={
+                "BOOKFUSION_API_URL": "https://bf.example",
+                "BOOKFUSION_ENABLED": "true",
+                "BOOKFUSION_ACCESS_TOKEN": "tok",
+            },
+        )
+        client.session = _Session([
+            _Resp(200, {"url": "https://files.example/presigned-epub"}),
+            _Resp(200, content=b"PK\x03\x04epub-bytes"),
+        ])
+
+        content = client.download_book("8951594")
+
+        self.assertEqual(content, b"PK\x03\x04epub-bytes")
+        # POST for the URL, then a GET on the pre-signed URL with no bearer header.
+        self.assertEqual(client.session.calls[0][0], "POST")
+        self.assertIn("/api/user/books/8951594/download", client.session.calls[0][1])
+        self.assertEqual(client.session.calls[1][0], "GET")
+        self.assertEqual(client.session.calls[1][1], "https://files.example/presigned-epub")
+        self.assertNotIn("headers", client.session.calls[1][2])
+
     def test_search_books_uses_confirmed_sort_default(self):
         client = BookFusionClient(
             credentials={
@@ -67,10 +95,9 @@ class BookFusionClientTest(unittest.TestCase):
 
 
 class BookFusionSyncClientTest(unittest.TestCase):
-    def test_supports_ebook_sync_only(self):
+    def test_supports_audiobook_and_ebook_sync_modes(self):
         sync = BookFusionSyncClient(MagicMock(), ebook_parser=MagicMock())
-
-        self.assertEqual(sync.get_supported_sync_types(), {"ebook"})
+        self.assertEqual(sync.get_supported_sync_types(), {"audiobook", "ebook"})
 
     def test_reads_percentage_as_fraction_and_service_timestamp(self):
         api = MagicMock()
@@ -79,8 +106,10 @@ class BookFusionSyncClientTest(unittest.TestCase):
             "percentage": 32.5,
             "updated_at": "2026-07-09T14:51:09.000Z",
         }
-        sync = BookFusionSyncClient(api, ebook_parser=MagicMock())
-        book = SimpleNamespace(abs_id="abs-1", bookfusion_id="8951594")
+        db = MagicMock()
+        db.resolve_bookfusion_id.return_value = "8951594"
+        sync = BookFusionSyncClient(api, ebook_parser=MagicMock(), database_service=db, user_id=7)
+        book = SimpleNamespace(abs_id="abs-1")
         prev = SimpleNamespace(percentage=0.25)
 
         state = sync.get_service_state(book, prev)
@@ -92,8 +121,10 @@ class BookFusionSyncClientTest(unittest.TestCase):
     def test_update_progress_posts_0_to_100_and_records_write(self):
         api = MagicMock()
         api.set_reading_position.return_value = {"updated_at": "now"}
-        sync = BookFusionSyncClient(api, ebook_parser=MagicMock())
-        book = SimpleNamespace(abs_id="abs-1", bookfusion_id="8951594")
+        db = MagicMock()
+        db.resolve_bookfusion_id.return_value = "8951594"
+        sync = BookFusionSyncClient(api, ebook_parser=MagicMock(), database_service=db, user_id=7)
+        book = SimpleNamespace(abs_id="abs-1")
         request = UpdateProgressRequest(LocatorResult(percentage=0.425))
 
         with patch("src.services.write_tracker.record_write") as record_write:
@@ -118,6 +149,57 @@ class BookFusionSyncClientTest(unittest.TestCase):
 
         self.assertEqual(result, {"1": {"percentage": 10}})
         api.search_books.assert_called_once_with(page=1, per_page=100)
+
+    def test_shared_bookfusion_column_is_not_a_sync_link(self):
+        api = MagicMock()
+        api.is_configured.return_value = True
+        sync = BookFusionSyncClient(api, ebook_parser=MagicMock())
+        book = SimpleNamespace(abs_id="abs-1", bookfusion_id="8951594")
+
+        self.assertFalse(sync.supports_book(book))
+
+
+class BookFusionPerUserLinkDbTest(unittest.TestCase):
+    def test_resolves_bookfusion_id_per_user(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseService(str(Path(tmp) / "db.sqlite"))
+            try:
+                alice = db.create_user("alice", "pw", role="user")
+                bob = db.create_user("bob", "pw", role="user")
+                book = db.save_book(Book(abs_id="abs-1", abs_title="Book", status="active", user_id=alice.id))
+                db.link_user_book(bob.id, "abs-1")
+                db.set_user_bookfusion_link(alice.id, "abs-1", "bf-alice", title="Alice Book")
+                db.set_user_bookfusion_link(bob.id, "abs-1", "bf-bob", title="Bob Book")
+
+                self.assertEqual(db.resolve_bookfusion_id(alice.id, book), "bf-alice")
+                self.assertEqual(db.resolve_bookfusion_id(bob.id, book), "bf-bob")
+            finally:
+                db.db_manager.engine.dispose()
+
+
+class BookFusionAddBookSearchTest(unittest.TestCase):
+    def test_get_searchable_ebooks_includes_bookfusion_library_rows(self):
+        import src.web_server as ws
+
+        bookfusion = MagicMock()
+        bookfusion.is_configured.return_value = True
+        bookfusion.search_books.return_value = [
+            {"id": 8951594, "title": "Dune", "authors": [{"name": "Frank Herbert"}]},
+        ]
+        clients = SimpleNamespace(
+            booklore_client=MagicMock(is_configured=MagicMock(return_value=False)),
+            bookorbit_client=MagicMock(is_configured=MagicMock(return_value=False)),
+            bookfusion_client=bookfusion,
+            abs_client=MagicMock(search_ebooks=MagicMock(return_value=[])),
+            library_service=None,
+        )
+
+        with patch.object(ws, "uc", return_value=clients), patch.object(ws, "EBOOK_DIR", Path("__missing_books_dir__"), create=True):
+            results = ws.get_searchable_ebooks("Dune")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].source, "BookFusion")
+        self.assertEqual(results[0].source_id, 8951594)
 
 
 class BookFusionOffsetMapperTest(unittest.TestCase):
