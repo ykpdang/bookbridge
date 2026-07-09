@@ -4,6 +4,32 @@ For the full history of changes, please refer to the **[GitHub Releases](https:/
 
 ---
 
+## [7.1.1]
+
+The headline is **reader-owned integrations and BookFusion support**: BookBridge now gives each reader a self-service place for their own service accounts, adds BookFusion progress and highlight sync, and expands list/collection bridges without changing the already-released 7.1.0 annotation foundation.
+
+Highlight and note sync still requires the **BridgeSync KOReader plugin from 7.1.0 or newer**. Older BridgeSync builds and plain KOSync clients continue syncing reading position, but they do not have annotation exchange, sweep, close-capture, or managed collection support.
+
+### What's New
+
+- **BookFusion progress and highlight sync.** Readers can link their own BookFusion account, sync reading progress by percentage, and relay BookFusion highlights through the annotation hub. Uploading books to BookFusion is intentionally not part of this release.
+
+- **Readers can manage their own integrations.** Account -> My Integrations lets each signed-in reader save their own service usernames, passwords, tokens, API keys, and per-user sync toggles. Admins can still manage those same fields for any reader from Settings -> Users.
+
+- **Readest and Hardcover annotation spokes.** Readest cloud highlights and Hardcover annotations can participate in the annotation hub using each reader's own account configuration.
+
+- **BridgeSync collections can come from Grimmory or Hardcover.** KOReader collection manifests can use either Grimmory shelves or Hardcover lists as the source, configured per reader.
+
+- **Grimmory shelves can create Hardcover lists.** Readers can optionally mirror Grimmory shelf membership into Hardcover lists.
+
+### What Changed
+
+- **Integration settings follow the reader.** User-owned credentials live with the reader, either in Account -> My Integrations or in the admin-managed user integrations page. Global Settings keep shared engine behavior such as server URLs, poll intervals, and daemon-level options.
+
+- **KOReader collection settings now live with each reader.** The collection source selector now lives per reader under KOReader Collections, making Hardcover-list collections discoverable even when Grimmory is disabled.
+
+---
+
 ## [7.1.0]
 
 The headline is **a fuller reading-state bridge**: BookBridge now syncs highlights, notes, richer progress metadata, and BookOrbit audiobook activity alongside ordinary reading positions.

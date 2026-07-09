@@ -25,6 +25,14 @@
 - If using custom polling, check the CWA sync poll interval and make sure it is not set higher than expected.
 - Confirm the book is linked to a CWA ebook entry; CWA progress only appears for books the bridge can resolve through CWA.
 
+### BookFusion progress or highlights are not syncing
+
+- Open **Account -> My Integrations** and confirm BookFusion is linked and enabled for that reader.
+- If you entered a token manually, BookFusion API keys are available from the [BookFusion Calibre integration page](https://www.bookfusion.com/integrations/calibre).
+- Confirm the book is linked to a BookFusion book ID. BookBridge syncs existing BookFusion books; it does not upload books into BookFusion.
+- For highlights, also enable **BookFusion -> Highlight Sync** for that reader and keep the current **Bridge Sync** KOReader plugin installed on devices that should exchange annotations.
+- If using custom polling, check the BookFusion poll interval and make sure it is not set higher than expected.
+
 ### Grimmory or BookOrbit audiobook links are not syncing
 
 - Confirm the source is enabled and the audiobook still exists in the selected Grimmory or BookOrbit library.
@@ -45,6 +53,9 @@
 - In Settings, make sure **KOReader -> Highlight Sync** is enabled.
 - For Grimmory web-reader annotations, enable **Highlight Sync** in that reader's Grimmory / BookLore Integrations.
 - For BookOrbit web-reader highlights, fill in the BookOrbit KOReader sync username/password in that reader's Integrations and make sure the owner matches the BookOrbit user.
+- For BookFusion, enable **BookFusion -> Highlight Sync** in that reader's Integrations and confirm the book is linked to BookFusion.
+- For Readest, enable **Readest -> Highlight Sync** and enter that reader's Readest email/password.
+- For Hardcover, enable **Hardcover -> Highlight Sync** and enter that reader's Hardcover API token.
 
 ### Storyteller transcripts are not found
 

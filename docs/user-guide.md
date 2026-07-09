@@ -22,6 +22,19 @@ When you start actions like **Create Mapping**, **Forge & Match**, **Add to Queu
 
 ---
 
+## Account and My Integrations
+
+The **Account** page is where you manage your own login and reader-specific setup.
+
+- **My Integrations** lets you save your own service usernames, passwords, tokens, API keys, and per-user sync toggles.
+- Admins can still manage the same fields for any reader from **Settings -> Users -> (user) -> Integrations**.
+- Shared engine settings, such as service URLs, poll intervals, and daemon behavior, still live in **Settings**.
+- BookFusion can be linked from **My Integrations** with the device-link button, or configured manually with an API key from BookFusion's Calibre integration page.
+
+Regular readers do not inherit an admin's account credentials when their own fields are blank. This keeps one reader's BookFusion, Grimmory, BookOrbit, tracker, or KOSync account from being used for another reader by accident.
+
+---
+
 ## Sync Modes
 
 Each mapping runs in one of two modes.
@@ -44,7 +57,7 @@ This mode tracks reading progress without attaching an audiobook source.
 - You can still link a standard ebook, a Storyteller title, or both.
 - Ebook-only links skip audiobook preparation work, so they activate faster.
 
-Use this when you only want reading sync between KOReader, Grimmory, BookOrbit, Storyteller, optional ABS ebook progress, and CWA-sourced ebooks when Kobo sync is enabled.
+Use this when you only want reading sync between KOReader, BookFusion, Grimmory, BookOrbit, Storyteller, optional ABS ebook progress, and CWA-sourced ebooks when Kobo sync is enabled.
 
 ---
 
@@ -94,6 +107,8 @@ Requirements:
 - Leave **KOReader -> Highlight Sync** enabled in Settings. It is enabled by default on the bridge side.
 - For Grimmory web-reader highlights and notes, enable **Highlight Sync** in that reader's Grimmory / BookLore Integrations.
 - For BookOrbit web-reader highlights, fill in that reader's BookOrbit KOReader sync username/password fields. The owner must match the BookOrbit user, or be explicitly set in **KOReader sync owner**.
+- For BookFusion highlights, link that reader's BookFusion account and enable **Highlight Sync** in Account -> My Integrations.
+- For Readest or Hardcover annotation relay, configure that reader's account in My Integrations.
 
 What syncs:
 
@@ -231,7 +246,7 @@ This is useful after importing old Storyteller assets or fixing your Storyteller
 
 BookBridge can mix different services for the audio side and text side of a mapping.
 
-For audio, you can use Audiobookshelf, Grimmory, or BookOrbit. For standard ebooks, you can use Audiobookshelf ebook files, Grimmory, BookOrbit, CWA, or local files.
+For audio, you can use Audiobookshelf, Grimmory, or BookOrbit. For standard ebooks, you can use Audiobookshelf ebook files, BookFusion-linked books, Grimmory, BookOrbit, CWA, or local files.
 
 You can use **Grimmory or BookOrbit audiobooks**, and CWA-backed ebook selections, in:
 
@@ -241,7 +256,7 @@ You can use **Grimmory or BookOrbit audiobooks**, and CWA-backed ebook selection
 - **Forge**
 - The main **Dashboard**
 
-If **Record Reading Sessions** is enabled in Settings, Grimmory or BookOrbit also receives session updates as you make progress. If CWA Kobo sync is enabled, CWA-sourced ebook progress can participate through its Kobo sync endpoints.
+If **Record Reading Sessions** is enabled in Settings, Grimmory or BookOrbit also receives session updates as you make progress. If CWA Kobo sync is enabled, CWA-sourced ebook progress can participate through its Kobo sync endpoints. BookFusion progress sync uses BookFusion's percentage-based reading position.
 
 If Grimmory imports change and results look stale, open **Settings** and run **Refresh Grimmory Cache**. If BookOrbit or CWA imports look stale, confirm the service is enabled and reachable, then run the normal sync or matching flow again.
 
@@ -251,11 +266,13 @@ If Grimmory imports change and results look stale, open **Settings** and run **R
 
 This section only applies if you install the optional **Bridge Sync** KOReader plugin.
 
-If you use that plugin, the bridge can turn Grimmory shelves into KOReader collections for the books it sends to your device.
+If you use that plugin, the bridge can turn Grimmory shelves or Hardcover lists into KOReader collections for the books it sends to your device.
 
 The same plugin is also where highlight and note sync lives. Use **Sync Highlights** for an immediate annotation exchange, or **Sweep All Highlights** to back-fill annotations that already exist on the device.
 
-- **Collection Syncing** lets you choose whether Bridge Sync should use all shelves, only regular shelves, or only magic shelves.
+- **Collection Source** lets you choose Grimmory shelves or Hardcover lists as the source for BridgeSync-managed KOReader collections.
+- **Collection Syncing** lets you choose whether Bridge Sync should use all Grimmory shelves, only regular shelves, or only magic shelves.
+- **Hardcover Lists** can use all lists or selected list names when Hardcover is the collection source.
 - **Excluded Shelves** lets you skip shelf names you do not want turned into KOReader collections.
 - **Find Shelves** helps you pick shelf names from Grimmory instead of typing them by hand.
 

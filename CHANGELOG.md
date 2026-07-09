@@ -6,25 +6,33 @@ All notable changes to BookBridge will be documented in this file.
 
 ## [Unreleased]
 
+No unreleased changes yet.
+
+## [7.1.1] - 2026-07-09
+
+The headline is **reader-owned integrations and BookFusion support**: BookBridge now gives each reader a self-service place for their own service accounts, adds BookFusion progress and highlight sync, and expands list/collection bridges without changing the already-released 7.1.0 annotation foundation.
+
+Highlight and note sync still requires the **BridgeSync KOReader plugin from 7.1.0 or newer**. Older BridgeSync builds and plain KOSync clients continue syncing reading position, but they do not have the annotation exchange, sweep, close-capture, or managed collection support.
+
 ### What's New
 
-- **Readers can now manage their own integrations.** The Account page now links to a self-service Integrations page where each signed-in reader can save their own service usernames, passwords, tokens, keys, and per-user sync toggles without needing admin Settings access.
+- **BookFusion progress and highlight sync is now wired in.** Readers can link a BookFusion account, sync reading progress by percentage, and relay highlights through the annotation hub using freshly implemented UTF-16 offset/xpointer mapping. BookFusion can be linked by device flow, and the integration forms point manual token setup to BookFusion's Calibre integration page. Uploading books to BookFusion is intentionally out of scope for this release.
 
-- **BookFusion progress and highlight sync is now wired in.** Readers can link a BookFusion account, sync reading progress by percentage, and relay highlights through the annotation hub using freshly implemented UTF-16 offset/xpointer mapping. Uploading books to BookFusion is intentionally out of scope for this phase.
+- **Readers can now manage their own integrations.** The Account page now links to a self-service Integrations page where each signed-in reader can save their own service usernames, passwords, tokens, keys, and per-user sync toggles without needing admin Settings access. Admins can still manage integrations for any reader from Settings -> Users, and the admin page now points readers to the self-service path.
+
+- **Readest and Hardcover can participate in annotation sync.** Readest cloud highlights and Hardcover annotations can now join the annotation hub using each reader's own account configuration.
 
 - **Hardcover lists can now create KOReader collections.** BridgeSync-managed KOReader manifests can use either Grimmory shelves or Hardcover lists as the collection source. Hardcover collection mapping is per-user, only applies to books already matched in BookBridge, supports all lists or selected list names, and refreshes on a daily cache.
 
-- **Grimmory shelves can now create Hardcover lists.** When enabled in Settings -> Hardcover.app, newly matched Grimmory-backed books are added to Hardcover lists named from their Grimmory shelf membership, mirroring the shelf-to-KOReader-collection flow. The sync is additive only and can use all shelves, magic shelves only, or regular shelves only, with optional list prefixes and excluded shelf names.
+- **Grimmory shelves can now create Hardcover lists.** When enabled for a reader, newly matched Grimmory-backed books are added to Hardcover lists named from their Grimmory shelf membership, mirroring the shelf-to-KOReader-collection flow. The sync is additive only and can use all shelves, magic shelves only, or regular shelves only, with optional list prefixes and excluded shelf names.
 
-### Fixed
+### What Changed
 
-- **BookFusion linking is now available to regular users.** The Account page now lets the signed-in reader link their own BookFusion account and toggle BookFusion progress/highlight sync, and a successful device link enables BookFusion for that reader automatically.
+- **Integration settings follow the reader.** User-owned credentials live with the reader, either in Account -> My Integrations or in the admin-managed user integrations page. Global Settings keep shared engine behavior such as server URLs, poll intervals, and daemon-level options.
 
-- **BookFusion highlight offsets now match real EPUB chapters.** The BookFusion mapper now parses XHTML chapters with XML declarations, counts inter-element whitespace in the UTF-16 offset space, keeps KOReader text-node indexing stable, and sends quote prefix/suffix context when pushing highlights.
+- **KOReader collection settings now live with each reader.** The Grimmory-vs-Hardcover collection source selector now lives per reader under Integrations -> KOReader Collections, matching the per-user manifest behavior and making Hardcover-list collections discoverable even when Grimmory is disabled.
 
-- **KOReader collection source controls are no longer hidden under Grimmory.** The Grimmory-vs-Hardcover collection source selector now lives per reader under Users -> Integrations -> KOReader Collections, matching the per-user manifest behavior and making Hardcover-list collections discoverable even when Grimmory is disabled.
-
-- **Grimmory-to-KOReader collections are account-aware again.** Grimmory shelf labels for BridgeSync manifests are now resolved per KOReader user after manifest scoping, cached for one day, and limited to Grimmory-backed matches so shelves from one reader or provider cannot bleed into another reader's collection manifest.
+- **Readest uses per-user email/password authentication.** Readest highlight sync now logs in with each reader's own Readest account and caches tokens for that reader, instead of relying on pasted global JWTs.
 
 ## [7.1.0] - 2026-07-08
 
@@ -48,7 +56,7 @@ Highlight and note sync requires the **BridgeSync KOReader plugin from this rele
 
 - **KOSync document linking lives in Add / Update Book.** Readers can now review recent unlinked KOSync document hashes, connect them to one of their books, copy the hash, unlink it, or delete stale entries from the same place they already match and repair book links.
 
-- **AI features can use OpenAI or any OpenAI-compatible server.** The optional LLM layer (smarter match suggestions and audio↔text alignment rescue) is no longer Ollama-only — point it at OpenAI or a local OpenAI-compatible endpoint such as llama-server or llama-swap via the new provider selector in Settings. Existing Ollama setups keep working unchanged, and every feature still falls back to normal behavior when the provider is unreachable.
+- **AI features can use OpenAI or any OpenAI-compatible server.** The optional LLM layer (smarter match suggestions and audio-text alignment rescue) is no longer Ollama-only - point it at OpenAI or a local OpenAI-compatible endpoint such as llama-server or llama-swap via the new provider selector in Settings. Existing Ollama setups keep working unchanged, and every feature still falls back to normal behavior when the provider is unreachable.
 
 ### What Changed
 

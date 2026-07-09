@@ -68,6 +68,8 @@
         <div class="note">Regular users need explicit account credentials here. Blank account fields stay unavailable
             instead of inheriting the admin/master library.</div>
         {% endif %}
+        <div class="note">You can manage these fields for this reader here, or the reader can sign in and update
+            their own accounts, tokens, and sync toggles from <strong>Account -> My Integrations</strong>.</div>
 
         {% if message %}<div class="msg">{{ message }}</div>{% endif %}
 
@@ -106,6 +108,10 @@
                     reader. Leave them blank unless you want highlight sync. If that sync account's name differs from
                     the BookOrbit username, set <strong>owner</strong> to the BookOrbit username so the bridge knows
                     the account belongs to this user.</div>
+                {% endif %}
+                {% if group == 'BookFusion' %}
+                <div class="note">BookFusion can be linked by the reader from Account -> My Integrations. If you enter a token manually here, API keys are available on the
+                    <a href="https://www.bookfusion.com/integrations/calibre" target="_blank" rel="noopener" style="color:#aab4f5;">BookFusion Calibre integration page</a>.</div>
                 {% endif %}
                 {% for key, label, ftype in fields %}
                     {% if ftype == 'bool' %}

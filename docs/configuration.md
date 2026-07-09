@@ -8,6 +8,8 @@
 
 The **Settings** page is the easiest way to manage the bridge. Each service section includes a **Test** button so you can check a service before saving. Saving settings restarts the app automatically and brings you back to the dashboard when it is ready.
 
+Shared engine settings live on **Settings**. Reader-specific accounts, tokens, API keys, and sync toggles live under **Account -> My Integrations** for the signed-in reader. Admins can manage those same per-reader fields from **Settings -> Users -> Integrations** when they are helping another reader.
+
 ### Split-Port Security (Optional)
 
 You can run the admin UI and the KOSync protocol on separate ports:
@@ -63,6 +65,44 @@ KOSync notes:
 - If you use the built-in KOSync bridge, the **Test** button checks the values currently typed into the form before you save them.
 - Plain KOReader/KOSync progress sync does not need the Bridge Sync plugin. Highlight and note sync does.
 
+#### BookFusion
+
+BookFusion is a supported ebook progress and highlight source. BookBridge syncs existing BookFusion books; it does not upload books into BookFusion.
+
+| Setting | Env Var | Default | Notes |
+| --- | --- | --- | --- |
+| Enable | `BOOKFUSION_ENABLED` | `false` | Per-reader. Turns on BookFusion progress sync for that reader. |
+| API URL | `BOOKFUSION_API_URL` | `https://www.bookfusion.com` | Usually leave this at the default. |
+| Access Token | `BOOKFUSION_ACCESS_TOKEN` | empty | Per-reader. Device linking from **Account -> My Integrations** is preferred. Manual API keys are available from the [BookFusion Calibre integration page](https://www.bookfusion.com/integrations/calibre). |
+| Highlight Sync | `BOOKFUSION_ANNOTATION_SYNC` | `false` | Per-reader. Enables BookFusion highlight relay for linked books. |
+| Poll Mode | `BOOKFUSION_POLL_MODE` | `global` | `global` uses the main sync cycle. `custom` polls BookFusion separately. |
+| Poll Interval | `BOOKFUSION_POLL_SECONDS` | `300` | Used when Poll Mode is `custom`. |
+
+BookFusion notes:
+
+- Link BookFusion from **Account -> My Integrations**. Admins can also enter a reader's token under **Settings -> Users -> Integrations**.
+- BookFusion reports percentages as 0-100; BookBridge handles the conversion internally.
+- BookFusion matching uses linked BookFusion IDs. If a book is not linked to BookFusion, BookBridge will not guess an upload or create a BookFusion library entry.
+
+#### Readest
+
+Readest can participate in highlight and note relay through Readest cloud sync. It is not a progress sync source.
+
+| Setting | Env Var | Default | Notes |
+| --- | --- | --- | --- |
+| Highlight Sync | `READEST_ANNOTATION_SYNC` | `false` | Per-reader. Enables Readest annotation relay for that reader. |
+| Highlight Sync Interval | `READEST_ANNOTATION_SYNC_MINUTES` | `15` | Minutes between background Readest annotation relay cycles. |
+| Account Email | `READEST_EMAIL` | empty | Per-reader. The Readest account email. |
+| Account Password | `READEST_PASSWORD` | empty | Per-reader. Used to refresh cloud-sync tokens. |
+| Supabase URL | `READEST_SUPABASE_URL` | `https://readest.supabase.co` | Leave as default unless you self-host Readest. |
+| Supabase Anon Key | `READEST_SUPABASE_ANON_KEY` | empty | Optional override for self-hosted Readest. |
+
+Readest notes:
+
+- Enter the Readest email and password under **Account -> My Integrations** for each reader that wants Readest highlights.
+- Tokens are cached and refreshed by the bridge after login.
+- Readest sync depends on the same book identity being available to Readest and the bridge.
+
 #### Storyteller
 
 The bridge talks to Storyteller through the REST API only.
@@ -102,8 +142,6 @@ Grimmory is a supported ebook and audiobook source. You can use it for ebook syn
 | Record Reading Sessions | `GRIMMORY_READING_SESSIONS` | `true` | Sends reading or listening session updates back to Grimmory. |
 | Highlight Sync | `BOOKLORE_ANNOTATION_SYNC` | `false` | Enables Grimmory web-reader highlight/note relay for this reader. Requires the current Bridge Sync plugin for KOReader device annotations. |
 | Highlight Sync Interval | `BOOKLORE_ANNOTATION_SYNC_MINUTES` | `15` | Minutes between background Grimmory annotation relay cycles. |
-| Collection Syncing | `DEVICE_SYNC_COLLECTIONS` | `off` | Optional Bridge Sync plugin feature for turning Grimmory shelves into KOReader collections. |
-| Excluded Shelves | `DEVICE_SYNC_EXCLUDED_SHELVES` | empty | Optional Bridge Sync plugin setting for shelves that should be skipped. |
 | Poll Mode | `BOOKLORE_POLL_MODE` | `global` | `global` uses the main sync cycle. `custom` polls Grimmory separately. |
 | Poll Interval | `BOOKLORE_POLL_SECONDS` | `300` | Used when Poll Mode is `custom`. |
 
@@ -115,11 +153,22 @@ Grimmory notes:
 - Enable **Highlight Sync** in each reader's Grimmory / BookLore Integrations if you want Grimmory web-reader highlights and notes to round-trip through the bridge.
 - **Settings -> Refresh Grimmory Cache** forces a fresh cache rebuild after imports, removals, or large metadata changes.
 - Use **Find IDs** next to **Library ID** in Settings to load your available Grimmory libraries and fill the field from a dropdown.
-- The **Device Sync Collections** settings only matter if you use the optional **Bridge Sync** KOReader plugin.
-- **Collection Syncing** controls whether Bridge Sync should turn Grimmory shelves into KOReader collections.
-- **Magic Shelves Only** means Bridge Sync uses shelves in Grimmory that fill themselves based on rules.
-- **Excluded Shelves** lets you list shelf names you do not want turned into KOReader collections.
+- The **KOReader Collections** settings only matter if you use the optional **Bridge Sync** KOReader plugin.
+- KOReader collections are configured per reader under **Account -> My Integrations -> KOReader Collections**.
+- **Collection Source** chooses whether Bridge Sync should use Grimmory shelves or Hardcover lists.
+- When the source is Grimmory, **Collection Syncing** controls which Grimmory shelves become KOReader collections. **Magic Shelves Only** means Bridge Sync uses shelves in Grimmory that fill themselves based on rules.
+- **Excluded Shelves** lets you list Grimmory shelf names you do not want turned into KOReader collections.
 - **Find Shelves** helps you pick shelf names from Grimmory instead of typing them by hand.
+
+KOReader Collections per-reader settings:
+
+| Setting | Env Var | Default | Notes |
+| --- | --- | --- | --- |
+| Collection Source | `DEVICE_SYNC_COLLECTION_SOURCE` | `grimmory` | `off`, `grimmory`, or `hardcover`. Choose one source to avoid collection-name collisions. |
+| Grimmory Shelf Mode | `DEVICE_SYNC_COLLECTIONS` | `off` | `off`, `all`, `magic`, or `shelf`. Used when Collection Source is `grimmory`. |
+| Excluded Grimmory Shelves | `DEVICE_SYNC_EXCLUDED_SHELVES` | empty | Comma-separated shelf names to skip. |
+| Hardcover List Mode | `DEVICE_SYNC_HARDCOVER_LISTS` | `all` | `all` or `selected`. Used when Collection Source is `hardcover`. |
+| Hardcover List Names | `DEVICE_SYNC_HARDCOVER_LIST_NAMES` | empty | Comma-separated list names when Hardcover List Mode is `selected`. |
 
 Advanced Grimmory cache tuning:
 
@@ -196,17 +245,25 @@ CWA notes:
 
 #### Hardcover.app
 
-Hardcover provides modern reading tracking with a beautiful UI.
+Hardcover provides modern reading tracking with a beautiful UI. BookBridge can post reading progress to Hardcover, push selected highlights, and optionally project Grimmory shelves into Hardcover lists.
 
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |
 | Enable | `HARDCOVER_ENABLED` | `false` | Turns on Hardcover updates. |
-| API Token | `HARDCOVER_TOKEN` | empty | Personal API token from Hardcover. |
+| API Token | `HARDCOVER_TOKEN` | empty | Per-reader personal API token from Hardcover. |
+| Highlight Sync | `HARDCOVER_ANNOTATION_SYNC` | `false` | Per-reader. Pushes supported KOReader highlights to Hardcover. |
+| Highlight Sync Interval | `HARDCOVER_ANNOTATION_SYNC_MINUTES` | `30` | Minutes between background Hardcover annotation relay cycles. |
+| Grimmory Shelves to Hardcover Lists | `HARDCOVER_GRIMMORY_LIST_SYNC` | `off` | Per-reader. `off`, `all`, `magic`, or `shelf`. |
+| Hardcover List Name Prefix | `HARDCOVER_GRIMMORY_LIST_PREFIX` | `Grimmory: ` | Prefix for lists created from Grimmory shelves. |
+| Excluded Grimmory Shelves | `HARDCOVER_GRIMMORY_LIST_EXCLUDED_SHELVES` | empty | Comma-separated shelf names to skip during list projection. |
 
 Hardcover notes:
 
-- When enabled, progress is synced from KOReader/Audiobookshelf to Hardcover.
+- When enabled, progress is synced from KOReader/Audiobookshelf and other bridge leaders to Hardcover.
 - Use the **Edition Picker** on the dashboard to select which specific edition to track.
+- Each reader supplies their own Hardcover token under **Account -> My Integrations**.
+- Hardcover lists can also be used as KOReader collections when **KOReader Collections -> Collection Source** is set to **Hardcover Lists**.
+- Grimmory shelf projection creates or updates Hardcover lists for books already matched to Hardcover. It is per-reader, so one reader's shelves are not projected into another reader's account.
 
 #### StoryGraph
 
@@ -226,9 +283,10 @@ StoryGraph notes:
 
 #### Progress Trackers
 
-Hardcover and StoryGraph are independent — enable either or both with their `*_ENABLED`
-toggles in Settings → Trackers. Each user then picks which they use, and supplies their own
-token/cookies, under Settings → Users → (user) → Integrations.
+Hardcover and StoryGraph are independent - enable either or both with their `*_ENABLED`
+toggles in Settings -> Trackers. Each reader then picks which they use, and supplies their own
+token/cookies, under **Account -> My Integrations**. Admins can also manage those values under
+**Settings -> Users -> Integrations**.
 
 #### Telegram Notifications
 

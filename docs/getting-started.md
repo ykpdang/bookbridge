@@ -13,7 +13,7 @@ Before you begin, you should have:
 - Docker and Docker Compose
 - A working Audiobookshelf server if you want audiobook matching or ABS sync
 - An ebook folder on the Docker host
-- Optional: KOSync, Grimmory and/or BookOrbit, CWA, Storyteller, or Hardcover if you want those integrations
+- Optional: KOSync, BookFusion, Grimmory and/or BookOrbit, CWA, Storyteller, Readest, or Hardcover if you want those integrations
 
 ---
 
@@ -39,6 +39,7 @@ If you want searches scoped to one ABS library:
 If you plan to use them, also keep these handy:
 
 - KOSync URL, username, and password
+- BookFusion account access, if you want BookFusion progress or highlight sync
 - Grimmory and/or BookOrbit URL, username, and password
 - CWA URL, username/password, and Kobo sync token if you use Calibre-Web Automated
 - Storyteller URL, username, and password
@@ -70,7 +71,7 @@ services:
       - TZ=America/New_York
       - LOG_LEVEL=INFO
       # - KOSYNC_PORT=5758  # Optional: enable split-port mode
-      # Configure ABS, KOSync, Grimmory, BookOrbit, CWA, Storyteller, and other services in the Web UI.
+      # Configure ABS, KOSync, BookFusion, Grimmory, BookOrbit, CWA, Storyteller, and other services in the Web UI.
     volumes:
       - ./data:/data
       - /path/to/ebooks:/books
@@ -121,9 +122,11 @@ docker compose logs -f
 3. Enter your **Audiobookshelf Server URL**, **API Token**, and **Library ID**.
 4. Add any optional services you want to use:
    - KOSync
+   - BookFusion
    - Grimmory and/or BookOrbit
    - CWA
    - Storyteller
+   - Readest
    - Hardcover
 5. Use the **Test** button on any service section if you want to check a service before saving.
 6. If you mounted Storyteller assets, set **Storyteller Assets Path** to `/storyteller`.
@@ -131,7 +134,7 @@ docker compose logs -f
 8. Click **Save Settings** and wait for the app to come back.
 
 !!! tip "Sharing with more than one reader?"
-    Your main account can add other people from **Settings -> Users**. Each reader signs in to their own dashboard, enters their own service logins, and only sees the books they are reading — so everyone keeps their own progress, even on the same book.
+    Your main account can add other people from **Settings -> Users**. Each reader signs in to their own dashboard, opens **Account -> My Integrations**, enters their own service logins, and only sees the books they are reading - so everyone keeps their own progress, even on the same book. Admins can also fill those integrations for a reader from **Settings -> Users -> Integrations**.
 
 ---
 
@@ -171,6 +174,6 @@ The plugin is also required for the newer highlight and note sync features. Norm
 
 After installing or updating the plugin, restart KOReader and open **Tools -> Bridge Sync** to set the server URL and the same KOSync username/key you configured for that reader.
 
-If you install it, you can later use the Grimmory settings to turn selected Grimmory shelves into KOReader collections for synced books.
+If you install it, you can later use each reader's integrations to turn Grimmory shelves or Hardcover lists into KOReader collections for synced books.
 
 This is optional. The bridge works without it.
