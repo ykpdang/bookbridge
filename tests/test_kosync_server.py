@@ -23,7 +23,7 @@ if os.path.exists(TEST_DIR):
     shutil.rmtree(TEST_DIR)
 os.makedirs(TEST_DIR, exist_ok=True)
 
-from src.db.models import KosyncDocument, Book, ReadingSession, Setting, State, HardcoverDetails
+from src.db.models import KosyncDocument, Book, ReadingSession, Setting, State, HardcoverDetails, UserCredential
 # Initialize DB service with test path
 from src.db.database_service import DatabaseService
 
@@ -244,6 +244,7 @@ class TestKosyncEndpoints(unittest.TestCase):
              session.query(Setting).delete()
              session.query(State).delete()
              session.query(HardcoverDetails).delete()
+             session.query(UserCredential).delete()
              session.query(Book).delete()
         if web_server.database_service.count_users() == 0:
             web_server.database_service.create_user("admin", "secret", role="admin")
@@ -814,6 +815,9 @@ class TestKosyncEndpoints(unittest.TestCase):
         svc.set_user_credential(admin_id, "BOOKLORE_USER", "reader")
         svc.set_user_credential(admin_id, "BOOKLORE_PASSWORD", "secret")
         svc.set_user_credential(admin_id, "BOOKLORE_SHELF_NAME", "Kobo")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_COLLECTION_SOURCE", "grimmory")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_COLLECTIONS", "all")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_EXCLUDED_SHELVES", "Read")
 
         fake_client = MagicMock()
         fake_client.is_configured.return_value = True
@@ -833,9 +837,6 @@ class TestKosyncEndpoints(unittest.TestCase):
         }
 
         with patch.dict(os.environ, {
-            "DEVICE_SYNC_COLLECTION_SOURCE": "grimmory",
-            "DEVICE_SYNC_COLLECTIONS": "all",
-            "DEVICE_SYNC_EXCLUDED_SHELVES": "Read",
             "BOOKLORE_SERVER": "http://grimmory.test",
         }, clear=False), \
              patch.object(kosync_server, "BookloreClient", return_value=fake_client):
@@ -865,6 +866,9 @@ class TestKosyncEndpoints(unittest.TestCase):
         svc.set_user_credential(admin_id, "BOOKLORE_ENABLED", "true")
         svc.set_user_credential(admin_id, "BOOKLORE_USER", "reader")
         svc.set_user_credential(admin_id, "BOOKLORE_PASSWORD", "secret")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_COLLECTION_SOURCE", "grimmory")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_COLLECTIONS", "all")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_EXCLUDED_SHELVES", "")
 
         fake_client = MagicMock()
         fake_client.is_configured.return_value = True
@@ -880,9 +884,6 @@ class TestKosyncEndpoints(unittest.TestCase):
         }
 
         with patch.dict(os.environ, {
-            "DEVICE_SYNC_COLLECTION_SOURCE": "grimmory",
-            "DEVICE_SYNC_COLLECTIONS": "all",
-            "DEVICE_SYNC_EXCLUDED_SHELVES": "",
             "BOOKLORE_SERVER": "http://grimmory.test",
         }, clear=False), \
              patch.object(kosync_server, "BookloreClient", return_value=fake_client):
@@ -909,6 +910,9 @@ class TestKosyncEndpoints(unittest.TestCase):
         ))
         svc.set_user_credential(admin_id, "HARDCOVER_ENABLED", "true")
         svc.set_user_credential(admin_id, "HARDCOVER_TOKEN", "user-token")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_COLLECTION_SOURCE", "hardcover")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_HARDCOVER_LISTS", "all")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_HARDCOVER_LIST_NAMES", "")
 
         fake_client = MagicMock()
         fake_client.is_configured.return_value = True
@@ -934,12 +938,7 @@ class TestKosyncEndpoints(unittest.TestCase):
             ],
         }
 
-        with patch.dict(os.environ, {
-            "DEVICE_SYNC_COLLECTION_SOURCE": "hardcover",
-            "DEVICE_SYNC_HARDCOVER_LISTS": "all",
-            "DEVICE_SYNC_HARDCOVER_LIST_NAMES": "",
-        }, clear=False), \
-             patch.object(kosync_server, "HardcoverClient", return_value=fake_client):
+        with patch.object(kosync_server, "HardcoverClient", return_value=fake_client):
             scoped = kosync_server._scope_manifest_to_user(manifest, admin_id)
             scoped_again = kosync_server._scope_manifest_to_user(manifest, admin_id)
 
@@ -967,6 +966,9 @@ class TestKosyncEndpoints(unittest.TestCase):
         ))
         svc.set_user_credential(admin_id, "HARDCOVER_ENABLED", "true")
         svc.set_user_credential(admin_id, "HARDCOVER_TOKEN", "user-token")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_COLLECTION_SOURCE", "hardcover")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_HARDCOVER_LISTS", "selected")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_HARDCOVER_LIST_NAMES", "Sci-Fi")
 
         fake_client = MagicMock()
         fake_client.is_configured.return_value = True
@@ -987,12 +989,7 @@ class TestKosyncEndpoints(unittest.TestCase):
             ],
         }
 
-        with patch.dict(os.environ, {
-            "DEVICE_SYNC_COLLECTION_SOURCE": "hardcover",
-            "DEVICE_SYNC_HARDCOVER_LISTS": "selected",
-            "DEVICE_SYNC_HARDCOVER_LIST_NAMES": "Sci-Fi",
-        }, clear=False), \
-             patch.object(kosync_server, "HardcoverClient", return_value=fake_client):
+        with patch.object(kosync_server, "HardcoverClient", return_value=fake_client):
             scoped = kosync_server._scope_manifest_to_user(manifest, admin_id)
 
         self.assertEqual(scoped["books"][0]["shelves"], ["Sci-Fi"])

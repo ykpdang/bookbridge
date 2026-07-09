@@ -1023,57 +1023,20 @@
                     <div class="full-width" style="margin: 10px 0; border-top: 1px solid rgba(255,255,255,0.1);"></div>
                     <h4 class="full-width" style="font-size: 14px; color: #fff; margin-bottom: -10px;">Device Sync Collections</h4>
 
-                    {% set raw_collection_source = get_val('DEVICE_SYNC_COLLECTION_SOURCE', 'grimmory') %}
-                    {% set device_collection_source = raw_collection_source %}
-                    {% if raw_collection_source == 'grimmory' and get_val('DEVICE_SYNC_COLLECTIONS', 'off') == 'off' %}
-                        {% set device_collection_source = 'off' %}
-                    {% endif %}
                     <div class="form-group full-width">
                         <label>KOReader Collection Source</label>
-                        <select name="DEVICE_SYNC_COLLECTION_SOURCE">
-                            <option value="off" {% if device_collection_source == 'off' %}selected{% endif %}>Off / Disabled</option>
-                            <option value="grimmory" {% if device_collection_source == 'grimmory' %}selected{% endif %}>Grimmory Shelves</option>
-                            <option value="hardcover" {% if device_collection_source == 'hardcover' %}selected{% endif %}>Hardcover Lists</option>
-                        </select>
-                        <div class="help-text">Choose one source for BridgeSync-managed KOReader collections.</div>
+                        <div class="help-text">
+                            BridgeSync-managed KOReader collections are configured per reader in
+                            <a href="{{ url_for('settings') }}#users" style="color:#aab4f5;">Settings -> Users -> (user) -> Integrations</a>
+                            under <b>KOReader Collections</b>. Choose Grimmory shelves or Hardcover lists there.
+                        </div>
                     </div>
-                    <div class="form-group full-width">
-                        <label>Grimmory Collection Mode</label>
-                        <select name="DEVICE_SYNC_COLLECTIONS">
-                            <option value="off" {% if get_val('DEVICE_SYNC_COLLECTIONS') == 'off' %}selected{% endif %}>Off / Disabled</option>
-                            <option value="all" {% if get_val('DEVICE_SYNC_COLLECTIONS') == 'all' %}selected{% endif %}>All Shelves</option>
-                            <option value="magic" {% if get_val('DEVICE_SYNC_COLLECTIONS') == 'magic' %}selected{% endif %}>Magic Shelves Only</option>
-                            <option value="shelf" {% if get_val('DEVICE_SYNC_COLLECTIONS') == 'shelf' %}selected{% endif %}>Regular Shelves Only</option>
-                        </select>
-                        <div class="help-text">Automatically creates KOReader collections based on Grimmory shelf membership (<b>Note:</b> This feature only works with <code>bridgesync.koplugin</code> active on your KOReader device).</div>
-                    </div>
-                    <div class="form-group full-width">
+                    <div class="form-group full-width" style="display:none;">
                         <label>Excluded Shelves</label>
                         <div style="display: flex; gap: 10px;">
-                            <input type="text" name="DEVICE_SYNC_EXCLUDED_SHELVES" value="{{ get_val('DEVICE_SYNC_EXCLUDED_SHELVES') }}" placeholder="e.g. Read, Archive, DNF" style="flex: 1;">
                             <button class="btn" type="button" onclick="checkBookloreShelves()">🔍 Find Shelves</button>
                         </div>
-                        <select id="booklore_shelf_picker" style="display:none; margin-top:10px;"
-                            onchange="applyShelfPickerSelection('DEVICE_SYNC_EXCLUDED_SHELVES', 'booklore_shelf_picker')">
-                            <option value="">Select a shelf to add...</option>
-                        </select>
-                        <div id="booklore_shelf_picker_status" class="help-text" style="display:none; margin-top:6px;"></div>
                         <div class="help-text">Comma-separated list of Grimmory shelf names to skip when creating KOReader collections.</div>
-                    </div>
-                    <div class="form-group full-width">
-                        <label>Hardcover List Mode</label>
-                        <select name="DEVICE_SYNC_HARDCOVER_LISTS">
-                            <option value="all" {% if get_val('DEVICE_SYNC_HARDCOVER_LISTS', 'all') == 'all' %}selected{% endif %}>All Lists</option>
-                            <option value="selected" {% if get_val('DEVICE_SYNC_HARDCOVER_LISTS') == 'selected' %}selected{% endif %}>Selected Lists Only</option>
-                        </select>
-                        <div class="help-text">Hardcover list membership is cached per user for one day and only applies to books already matched in BookBridge.</div>
-                    </div>
-                    <div class="form-group full-width">
-                        <label>Hardcover List Names</label>
-                        <input type="text" name="DEVICE_SYNC_HARDCOVER_LIST_NAMES"
-                            value="{{ get_val('DEVICE_SYNC_HARDCOVER_LIST_NAMES') }}"
-                            placeholder="e.g. Owned, Up Next, Sci-Fi">
-                        <div class="help-text">Comma-separated list names used when Hardcover List Mode is Selected Lists Only.</div>
                     </div>
                 </div>
             </div>

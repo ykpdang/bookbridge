@@ -153,9 +153,6 @@ class TestSettingsComprehensive(unittest.TestCase):
             'TZ': 'Europe/Paris',
             'SYNC_PERIOD_MINS': '15',
             'ABS_SERVER': 'http://test.com',
-            'DEVICE_SYNC_COLLECTION_SOURCE': 'hardcover',
-            'DEVICE_SYNC_HARDCOVER_LISTS': 'selected',
-            'DEVICE_SYNC_HARDCOVER_LIST_NAMES': 'Owned, Sci-Fi',
         }
         
         response = self.client.post('/settings', data=test_data)
@@ -221,13 +218,14 @@ class TestSettingsComprehensive(unittest.TestCase):
         self.assertIn('name="BOOKLORE_SERVER"', html)
         self.assertIn('name="BOOKLORE_SHELF_WATCH_NAME"', html)
 
-    def test_settings_get_renders_hardcover_device_sync_collection_fields(self):
+    def test_settings_get_points_device_sync_collections_to_user_integrations(self):
         html = self._render_settings_template_source()
 
-        self.assertIn('name="DEVICE_SYNC_COLLECTION_SOURCE"', html)
-        self.assertIn('value="hardcover"', html)
-        self.assertIn('name="DEVICE_SYNC_HARDCOVER_LISTS"', html)
-        self.assertIn('name="DEVICE_SYNC_HARDCOVER_LIST_NAMES"', html)
+        self.assertIn('KOReader Collections', html)
+        self.assertIn('Settings -> Users -> (user) -> Integrations', html)
+        self.assertNotIn('name="DEVICE_SYNC_COLLECTION_SOURCE"', html)
+        self.assertNotIn('name="DEVICE_SYNC_HARDCOVER_LISTS"', html)
+        self.assertNotIn('name="DEVICE_SYNC_HARDCOVER_LIST_NAMES"', html)
 
     @patch('src.web_server.restart_server')
     def test_custom_whisper_model_is_saved_without_being_forced_to_builtin(self, mock_restart):

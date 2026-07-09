@@ -1012,7 +1012,7 @@ def _apply_user_integrations(user_id):
                 submitted = request.form.get(key, '')
                 if submitted:  # blank => keep existing secret
                     database_service.set_user_credential(user_id, key, submitted)
-            else:  # text: blank clears => inherit master
+            else:  # text/select: blank clears => inherit master/default
                 database_service.set_user_credential(user_id, key, request.form.get(key, ''))
 
     # A newly-entered Readest password belongs to a (possibly different) account,

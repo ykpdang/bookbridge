@@ -296,6 +296,10 @@ class TestMultiUserAuth(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn(b'Regular users need explicit account credentials', resp.data)
         self.assertNotIn(b'inherit the master Settings', resp.data)
+        self.assertIn(b'KOReader Collections', resp.data)
+        self.assertIn(b'name="DEVICE_SYNC_COLLECTION_SOURCE"', resp.data)
+        self.assertIn(b'value="hardcover"', resp.data)
+        self.assertIn(b'name="DEVICE_SYNC_HARDCOVER_LIST_NAMES"', resp.data)
 
     def test_admin_saves_user_integrations_and_invalidates(self):
         fake_registry = MagicMock()
@@ -308,12 +312,18 @@ class TestMultiUserAuth(unittest.TestCase):
             'STORYTELLER_USER': 'bob',
             'STORYTELLER_PASSWORD': 'secretpw',
             'STORYTELLER_ENABLED': 'on',
+            'DEVICE_SYNC_COLLECTION_SOURCE': 'hardcover',
+            'DEVICE_SYNC_HARDCOVER_LISTS': 'selected',
+            'DEVICE_SYNC_HARDCOVER_LIST_NAMES': 'Owned, Sci-Fi',
         })
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(self.svc.get_user_credential(target.id, 'ABS_KEY'), 'bob-abs-token')
         self.assertEqual(self.svc.get_user_credential(target.id, 'ABS_LIBRARY_ID'), 'bob-lib')
         self.assertEqual(self.svc.get_user_credential(target.id, 'STORYTELLER_ENABLED'), 'true')
         self.assertEqual(self.svc.get_user_credential(target.id, 'KOSYNC_ENABLED'), 'false')
+        self.assertEqual(self.svc.get_user_credential(target.id, 'DEVICE_SYNC_COLLECTION_SOURCE'), 'hardcover')
+        self.assertEqual(self.svc.get_user_credential(target.id, 'DEVICE_SYNC_HARDCOVER_LISTS'), 'selected')
+        self.assertEqual(self.svc.get_user_credential(target.id, 'DEVICE_SYNC_HARDCOVER_LIST_NAMES'), 'Owned, Sci-Fi')
         fake_registry.invalidate.assert_called_once_with(target.id)
 
     def test_secret_blank_keeps_existing(self):

@@ -21,6 +21,9 @@ PER_USER_CREDENTIAL_KEYS = frozenset({
     "ABS_KEY", "ABS_LIBRARY_ID", "ABS_COLLECTION_NAME",
     # KOReader / KoSync (server URL global; account is per-user)
     "KOSYNC_USER", "KOSYNC_KEY", "KOSYNC_ENABLED",
+    "DEVICE_SYNC_COLLECTION_SOURCE", "DEVICE_SYNC_COLLECTIONS",
+    "DEVICE_SYNC_EXCLUDED_SHELVES", "DEVICE_SYNC_HARDCOVER_LISTS",
+    "DEVICE_SYNC_HARDCOVER_LIST_NAMES",
     # Storyteller
     "STORYTELLER_USER", "STORYTELLER_PASSWORD", "STORYTELLER_ENABLED",
     # Calibre-Web (Automated)
@@ -56,6 +59,25 @@ PER_USER_FIELD_GROUPS = [
         ("KOSYNC_ENABLED", "Enabled", "bool"),
         ("KOSYNC_USER", "Sync username", "text"),
         ("KOSYNC_KEY", "Sync password", "secret"),
+    ]),
+    ("KOReader Collections", [
+        (
+            "DEVICE_SYNC_COLLECTION_SOURCE",
+            "Collection source",
+            "select:off=Off / Disabled|grimmory=Grimmory Shelves|hardcover=Hardcover Lists",
+        ),
+        (
+            "DEVICE_SYNC_COLLECTIONS",
+            "Grimmory shelf mode",
+            "select:off=Off / Disabled|all=All Shelves|magic=Magic Shelves Only|shelf=Regular Shelves Only",
+        ),
+        ("DEVICE_SYNC_EXCLUDED_SHELVES", "Grimmory shelves to exclude", "text"),
+        (
+            "DEVICE_SYNC_HARDCOVER_LISTS",
+            "Hardcover list mode",
+            "select:all=All Lists|selected=Selected Lists Only",
+        ),
+        ("DEVICE_SYNC_HARDCOVER_LIST_NAMES", "Hardcover list names", "text"),
     ]),
     ("Storyteller", [
         ("STORYTELLER_ENABLED", "Enabled", "bool"),

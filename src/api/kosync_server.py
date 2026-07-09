@@ -164,11 +164,12 @@ def _compute_manifest_revision(items) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _device_collection_source() -> str:
-    source = os.environ.get("DEVICE_SYNC_COLLECTION_SOURCE", "grimmory").strip().lower()
+def _device_collection_source(credentials: Optional[dict] = None) -> str:
+    source = str(resolve_setting(credentials, "DEVICE_SYNC_COLLECTION_SOURCE", "off") or "off").strip().lower()
     if source not in {"off", "grimmory", "hardcover"}:
         source = "off"
-    if source == "grimmory" and os.environ.get("DEVICE_SYNC_COLLECTIONS", "off").lower() == "off":
+    mode = str(resolve_setting(credentials, "DEVICE_SYNC_COLLECTIONS", "off") or "off").strip().lower()
+    if source == "grimmory" and mode == "off":
         return "off"
     return source
 
@@ -195,8 +196,8 @@ def _booklore_shelf_cache_key(user_id, credentials: Optional[dict]) -> tuple:
     password = resolve_setting(credentials, "BOOKLORE_PASSWORD", "") or ""
     library_id = resolve_setting(credentials, "BOOKLORE_LIBRARY_ID", "") or ""
     secret_hash = hashlib.sha256(f"{username}\0{password}".encode("utf-8")).hexdigest()[:16]
-    mode = os.environ.get("DEVICE_SYNC_COLLECTIONS", "off").strip().lower()
-    excludes = tuple(sorted(_split_csv(os.environ.get("DEVICE_SYNC_EXCLUDED_SHELVES", ""))))
+    mode = str(resolve_setting(credentials, "DEVICE_SYNC_COLLECTIONS", "off") or "off").strip().lower()
+    excludes = tuple(sorted(_split_csv(str(resolve_setting(credentials, "DEVICE_SYNC_EXCLUDED_SHELVES", "") or ""))))
     sync_shelf = resolve_setting(credentials, "BOOKLORE_SHELF_NAME", "") or ""
     global_sync_shelf = os.environ.get("BOOKLORE_SHELF_NAME", "") or ""
     return (user_id, server, library_id, secret_hash, mode, excludes, sync_shelf, global_sync_shelf)
@@ -209,11 +210,11 @@ def _is_booklore_manifest_book(book) -> bool:
 
 def _build_booklore_shelf_mapping(user_id) -> Optional[dict[str, list[str]]]:
     """Return Grimmory book id -> shelf names for the manifest user, cached daily."""
-    mode = os.environ.get("DEVICE_SYNC_COLLECTIONS", "off").strip().lower()
+    credentials = _booklore_credentials_for_manifest(user_id)
+    mode = str(resolve_setting(credentials, "DEVICE_SYNC_COLLECTIONS", "off") or "off").strip().lower()
     if mode == "off" or _database_service is None:
         return None
 
-    credentials = _booklore_credentials_for_manifest(user_id)
     cache_key = _booklore_shelf_cache_key(user_id, credentials)
     now = time.time()
     with _booklore_shelf_mapping_cache_lock:
@@ -225,7 +226,7 @@ def _build_booklore_shelf_mapping(user_id) -> Optional[dict[str, list[str]]]:
         client = BookloreClient(database_service=_database_service, credentials=credentials)
         if not client.is_configured():
             return None
-        excludes = _split_csv(os.environ.get("DEVICE_SYNC_EXCLUDED_SHELVES", ""))
+        excludes = _split_csv(str(resolve_setting(credentials, "DEVICE_SYNC_EXCLUDED_SHELVES", "") or ""))
         sync_shelves = [
             str(resolve_setting(credentials, "BOOKLORE_SHELF_NAME", "") or "").strip(),
             str(os.environ.get("BOOKLORE_SHELF_NAME", "") or "").strip(),
@@ -261,8 +262,8 @@ def _hardcover_list_cache_key(user_id, credentials: Optional[dict]) -> tuple:
     elif user_id is None:
         token = os.environ.get("HARDCOVER_TOKEN", "")
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16] if token else ""
-    mode = os.environ.get("DEVICE_SYNC_HARDCOVER_LISTS", "all").strip().lower()
-    names = tuple(sorted(_split_csv(os.environ.get("DEVICE_SYNC_HARDCOVER_LIST_NAMES", ""))))
+    mode = str(resolve_setting(credentials, "DEVICE_SYNC_HARDCOVER_LISTS", "all") or "all").strip().lower()
+    names = tuple(sorted(_split_csv(str(resolve_setting(credentials, "DEVICE_SYNC_HARDCOVER_LIST_NAMES", "") or ""))))
     return (user_id, token_hash, mode, names)
 
 
@@ -293,9 +294,12 @@ def _build_hardcover_list_mapping(user_id) -> Optional[dict[str, list[str]]]:
         if not client.is_configured():
             return None
         lists = client.get_user_lists()
-        mode = os.environ.get("DEVICE_SYNC_HARDCOVER_LISTS", "all").strip().lower()
+        mode = str(resolve_setting(credentials, "DEVICE_SYNC_HARDCOVER_LISTS", "all") or "all").strip().lower()
         if mode == "selected":
-            selected = {name.lower() for name in _split_csv(os.environ.get("DEVICE_SYNC_HARDCOVER_LIST_NAMES", ""))}
+            selected = {
+                name.lower()
+                for name in _split_csv(str(resolve_setting(credentials, "DEVICE_SYNC_HARDCOVER_LIST_NAMES", "") or ""))
+            }
             lists = [entry for entry in lists if str(entry.get("name") or "").strip().lower() in selected]
         if not lists:
             mapping = {}
@@ -368,7 +372,8 @@ def _apply_booklore_shelf_collections(manifest: dict, user_id) -> None:
 
 
 def _apply_user_collection_source(manifest: dict, user_id) -> None:
-    source = _device_collection_source()
+    credentials = _booklore_credentials_for_manifest(user_id)
+    source = _device_collection_source(credentials)
     if source == "grimmory":
         _apply_booklore_shelf_collections(manifest, user_id)
     elif source == "hardcover":
@@ -401,7 +406,8 @@ def _scope_manifest_to_user(manifest, user_id):
         return manifest
     all_books = manifest.get("books") or []
     books = [dict(item) for item in all_books if str(item.get("abs_id")) in owned_ids]
-    if len(books) == len(all_books) and _device_collection_source() == "off":
+    credentials = _booklore_credentials_for_manifest(user_id)
+    if len(books) == len(all_books) and _device_collection_source(credentials) == "off":
         return manifest
     scoped = dict(manifest)
     scoped["books"] = books

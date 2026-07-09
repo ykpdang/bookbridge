@@ -14,6 +14,8 @@ All notable changes to BookBridge will be documented in this file.
 
 ### Fixed
 
+- **KOReader collection source controls are no longer hidden under Grimmory.** The Grimmory-vs-Hardcover collection source selector now lives per reader under Users -> Integrations -> KOReader Collections, matching the per-user manifest behavior and making Hardcover-list collections discoverable even when Grimmory is disabled.
+
 - **Grimmory-to-KOReader collections are account-aware again.** Grimmory shelf labels for BridgeSync manifests are now resolved per KOReader user after manifest scoping, cached for one day, and limited to Grimmory-backed matches so shelves from one reader or provider cannot bleed into another reader's collection manifest.
 
 ## [7.1.0] - 2026-07-08
