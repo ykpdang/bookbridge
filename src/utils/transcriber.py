@@ -29,7 +29,7 @@ from src.utils.logging_utils import sanitize_log_data, time_execution
 from src.utils.transcription_providers import get_transcription_provider
 from src.utils.polisher import Polisher
 from src.utils.storyteller_transcript import StorytellerTranscript
-from src.utils.transcription_cancel import is_cancelled
+from src.utils.transcription_cancel import CancellationToken, is_cancelled
 # We keep the import for type hinting, but we don't instantiate it directly anymore
 
 logger = logging.getLogger(__name__)
@@ -426,7 +426,14 @@ class AudioTranscriber:
                 logger.debug(f"Transcript cache cleanup skipped {artifact.name}: {cleanup_err}")
 
     @time_execution
-    def process_audio(self, abs_id, audio_urls, full_book_text=None, progress_callback=None) -> Optional[list]:
+    def process_audio(
+        self,
+        abs_id,
+        audio_urls,
+        full_book_text=None,
+        progress_callback=None,
+        cancellation_token: Optional[CancellationToken] = None,
+    ) -> Optional[list]:
         """
         Main transcription pipeline.
         Returns: List of segment dicts [{'start': 0.0, 'end': 1.0, 'text': 'foo'}, ...]
@@ -435,6 +442,12 @@ class AudioTranscriber:
         # The Orchestrator (SyncManager) should check the DB (AlignmentService) before calling this.
         # However, we CAN check our local cache to resume/skip work if we crashed mid-transcription.
         
+        def raise_if_cancelled() -> None:
+            if is_cancelled(abs_id, cancellation_token):
+                logger.info(f"🛑 Transcription cancelled for {abs_id} (mapping deleted); stopping cleanly")
+                raise TranscriptionCancelled(abs_id)
+
+        raise_if_cancelled()
         book_cache_dir = self.cache_root / str(abs_id)
         # Clean up if not resuming? For now, we assume if we are called, we need to run.
         book_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -512,6 +525,7 @@ class AudioTranscriber:
 
                     logger.info(f"📥 Phase 1: Downloading {len(audio_urls)} audio files...")
                     for idx, audio_data in enumerate(audio_urls):
+                        raise_if_cancelled()
                         stream_url = audio_data.get('stream_url')
                         local_source_path = audio_data.get('local_path')
                         extension = audio_data.get('ext', '.mp3')
@@ -527,12 +541,14 @@ class AudioTranscriber:
                                 r.raise_for_status()
                                 with open(local_path, 'wb') as f:
                                     for chunk in r.iter_content(chunk_size=8192):
+                                        raise_if_cancelled()
                                         f.write(chunk)
 
                         if not local_path.exists() or local_path.stat().st_size == 0:
                             raise ValueError(f"File {local_path} is empty or missing.")
 
                         # Normalize to WAV
+                        raise_if_cancelled()
                         normalized_path = self.normalize_audio_to_wav(local_path)
                         if not normalized_path:
                             raise ValueError(f"Normalization failed for part {idx+1}")
@@ -563,9 +579,7 @@ class AudioTranscriber:
                 # Cooperative cancellation: if the mapping was deleted while we
                 # were transcribing, stop before doing more work or writing into
                 # a cache directory the delete path may have already removed.
-                if is_cancelled(abs_id):
-                    logger.info(f"🛑 Transcription cancelled for {abs_id} (mapping deleted); stopping cleanly")
-                    raise TranscriptionCancelled(abs_id)
+                raise_if_cancelled()
 
                 duration = self.get_audio_duration(local_path)
                 pct = (cumulative_duration / total_audio_duration * 100) if total_audio_duration > 0 else 0
@@ -574,6 +588,7 @@ class AudioTranscriber:
                 try:
                     # Use the transcription provider
                     segments = provider.transcribe(local_path)
+                    raise_if_cancelled()
                     
                     for segment in segments:
                         full_transcript.append({
@@ -588,6 +603,7 @@ class AudioTranscriber:
 
                 cumulative_duration += duration
                 chunks_completed = idx + 1
+                raise_if_cancelled()
 
                 # Save progress after each chunk for resumption. Guard against the
                 # cache directory having been removed by a concurrent mapping

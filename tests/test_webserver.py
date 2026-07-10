@@ -8,7 +8,7 @@ import tempfile
 import os
 import json
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, call, patch
 import sys
 
 # Add project root to Python path
@@ -753,6 +753,35 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
             'Synced with KOReader'
         )
         self.mock_database_service.delete_book.assert_called_once_with('delete-st-1')
+
+    def test_delete_mapping_defers_audio_cleanup_for_active_worker(self):
+        """Issue #313: delete the row first and let the cancelled worker clean its cache."""
+        from src.db.models import Book
+
+        test_book = Book(
+            abs_id='delete-active-worker',
+            abs_title='Delete Active Worker',
+            status='processing',
+        )
+        self.mock_database_service.get_book.return_value = test_book
+        self.mock_manager.cancel_background_job.return_value = True
+        sequence = MagicMock()
+        sequence.attach_mock(self.mock_manager.cancel_background_job, 'cancel')
+        sequence.attach_mock(self.mock_database_service.delete_book, 'delete')
+
+        with patch('src.web_server.cleanup_mapping_resources') as mock_cleanup:
+            sequence.attach_mock(mock_cleanup, 'cleanup')
+            response = self.client.post('/delete/delete-active-worker')
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            sequence.mock_calls,
+            [
+                call.cancel('delete-active-worker'),
+                call.delete('delete-active-worker'),
+                call.cleanup(test_book, defer_audio_cache=True),
+            ],
+        )
 
     def test_delete_mapping_infers_storyteller_uuid_from_filename(self):
         """Deleting a mapping should infer Storyteller UUID from filename when DB UUID is missing."""

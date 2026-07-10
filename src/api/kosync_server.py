@@ -1816,10 +1816,7 @@ def koreader_upload_statistics():
     # A long sync cycle can hold the SQLite writer past the busy timeout, so a
     # single "database is locked" shouldn't surface as a 500. Retry with
     # exponential backoff before giving up (see issue #315).
-    try:
-        max_attempts = max(1, int(os.getenv("KOREADER_STATS_WRITE_RETRIES", "3")))
-    except (TypeError, ValueError):
-        max_attempts = 3
+    max_attempts = 3
 
     accepted_books = None
     page_insert_result = None

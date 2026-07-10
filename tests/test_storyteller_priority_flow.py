@@ -1,9 +1,12 @@
 import json
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from src.db.models import Book
 from src.sync_manager import SyncManager
+from src.utils.transcription_cancel import register_worker
+from src.utils.transcriber import TranscriptionCancelled
 
 
 def _write_storyteller_manifest(base_dir: Path, abs_id: str) -> Path:
@@ -216,7 +219,7 @@ def test_storyteller_branch_falls_back_when_ingest_still_missing(tmp_path):
     transcriber.process_audio.assert_not_called()
     assert book.storyteller_uuid == "story-uuid-3"
     assert book.transcript_source == "smil"
-    saved_book = db.save_book.call_args_list[-1][0][0]
+    saved_book = db.update_book_if_exists.call_args_list[-1][0][0]
     assert saved_book.storyteller_uuid == "story-uuid-3"
 
 
@@ -245,5 +248,62 @@ def test_storyteller_branch_falls_back_when_alignment_fails(tmp_path):
     transcriber.process_audio.assert_not_called()
     assert book.storyteller_uuid == "story-uuid-4"
     assert book.transcript_source == "smil"
-    saved_book = db.save_book.call_args_list[-1][0][0]
+    saved_book = db.update_book_if_exists.call_args_list[-1][0][0]
     assert saved_book.storyteller_uuid == "story-uuid-4"
+
+
+def test_deleted_mapping_cancels_real_background_path_without_resurrection(tmp_path, caplog):
+    abs_id = "abs-delete-whisper"
+    manager, db, _abs_client, transcriber, _alignment_service = _build_manager(tmp_path)
+    book = Book(
+        abs_id=abs_id,
+        abs_title="Delete During Whisper",
+        ebook_filename="book.epub",
+        kosync_doc_id="hash-delete",
+        status="processing",
+        duration=12.0,
+    )
+    db.get_book.return_value = book
+    transcriber.transcribe_from_smil.return_value = None
+    adapter = MagicMock()
+    adapter.get_chapters.return_value = []
+    adapter.get_audio_files.return_value = [{"local_path": "audio.m4b"}]
+    manager._get_audio_source_adapter = MagicMock(return_value=adapter)
+
+    def delete_during_transcription(*_args, **_kwargs):
+        assert manager.cancel_background_job(abs_id) is True
+        db.get_book.return_value = None
+        raise TranscriptionCancelled(abs_id)
+
+    transcriber.process_audio.side_effect = delete_during_transcription
+
+    with caplog.at_level(logging.INFO, logger="src.sync_manager"):
+        manager._run_background_job(book)
+
+    db.update_book_if_exists.assert_not_called()
+    db.save_job.assert_not_called()
+    assert "Transcription cancelled for Delete During Whisper: mapping deleted" in caplog.text
+
+
+def test_cancelled_worker_removes_deferred_audio_cache(tmp_path):
+    abs_id = "abs-cancel-cache"
+    manager, db, _abs_client, transcriber, _alignment_service = _build_manager(tmp_path)
+    book = Book(
+        abs_id=abs_id,
+        abs_title="Cancel Cache",
+        ebook_filename="book.epub",
+        kosync_doc_id="hash-cache",
+        status="processing",
+    )
+    db.get_book.return_value = book
+    cache_dir = tmp_path / "audio_cache" / abs_id
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "part.wav").write_bytes(b"audio")
+    token = register_worker(abs_id)
+    token.cancel()
+
+    manager._run_background_job(book, cancellation_token=token)
+
+    assert not cache_dir.exists()
+    transcriber.process_audio.assert_not_called()
+    db.update_book_if_exists.assert_not_called()

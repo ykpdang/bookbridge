@@ -1227,8 +1227,7 @@ class TestKosyncEndpoints(unittest.TestCase):
         from unittest.mock import patch
         from src.api import kosync_server
 
-        with patch.dict(os.environ, {'KOREADER_STATS_WRITE_RETRIES': '2'}), \
-                patch.object(
+        with patch.object(
                     kosync_server._database_service,
                     'bulk_insert_koreader_page_stats',
                     side_effect=Exception("(sqlite3.OperationalError) database is locked"),
@@ -1248,8 +1247,8 @@ class TestKosyncEndpoints(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 500)
-        # 2 attempts total → exactly one backoff sleep between them.
-        self.assertEqual(mock_sleep.call_count, 1)
+        # 3 bounded attempts total → exactly two backoff sleeps between them.
+        self.assertEqual(mock_sleep.call_count, 2)
 
     def test_merged_statistics_requires_auth(self):
         response = self.client.get('/koreader/device-sync/statistics/merged?device_id=device-b')

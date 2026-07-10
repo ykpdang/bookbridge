@@ -581,17 +581,6 @@ class DatabaseService:
                 # the per-user `user_books` links, so also claim it for the creator.
                 creator_uid = book.user_id if getattr(book, "user_id", None) is not None else self._resolve_uid(None)
                 book.user_id = creator_uid
-                # If `book` is a detached instance that used to be persistent (its
-                # row was deleted out from under it — e.g. a long-running worker
-                # whose mapping was removed), it still carries its old identity key,
-                # so session.add() would emit an UPDATE that matches 0 rows and
-                # raise StaleDataError. Make it transient first so this is a clean
-                # INSERT that matches the method's "save or update" contract.
-                from sqlalchemy import inspect as _sa_inspect
-                from sqlalchemy.orm import make_transient
-                _state = _sa_inspect(book)
-                if _state.detached and _state.identity is not None:
-                    make_transient(book)
                 session.add(book)
                 session.flush()
                 if creator_uid is not None:
@@ -603,6 +592,32 @@ class DatabaseService:
                 session.refresh(book)
                 session.expunge(book)
                 return book
+
+    def update_book_if_exists(self, book: Book) -> Optional[Book]:
+        """Update a book without ever inserting a missing/deleted mapping."""
+        with self.get_session() as session:
+            attrs = [
+                'abs_title', 'audio_source', 'audio_source_id', 'audio_title',
+                'audio_cover_url', 'audio_duration', 'audio_provider_book_id',
+                'audio_provider_file_id', 'ebook_filename', 'ebook_source',
+                'ebook_source_id', 'original_ebook_filename', 'kosync_doc_id',
+                'transcript_file', 'status', 'duration', 'sync_mode',
+                'transcript_source', 'storyteller_uuid', 'bookfusion_id',
+                'abs_ebook_item_id', 'series_name', 'series_sequence',
+            ]
+            values = {attr: getattr(book, attr) for attr in attrs if hasattr(book, attr)}
+            updated = session.query(Book).filter(Book.abs_id == book.abs_id).update(
+                values,
+                synchronize_session=False,
+            )
+            if updated == 0:
+                return None
+            existing = session.query(Book).filter(Book.abs_id == book.abs_id).first()
+            if existing is None:
+                return None
+            session.refresh(existing)
+            session.expunge(existing)
+            return existing
 
     def migrate_book_data(self, old_abs_id: str, new_abs_id: str):
         """

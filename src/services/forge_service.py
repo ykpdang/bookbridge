@@ -1871,14 +1871,10 @@ class ForgeService:
         # Full re-forges each stage a large audio file and TUS-upload it to
         # Storyteller. Starting every pending book at once saturates the network
         # and Storyteller's worker, so they all time out. Bound how many run
-        # concurrently (default 1 — serialize) via FORGE_RESUME_CONCURRENCY.
+        # concurrently. Restart recovery is intentionally serialized.
         # Completion watchers (books already uploaded) are cheap polling loops and
         # stay unbounded.
-        try:
-            resume_concurrency = max(1, int(os.getenv("FORGE_RESUME_CONCURRENCY", "1")))
-        except (TypeError, ValueError):
-            resume_concurrency = 1
-        reforge_semaphore = threading.Semaphore(resume_concurrency)
+        reforge_semaphore = threading.Semaphore(1)
 
         resumed = 0
         re_forged = 0

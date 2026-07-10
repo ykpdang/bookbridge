@@ -6953,20 +6953,11 @@ def suggestions_scan_status():
     return jsonify(response)
 
 
-def cleanup_mapping_resources(book):
+def cleanup_mapping_resources(book, defer_audio_cache: bool = False):
     """Delete external artifacts and membership data for a mapped book."""
     if not book:
         return
     clients = uc()
-
-    # Signal any in-flight transcription worker for this book to stop before we
-    # remove its cache directory, so it doesn't crash writing a progress
-    # checkpoint into a directory that no longer exists (see issue #313).
-    try:
-        from src.utils.transcription_cancel import request_cancel
-        request_cancel(book.abs_id)
-    except Exception:
-        pass
 
     if book.transcript_file:
         try:
@@ -6976,7 +6967,7 @@ def cleanup_mapping_resources(book):
 
     # Clean up audio cache directory (WAV files from whisper transcription)
     audio_cache_dir = DATA_DIR / "audio_cache" / book.abs_id
-    if audio_cache_dir.exists():
+    if audio_cache_dir.exists() and not defer_audio_cache:
         try:
             shutil.rmtree(audio_cache_dir)
             logger.info(f"🗑️ Deleted audio cache: {audio_cache_dir}")
@@ -7293,8 +7284,9 @@ def _delete_or_unlink_book(user, abs_id, book) -> None:
         database_service.unlink_user_book(user.id, abs_id)
         database_service.delete_states_for_book(abs_id, user_id=user.id)
         return
-    cleanup_mapping_resources(book)
+    worker_cancelled = manager.cancel_background_job(abs_id)
     database_service.delete_book(abs_id)
+    cleanup_mapping_resources(book, defer_audio_cache=worker_cancelled)
 
 
 def delete_mapping(abs_id):

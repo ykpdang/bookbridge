@@ -160,11 +160,8 @@ class TestDatabaseServiceIntegration(unittest.TestCase):
         self.assertTrue(self.db_service.set_book_status('st-1', 'pending'))
         self.assertEqual(self.db_service.get_book('st-1').status, 'pending')
 
-    def test_save_book_after_delete_reinserts_without_staledataerror(self):
-        """Issue #313: a background worker can finish and call save_book() on a
-        detached Book whose row was deleted mid-run. That previously raised
-        SQLAlchemy StaleDataError (UPDATE matched 0 rows). save_book must instead
-        perform a clean INSERT."""
+    def test_worker_update_after_delete_does_not_reinsert_book(self):
+        """Issue #313: worker persistence must not resurrect a deleted mapping."""
         abs_id = 'stale-data-book'
         book = self.Book(abs_id=abs_id, abs_title='Stale', status='processing')
 
@@ -175,15 +172,12 @@ class TestDatabaseServiceIntegration(unittest.TestCase):
         self.assertTrue(self.db_service.delete_book(abs_id))
         self.assertIsNone(self.db_service.get_book(abs_id))
 
-        # Worker finishes and persists its result on the detached object. This
-        # must not raise StaleDataError.
+        # Worker finishes and attempts its update-only persistence.
         saved.status = 'active'
-        result = self.db_service.save_book(saved)
+        result = self.db_service.update_book_if_exists(saved)
 
-        self.assertEqual(result.abs_id, abs_id)
-        reloaded = self.db_service.get_book(abs_id)
-        self.assertIsNotNone(reloaded)
-        self.assertEqual(reloaded.status, 'active')
+        self.assertIsNone(result)
+        self.assertIsNone(self.db_service.get_book(abs_id))
 
     def test_delete_book(self):
         """Test deleting a book record with cascading deletes for states and hardcover details."""

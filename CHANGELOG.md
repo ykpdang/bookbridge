@@ -6,7 +6,12 @@ All notable changes to BookBridge will be documented in this file.
 
 ## [Unreleased]
 
-No unreleased changes yet.
+### Fixed
+
+- **Background transcription now stops cleanly when its mapping is deleted.** Cancellation is scoped to the active worker, delete/re-add no longer inherits stale cancellation state, cache cleanup waits for the worker to exit, and a late worker update cannot recreate the deleted mapping. (#313)
+- **Suggestion scans tolerate Audiobookshelf progress records with null durations.** Finished records are dismissed and incomplete records without usable duration data are skipped without aborting the scan. (#312)
+- **Restart recovery serializes pending full Forge uploads.** Large Storyteller uploads no longer all restart concurrently after BookBridge restarts. (#314)
+- **KOReader statistics writes tolerate ordinary SQLite lock contention.** Connections use a bounded busy timeout and statistics uploads retry transient lock failures. (#315)
 
 ## [7.1.1] - 2026-07-09
 

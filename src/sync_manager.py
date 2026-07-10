@@ -45,7 +45,13 @@ from src.utils.user_context import (
 from src.utils.storyteller_transcript import StorytellerTranscript
 # Logging utilities (placed at top to ensure availability during sync)
 from src.utils.cache_paths import safe_cache_path
-from src.utils.transcription_cancel import is_cancelled, clear_cancel
+from src.utils.transcription_cancel import (
+    CancellationToken,
+    is_cancelled,
+    register_worker,
+    request_cancel,
+    unregister_worker,
+)
 from src.utils.transcriber import TranscriptionCancelled
 from src.utils.logging_utils import sanitize_log_data
 from src.utils.progress_metadata import state_metadata_kwargs
@@ -1522,14 +1528,31 @@ class SyncManager:
             if client_bundle is not None
             else self.active_library_service
         )
+        cancellation_token = register_worker(target_book.abs_id)
         self._job_thread = threading.Thread(
             target=self._run_background_job,
-            args=(target_book, job_idx, total_jobs, library_service, client_bundle),
+            args=(target_book, job_idx, total_jobs, library_service, client_bundle, cancellation_token),
             daemon=True
         )
-        self._job_thread.start()
+        try:
+            self._job_thread.start()
+        except Exception:
+            unregister_worker(target_book.abs_id, cancellation_token)
+            raise
 
-    def _run_background_job(self, book: Book, job_idx=1, job_total=1, library_service=None, client_bundle=None):
+    def cancel_background_job(self, abs_id: str) -> bool:
+        """Request cancellation only when this manager has an active worker."""
+        return request_cancel(abs_id)
+
+    def _run_background_job(
+        self,
+        book: Book,
+        job_idx=1,
+        job_total=1,
+        library_service=None,
+        client_bundle=None,
+        cancellation_token: CancellationToken = None,
+    ):
         """
         Threaded worker that handles transcription without blocking the main loop.
         """
@@ -1552,11 +1575,29 @@ class SyncManager:
         abs_title = book.abs_title or 'Unknown'
         ebook_filename = book.ebook_filename
         max_retries = int(os.getenv("JOB_MAX_RETRIES", 5))
+        if cancellation_token is None:
+            cancellation_token = register_worker(abs_id)
+
+        def ensure_active() -> None:
+            """Stop this generation once cancelled or its mapping is deleted."""
+            if is_cancelled(abs_id, cancellation_token):
+                raise TranscriptionCancelled(abs_id)
+            if self.database_service.get_book(abs_id) is None:
+                cancellation_token.cancel()
+                raise TranscriptionCancelled(abs_id)
+
+        def persist_book() -> None:
+            """Update the worker's mapping without recreating a deleted row."""
+            ensure_active()
+            if self.database_service.update_book_if_exists(book) is None:
+                cancellation_token.cancel()
+                raise TranscriptionCancelled(abs_id)
 
         # Milestone log for background job
         logger.info(f"⚡ [{job_idx}/{job_total}] Processing '{sanitize_log_data(abs_title)}'")
 
         try:
+            ensure_active()
             ebook_only_mode = bool(
                 hasattr(book, "sync_mode") and getattr(book, "sync_mode", "audiobook") == "ebook_only"
             )
@@ -1572,6 +1613,7 @@ class SyncManager:
                 Phase 2: 10-90%
                 Phase 3: 90-100%
                 """
+                ensure_active()
                 global_pct = 0.0
                 if phase == 1:
                     global_pct = 0.0 + (local_pct * 0.1)
@@ -1606,8 +1648,10 @@ class SyncManager:
                     if _sname:
                         book.series_name = _sname
                         book.series_sequence = _sseq
-                        self.database_service.save_book(book)
+                        persist_book()
                         logger.debug(f"Backfilled series '{_sname}' for '{sanitize_log_data(abs_title)}'")
+                except TranscriptionCancelled:
+                    raise
                 except Exception as _se:
                     logger.debug(f"Could not backfill series metadata: {_se}")
 
@@ -1645,8 +1689,10 @@ class SyncManager:
                             # Also ensure original filename is saved
                             if not book.original_ebook_filename:
                                 book.original_ebook_filename = book.ebook_filename
-                            self.database_service.save_book(book)
+                            persist_book()
                             logger.info(f"✅ Locked KOSync ID: {computed_hash}")
+                except TranscriptionCancelled:
+                    raise
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to eager-lock KOSync ID: {e}")
 
@@ -1658,7 +1704,7 @@ class SyncManager:
                 self.ebook_parser.extract_text_and_map(epub_path)
                 update_progress(1.0, 3)
                 book.status = 'active'
-                self.database_service.save_book(book)
+                persist_book()
 
                 job = self.database_service.get_latest_job(abs_id)
                 if job:
@@ -1730,6 +1776,8 @@ class SyncManager:
                             transcript_source = "storyteller"
                             update_progress(1.0, 2)
                             logger.info(f"Storyteller alignment map generated for '{sanitize_log_data(abs_title)}'")
+                    except TranscriptionCancelled:
+                        raise
                     except Exception as storyteller_err:
                         logger.warning(f"Storyteller alignment failed for '{abs_id}': {storyteller_err}")
                 else:
@@ -1755,7 +1803,8 @@ class SyncManager:
                 raw_transcript = self.transcriber.process_audio(
                     abs_id, audio_files,
                     full_book_text=book_text, # Passed for context/alignment inside transcriber if old logic used
-                    progress_callback=lambda p: update_progress(p, 2)
+                    progress_callback=lambda p: update_progress(p, 2),
+                    cancellation_token=cancellation_token,
                 )
                 if raw_transcript:
                     transcript_source = "whisper"
@@ -1780,6 +1829,7 @@ class SyncManager:
             if storyteller_aligned:
                 success = True
             else:
+                ensure_active()
                 success = self.alignment_service.align_and_store(
                     abs_id, raw_transcript, book_text, chapters
                 )
@@ -1821,12 +1871,8 @@ class SyncManager:
             # before we persist (e.g. via SMIL/Storyteller paths that don't hit the
             # chunk-boundary cancel check). Re-inserting a just-deleted book would
             # resurrect it as a ghost row, so bail out cleanly instead.
-            if is_cancelled(abs_id) or self.database_service.get_book(abs_id) is None:
-                logger.info(f"🛑 Skipping final save for {sanitize_log_data(abs_title)}: mapping was deleted")
-                return
-
             book.status = 'active'
-            self.database_service.save_book(book)
+            persist_book()
 
             # Update job record to reset retry count and mark 100%
             job = self.database_service.get_latest_job(abs_id)
@@ -1845,6 +1891,9 @@ class SyncManager:
             logger.info(f"🛑 Transcription cancelled for {sanitize_log_data(abs_title)}: mapping deleted")
 
         except Exception as e:
+            if is_cancelled(abs_id, cancellation_token) or self.database_service.get_book(abs_id) is None:
+                logger.info(f"🛑 Background work cancelled for {sanitize_log_data(abs_title)}: mapping deleted")
+                return
             logger.error(f"❌ {sanitize_log_data(abs_title)}: {e}")
 
             # --- Failure Update using database service ---
@@ -1882,12 +1931,20 @@ class SyncManager:
             else:
                 book.status = 'failed_retry_later'
 
-            self.database_service.save_book(book)
+            if self.database_service.update_book_if_exists(book) is None:
+                logger.info(f"🛑 Skipping failure save for {sanitize_log_data(abs_title)}: mapping was deleted")
 
         finally:
-            # Drop any cancellation flag so a future mapping reusing this abs_id
-            # isn't immediately cancelled by a stale entry.
-            clear_cancel(abs_id)
+            if is_cancelled(abs_id, cancellation_token) and self.data_dir:
+                import shutil
+                audio_cache_dir = Path(self.data_dir) / "audio_cache" / abs_id
+                if audio_cache_dir.exists():
+                    try:
+                        shutil.rmtree(audio_cache_dir)
+                        logger.info(f"✅ Cleaned cancelled transcription cache for {sanitize_log_data(abs_title)}")
+                    except Exception as cleanup_err:
+                        logger.warning(f"⚠️ Failed to clean cancelled transcription cache: {cleanup_err}")
+            unregister_worker(abs_id, cancellation_token)
             if library_token is not None:
                 _library_service_override.reset(library_token)
             if creds_token is not None:

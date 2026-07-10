@@ -938,14 +938,10 @@ class DatabaseManager:
         self._filesystem_type = self._filesystem_type_for_path(self.db_path)
         self._journal_mode_logged = False
         self._journal_mode_warned = False
-        # Busy timeout: how long a blocked writer waits for the write lock before
-        # SQLite raises "database is locked". A long sync cycle can hold the writer
-        # for many seconds, so default to 60s (configurable) and reduce the chance
-        # of a KOReader statistics upload failing under contention (see issue #315).
-        try:
-            self._busy_timeout_ms = max(1, int(os.getenv("SQLITE_BUSY_TIMEOUT_SECONDS", "60"))) * 1000
-        except (TypeError, ValueError):
-            self._busy_timeout_ms = 60_000
+        # Give blocked writers a bounded chance to outlive ordinary lock
+        # contention. This is an internal database safety policy, not a runtime
+        # setting: the settings database is unavailable until this engine exists.
+        self._busy_timeout_ms = 60_000
         # Increase timeout to reduce lock errors, allow multi-thread access.
         # Using 4 slashes guarantees an absolute path in SQLAlchemy
         self.engine = create_engine(
