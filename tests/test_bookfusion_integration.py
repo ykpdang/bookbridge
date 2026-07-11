@@ -118,7 +118,7 @@ class BookFusionSyncClientTest(unittest.TestCase):
         self.assertAlmostEqual(state.previous_pct, 0.25)
         self.assertIn("service_updated_at", state.current)
 
-    def test_update_progress_posts_0_to_100_and_records_write(self):
+    def test_update_progress_falls_back_to_percentage_without_bf_epub(self):
         api = MagicMock()
         api.set_reading_position.return_value = {"updated_at": "now"}
         db = MagicMock()
@@ -127,7 +127,8 @@ class BookFusionSyncClientTest(unittest.TestCase):
         book = SimpleNamespace(abs_id="abs-1")
         request = UpdateProgressRequest(LocatorResult(percentage=0.425))
 
-        with patch("src.services.write_tracker.record_write") as record_write:
+        with patch.object(sync, "_ensure_bf_epub", return_value=None), \
+                patch("src.services.write_tracker.record_write") as record_write:
             result = sync.update_progress(book, request)
 
         self.assertTrue(result.success)
@@ -136,6 +137,37 @@ class BookFusionSyncClientTest(unittest.TestCase):
             {"percentage": 42.5, "page_position_in_book": 0.425},
         )
         record_write.assert_called_once_with("BookFusion", "abs-1", 0.425)
+
+    def test_update_progress_sends_spine_anchor_and_cfi(self):
+        # Regression: a percentage-only write leaves BookFusion's chapter_index
+        # stale, so its reader opens at the book start and writes ~0% back —
+        # an endless push/reset loop. update_progress must send a real anchor.
+        api = MagicMock()
+        api.set_reading_position.return_value = {"updated_at": "now"}
+        db = MagicMock()
+        db.resolve_bookfusion_id.return_value = "555"
+        parser = MagicMock()
+        parser.bookfusion_reading_anchor.return_value = {
+            "chapter_index": 12,
+            "page_position_in_book": 0.4123,
+            "cfi": "epubcfi(/6/26!/4/2/1:0)",
+        }
+        sync = BookFusionSyncClient(api, ebook_parser=parser, database_service=db, user_id=1)
+        book = SimpleNamespace(abs_id="abs-1")
+        request = UpdateProgressRequest(LocatorResult(percentage=0.5386))
+
+        with patch.object(sync, "_ensure_bf_epub", return_value="bookfusion_555.epub"), \
+                patch("src.services.write_tracker.record_write"):
+            result = sync.update_progress(book, request)
+
+        self.assertTrue(result.success)
+        payload = api.set_reading_position.call_args[0][1]
+        self.assertEqual(payload["chapter_index"], 12)
+        # Spine-normalized, NOT the whole-book fraction (0.5386).
+        self.assertEqual(payload["page_position_in_book"], 0.4123)
+        self.assertEqual(payload["cfi"], "epubcfi(/6/26!/4/2/1:0)")
+        self.assertAlmostEqual(payload["percentage"], 53.86, places=2)
+        parser.bookfusion_reading_anchor.assert_called_once_with("bookfusion_555.epub", 0.5386)
 
     def test_fetch_bulk_state_uses_books_search_inline_positions(self):
         api = MagicMock()
@@ -157,6 +189,53 @@ class BookFusionSyncClientTest(unittest.TestCase):
         book = SimpleNamespace(abs_id="abs-1", bookfusion_id="8951594")
 
         self.assertFalse(sync.supports_book(book))
+
+
+class BookFusionReadingAnchorTest(unittest.TestCase):
+    def _parser_with_spine(self):
+        from src.utils.ebook_utils import EbookParser
+
+        parser = EbookParser(books_dir=".")
+        spine_map = [
+            {"start": 0, "end": 4, "char_len": 4, "spine_index": 1,
+             "href": "c1", "content": b"<html><body><p>AAAA</p></body></html>"},
+            {"start": 5, "end": 11, "char_len": 6, "spine_index": 2,
+             "href": "c2", "content": b"<html><body><p>BBBBBB</p></body></html>"},
+            {"start": 12, "end": 16, "char_len": 4, "spine_index": 3,
+             "href": "c3", "content": b"<html><body><p>CCCC</p></body></html>"},
+        ]
+        parser.resolve_book_path = lambda name: name
+        parser.extract_text_and_map = lambda path, progress_callback=None: ("AAAA BBBBBB CCCC", spine_map)
+        return parser
+
+    def test_anchor_is_spine_normalized_not_whole_book_fraction(self):
+        parser = self._parser_with_spine()
+
+        anchor = parser.bookfusion_reading_anchor("bookfusion_1.epub", 0.75)
+
+        # target_pos=12 lands at the start of spine 3 (chapter_index 2 of 3).
+        self.assertEqual(anchor["chapter_index"], 2)
+        # (2 + 0.0) / 3 — spine-normalized, distinct from the 0.75 whole-book pct.
+        self.assertEqual(anchor["page_position_in_book"], round(2 / 3, 10))
+        self.assertTrue(anchor["cfi"].startswith("epubcfi(/6/6!"))
+
+    def test_anchor_maps_mid_chapter_fraction(self):
+        parser = self._parser_with_spine()
+
+        anchor = parser.bookfusion_reading_anchor("bookfusion_1.epub", 0.5)
+
+        # target_pos=8 is 3 chars into spine 2 (char_len 6) -> frac 0.5.
+        self.assertEqual(anchor["chapter_index"], 1)
+        self.assertEqual(anchor["page_position_in_book"], round((1 + 0.5) / 3, 10))
+
+    def test_anchor_returns_none_for_unparseable_epub(self):
+        from src.utils.ebook_utils import EbookParser
+
+        parser = EbookParser(books_dir=".")
+        parser.resolve_book_path = lambda name: name
+        parser.extract_text_and_map = lambda path, progress_callback=None: ("", [])
+
+        self.assertIsNone(parser.bookfusion_reading_anchor("missing.epub", 0.5))
 
 
 class BookFusionPerUserLinkDbTest(unittest.TestCase):

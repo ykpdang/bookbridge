@@ -519,6 +519,57 @@ class EbookParser:
             logger.error(f"❌ Error getting text at percentage: {e}")
             return None
 
+    def bookfusion_reading_anchor(self, filename, percentage) -> Optional[dict]:
+        """Map a whole-book fraction to a BookFusion reading-position anchor.
+
+        BookFusion restores a reflowable EPUB from ``cfi`` (primary) and
+        ``chapter_index`` + a spine-normalized ``page_position_in_book``; a bare
+        ``percentage`` is only a coarse fallback. ``page_position_in_book`` is
+        ``(spine_index + fraction_within_chapter) / spine_count`` — each spine
+        item weighted equally — not the whole-book fraction.
+
+        Anchors are computed against ``filename`` (BookFusion's own cached copy),
+        because a book's chapter/spine structure is not portable across its
+        different source EPUBs. Returns ``{'chapter_index',
+        'page_position_in_book', 'cfi'}`` or ``None`` when the EPUB can't be
+        mapped.
+        """
+        try:
+            pct = max(0.0, min(1.0, float(percentage)))
+        except (TypeError, ValueError):
+            return None
+        try:
+            book_path = self.resolve_book_path(filename)
+            full_text, spine_map = self.extract_text_and_map(book_path)
+        except Exception as e:
+            logger.debug("BookFusion anchor: could not parse '%s': %s", filename, e)
+            return None
+        if not full_text or not spine_map:
+            return None
+
+        total = len(full_text)
+        target_pos = max(0, min(int(total * pct), total))
+        chosen = next((item for item in spine_map if target_pos < item["end"]), spine_map[-1])
+
+        char_len = int(chosen.get("char_len") or 0)
+        local_index = max(0, min(target_pos - int(chosen["start"]), char_len))
+        chapter_index = int(chosen["spine_index"]) - 1
+        frac = (local_index / char_len) if char_len > 0 else 0.0
+        spine_count = len(spine_map)
+        page_position = (chapter_index + frac) / spine_count if spine_count else pct
+
+        try:
+            cfi = self._generate_cfi(chapter_index, chosen["content"], local_index)
+        except Exception as e:
+            logger.debug("BookFusion anchor: CFI generation failed for '%s': %s", filename, e)
+            cfi = None
+
+        return {
+            "chapter_index": chapter_index,
+            "page_position_in_book": round(max(0.0, min(1.0, page_position)), 10),
+            "cfi": cfi,
+        }
+
     def get_character_delta(self, filename, percentage_prev, percentage_new):
         """Calculate character difference between two percentages."""
         try:

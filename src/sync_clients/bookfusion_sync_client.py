@@ -131,6 +131,50 @@ class BookFusionSyncClient(SyncClient):
             return self.ebook_parser.get_text_at_percentage(epub, pct)
         return None
 
+    def _ensure_bf_epub(self, book_id: str) -> Optional[str]:
+        """Return the filename of BookFusion's own cached EPUB, downloading if needed.
+
+        Reading-position anchors (``chapter_index``/``cfi``) must be computed
+        against BookFusion's copy of the book — a progress-spoke link sits on top
+        of a different source EPUB whose chapter structure need not match. Best
+        effort: returns ``None`` if the file can't be obtained.
+        """
+        if self.ebook_parser is None:
+            return None
+        filename = f"bookfusion_{book_id}.epub"
+        cache_dir = getattr(self.ebook_parser, "epub_cache_dir", None)
+        try:
+            if cache_dir is not None and (cache_dir / filename).exists() and (cache_dir / filename).stat().st_size > 0:
+                return filename
+        except OSError:
+            pass
+        try:
+            content = self.client.download_book(book_id)
+        except Exception as exc:
+            logger.warning("⚠️ BookFusion EPUB download failed for '%s': %s", book_id, exc)
+            return None
+        if not content or cache_dir is None:
+            return None
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            (cache_dir / filename).write_bytes(content)
+            self.ebook_parser.invalidate_path_cache(filename)
+        except Exception as exc:
+            logger.warning("⚠️ Could not cache BookFusion EPUB '%s': %s", filename, exc)
+            return None
+        return filename
+
+    def _reading_anchor(self, book_id: str, pct: float) -> Optional[dict]:
+        """Compute a BookFusion navigation anchor for ``pct`` against BF's EPUB."""
+        filename = self._ensure_bf_epub(book_id)
+        if not filename:
+            return None
+        try:
+            return self.ebook_parser.bookfusion_reading_anchor(filename, pct)
+        except Exception as exc:
+            logger.debug("BookFusion anchor computation failed for '%s': %s", book_id, exc)
+            return None
+
     def update_progress(self, book: Book, request: UpdateProgressRequest) -> SyncResult:
         book_id = self._bookfusion_id(book)
         if not book_id:
@@ -140,6 +184,15 @@ class BookFusionSyncClient(SyncClient):
             "percentage": round(pct * 100.0, 4),
             "page_position_in_book": pct,
         }
+        # BookFusion navigates reflowable EPUBs by cfi/chapter_index, not percentage.
+        # Without a real anchor the reader opens at the stale chapter (usually the
+        # start) and writes that position back, undoing every push.
+        anchor = self._reading_anchor(book_id, pct)
+        if anchor:
+            payload["chapter_index"] = anchor["chapter_index"]
+            payload["page_position_in_book"] = anchor["page_position_in_book"]
+            if anchor.get("cfi"):
+                payload["cfi"] = anchor["cfi"]
         result = self.client.set_reading_position(book_id, payload)
         success = result is not None
         if success:
