@@ -96,9 +96,16 @@ class EbookParser:
         self.useXpathSegmentFallback = os.getenv("XPATH_FALLBACK_TO_PREVIOUS_SEGMENT", "false").lower() == "true"
         self.locator_roundtrip_tolerance = int(os.getenv("LOCATOR_ROUNDTRIP_TOLERANCE_CHARS", 2))
 
+        # Path-resolution cache: filename -> resolved Path. Avoids repeated 6-7s
+        # recursive rglob scans for frequently-looked-up files. Entries are
+        # validated on access (path must still exist). Cleared on invalidate call.
+        self._path_cache: dict[str, Path] = {}
+        self._path_cache_max = int(os.getenv("EBOOK_PATH_CACHE_SIZE", "100"))
+
         logger.info(
             f"✅ EbookParser initialized (cache={cache_size}, hash={self.hash_method}, "
-            f"xpath_fallback={self.useXpathSegmentFallback}, extra_dirs={len(self.extra_book_dirs)})"
+            f"xpath_fallback={self.useXpathSegmentFallback}, extra_dirs={len(self.extra_book_dirs)}, "
+            f"path_cache={self._path_cache_max})"
         )
 
     @staticmethod
@@ -114,11 +121,33 @@ class EbookParser:
         return [self.books_dir, *self.extra_book_dirs]
 
     def resolve_book_path(self, filename):
+        # 1. Path-resolution cache: avoid repeated recursive scans for the same file.
+        cached = self._path_cache.get(filename)
+        if cached is not None:
+            if cached.exists():
+                return cached
+            # Stale entry (file moved/deleted) — drop and re-resolve.
+            self._path_cache.pop(filename, None)
+
+        # 2. Managed cache files bypass recursive library scans. These are
+        #    provider-downloaded EPUBs (BookFusion, Storyteller) that live in
+        #    the cache directory, not in the library. Checking here avoids a
+        #    6-7s rglob against a 40 MB library tree for every hydration.
+        if filename.startswith("bookfusion_") or filename.startswith("storyteller_"):
+            if self.epub_cache_dir.exists():
+                cached_path = safe_cache_path(self.epub_cache_dir, filename)
+                if cached_path and cached_path.exists():
+                    self._path_cache[filename] = cached_path
+                    return cached_path
+
+        # 3. Recursive library scans (existing precedence: glob before rglob).
         safe_name = glob.escape(filename)
         for d in self.search_dirs():
             try:
                 if d.exists():
-                    return next(d.glob(f"**/{safe_name}"))
+                    result = next(d.glob(f"**/{safe_name}"))
+                    self._path_cache[filename] = result
+                    return result
             except StopIteration:
                 continue
 
@@ -130,14 +159,25 @@ class EbookParser:
                 continue
             for f in d.rglob("*"):
                 if f.name == filename:
+                    self._path_cache[filename] = f
                     return f
 
+        # 4. Fall back to cache directory for ordinary filenames too.
         if self.epub_cache_dir.exists():
             cached_path = safe_cache_path(self.epub_cache_dir, filename)
             if cached_path and cached_path.exists():
+                self._path_cache[filename] = cached_path
                 return cached_path
 
         raise FileNotFoundError(f"Could not locate {filename}")
+
+    def invalidate_path_cache(self, filename: str | None = None) -> None:
+        """Drop path-resolution cache entries. Used when files are known to have
+        been added, removed, or renamed so stale entries are not reused."""
+        if filename:
+            self._path_cache.pop(filename, None)
+        else:
+            self._path_cache.clear()
 
     def get_book_identifiers(self, filepath) -> set:
         """Return the set of normalized DC identifiers embedded in an EPUB.
@@ -917,7 +957,13 @@ class EbookParser:
                 target_item = spine_map[-1]
 
             local_index = max(0, target_index - target_item['start'])
-            perfect_ko = self.get_perfect_ko_xpath(filename, target_index)
+            # Use pre-resolved data to avoid a second resolve_book_path + extract_text_and_map
+            # inside get_perfect_ko_xpath. xpath and perfect_ko_xpath are identical here
+            # (both are the KOReader XPath), so compute once via the shared implementation.
+            perfect_ko = self._compute_xpath_at_position(
+                filename, target_index,
+                book_path=book_path, full_text=full_text, spine_map=spine_map,
+            )
             cfi = self._generate_cfi(target_item['spine_index'] - 1, target_item['content'], local_index)
             spine_item_len = max(1, target_item['end'] - target_item['start'])
             chapter_progress = local_index / spine_item_len
@@ -1181,6 +1227,34 @@ class EbookParser:
             if not full_text or not spine_map:
                 return None
 
+            # Delegate to the shared implementation that accepts pre-resolved data.
+            return self._compute_xpath_at_position(
+                filename, position,
+                book_path=book_path, full_text=full_text, spine_map=spine_map,
+            )
+        except Exception as e:
+            logger.error(f"❌ Error generating KOReader XPath: {e}")
+            return None
+
+    def _compute_xpath_at_position(self, filename, position,
+                                    book_path=None, full_text=None, spine_map=None) -> Optional[str]:
+        """Core xpath computation shared by get_perfect_ko_xpath and
+        get_locator_from_char_offset.
+
+        When book_path/full_text/spine_map are provided (already resolved by the
+        caller), this skips the redundant resolve_book_path + extract_text_and_map
+        that would otherwise add 6-7s for a 40 MB EPUB. Uses the path-resolution
+        cache that resolve_book_path now populates so even a direct call with the
+        same filename returns instantly.
+        """
+        try:
+            if book_path is None or full_text is None or spine_map is None:
+                book_path = self.resolve_book_path(filename)
+                full_text, spine_map = self.extract_text_and_map(book_path)
+
+            if not full_text or not spine_map:
+                return None
+
             # Clamp position to valid range
             position = max(0, min(position, len(full_text) - 1))
 
@@ -1206,7 +1280,7 @@ class EbookParser:
                 clean_text = string.strip()
                 text_len = len(clean_text)
                 
-                if text_len == 0: 
+                if text_len == 0:
                     continue
 
                 if first_non_empty_string is None:
@@ -1222,7 +1296,7 @@ class EbookParser:
                     # Find where the clean text starts inside the raw string to determine true offset
                     raw_text = str(string)
                     raw_start = raw_text.find(clean_text)
-                    if raw_start == -1: 
+                    if raw_start == -1:
                         raw_start = 0
                     
                     target_offset = raw_start + clean_offset

@@ -922,7 +922,22 @@ class SyncManager:
         """
         Get local path to EPUB file, downloading from Grimmory if necessary.
         """
-        # First, try to find on filesystem
+        # 1. Try the parser's resolve_book_path first. It has a path-resolution
+        #    cache (instant repeat lookups), managed-cache bypass for BookFusion/
+        #    Storyteller files, and the same filesystem + cache-dir search.
+        #    This avoids redundant glob/rglob scans that add 6-7s each.
+        parser = getattr(self, 'ebook_parser', None)
+        if parser is not None:
+            try:
+                parser_path = parser.resolve_book_path(ebook_filename)
+                if parser_path is not None:
+                    logger.info(f"🔍 Found EPUB via parser resolver: {parser_path}")
+                    return parser_path
+            except (FileNotFoundError, OSError):
+                pass
+
+        # 2. Fallback: try filesystem glob directly (preserved for edge cases
+        #    where parser search_dirs may differ from books_dir).
         books_search_dir = self.books_dir or Path("/books")
         escaped_filename = glob.escape(ebook_filename)
         filesystem_matches = list(books_search_dir.glob(f"**/{escaped_filename}"))

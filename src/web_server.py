@@ -7363,22 +7363,42 @@ def mark_complete(abs_id):
 
     perform_delete = request.json.get('delete', False) if request.json else False
 
-    locator = LocatorResult(percentage=1.0)
+    # Determine applicable sync type from the book's sync_mode.
+    sync_type = 'ebook' if getattr(book, 'sync_mode', 'audiobook') == 'ebook_only' else 'audiobook'
 
+    locator = LocatorResult(percentage=1.0)
     update_req = UpdateProgressRequest(locator_result=locator, txt="Book finished", previous_location=None)
 
     # Push through the acting user's own clients (not the global/admin bundle) so a
     # user's "finished" never lands on another account's trackers.
+    # Follow the same applicability pattern as SyncManager.clear_progress:
+    # configured + matching sync_type + supports_book.
     for client_name, client in uc().sync_clients.items():
-        if client.is_configured():
-            if client_name.lower() == 'abs' and getattr(book, 'sync_mode', 'audiobook') == 'ebook_only':
-                logger.info(f"Skipping ABS mark-complete for ebook-only mapping '{book.abs_id}'")
-                continue
-            if client_name.lower() == 'abs':
-                client.abs_client.mark_finished(abs_id)
-            else:
-                client.update_progress(book, update_req)
+        if not client.is_configured():
+            continue
+        # Skip if this client does not handle the book's sync type.
+        if sync_type not in client.get_supported_sync_types():
+            continue
+        # Skip if the client cannot handle this book's specific source.
+        if not client.supports_book(book):
+            continue
 
+        success = False
+        if client_name.lower() == 'abs':
+            try:
+                client.abs_client.mark_finished(abs_id)
+                success = True
+            except Exception as e:
+                logger.error(f"❌ ABS mark_finished failed for '{abs_id}': {e}")
+        else:
+            try:
+                result = client.update_progress(book, update_req)
+                success = getattr(result, 'success', False) if result else False
+            except Exception as e:
+                logger.error(f"❌ '{client_name}' mark-complete failed for '{abs_id}': {e}")
+
+        # Only persist state when the write succeeded.
+        if success:
             state = State(
                 abs_id=abs_id,
                 client_name=client_name.lower(),
