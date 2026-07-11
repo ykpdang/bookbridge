@@ -47,3 +47,8 @@ AGENTS.md
 opencode.json
 docs/automated-review/
 scripts/automated-review/
+
+# Local planning/scratch documents (agent working notes, not shipped docs)
+plans/
+phase1_schema_design.md
+pytest_output.txt
