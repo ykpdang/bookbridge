@@ -87,6 +87,7 @@ function BridgeSync:init()
     self:onDispatcherRegisterActions()
     self.settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/bridge_sync.lua")
     self.state = LuaSettings:open(DataStorage:getSettingsDir() .. "/bridge_sync_state.lua")
+    self.log_path = DataStorage:getSettingsDir() .. "/bridge_sync.log"
 
     -- Initialize SQLite state manager
     self.sqlite_state = BridgeSqliteState:new()
@@ -204,8 +205,6 @@ function BridgeSync:init()
     self.needs_wake_sync = false
     self.sync_scheduled = false
     self.close_book_sync_scheduled = false
-    self.log_path = DataStorage:getSettingsDir() .. "/bridge_sync.log"
-
     self.api = APIClient:new()
     self.api:init(self.server_url, self.username, self.key, function(level, message)
         self:_appendLog(level, message)
