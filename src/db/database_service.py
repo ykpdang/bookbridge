@@ -2506,8 +2506,13 @@ class DatabaseService:
                             row.source_device = spoke_key
                             row.version = int(row.version or 1) + 1
                             row.updated_at = utcnow()
-                        # The ann_key follows pos0 edits so device key lists stay consistent.
-                        row.ann_key = ann_key
+                        # The ann_key follows pos0 edits so device key lists
+                        # stay consistent — anchored to the row's own datetime,
+                        # never the entry's: devices hash (datetime|pos0), and a
+                        # spoke timestamp (e.g. BookFusion's added_at, which
+                        # moves on our own create/PATCH) in the key desyncs it
+                        # from every device's key list.
+                        row.ann_key = self.compute_annotation_key(row.datetime, row.pos0)
                     else:
                         # Identity (datetime/pos0/pos1/ann_key) stays canonical:
                         # the spoke's round-tripped position is a lossy
@@ -2607,6 +2612,77 @@ class DatabaseService:
                 .all()
             )
             return [int(r[0]) for r in rows if r[0] is not None]
+
+    def get_unacked_annotation_versions(self, user_id, doc_md5: str, spoke_key: str) -> dict:
+        """``{annotation_id: version}`` for alive rows whose current version the
+        spoke has not acknowledged.
+
+        Push-selection primitive for one-way spokes (Readest/Hardcover): row
+        versions move only on content changes, so bookkeeping-column writes
+        (which bump ``updated_at`` via onupdate) can never re-qualify a row —
+        ``updated_at > <spoke>_synced_at`` comparisons self-invalidate and
+        re-push everything every cycle."""
+        doc_md5 = str(doc_md5 or "").strip().lower()
+        with self.get_session() as session:
+            rows = (
+                session.query(KoreaderAnnotation)
+                .filter(
+                    KoreaderAnnotation.md5 == doc_md5,
+                    KoreaderAnnotation.user_id == user_id,
+                    KoreaderAnnotation.deleted == False,  # noqa: E712
+                )
+                .all()
+            )
+            unacked = {}
+            for row in rows:
+                state = self._get_device_state(session, row.id, spoke_key)
+                acked = int(state.acked_version or 0) if state is not None else 0
+                version = int(row.version or 1)
+                if acked < version:
+                    unacked[row.id] = version
+            return unacked
+
+    def get_unacked_annotation_tombstones(self, user_id, doc_md5: str, spoke_key: str) -> list[int]:
+        """Ids of tombstoned rows the spoke has seen alive but not yet as deleted."""
+        doc_md5 = str(doc_md5 or "").strip().lower()
+        with self.get_session() as session:
+            rows = (
+                session.query(KoreaderAnnotation)
+                .filter(
+                    KoreaderAnnotation.md5 == doc_md5,
+                    KoreaderAnnotation.user_id == user_id,
+                    KoreaderAnnotation.deleted == True,  # noqa: E712
+                )
+                .all()
+            )
+            pending = []
+            for row in rows:
+                state = self._get_device_state(session, row.id, spoke_key)
+                if state is not None and int(state.acked_version or 0) > 0 and not state.ack_deleted:
+                    pending.append(row.id)
+            return pending
+
+    def ack_annotation_versions(self, user_id, spoke_key: str,
+                                versions_by_id: dict = None,
+                                deleted_ids: list = None) -> None:
+        """Record a spoke's acks: content versions it pushed/absorbed and
+        tombstones it processed, so neither is re-sent every cycle."""
+        with self.get_session() as session:
+            for ann_id, version in (versions_by_id or {}).items():
+                row = session.query(KoreaderAnnotation).filter(
+                    KoreaderAnnotation.id == int(ann_id),
+                    KoreaderAnnotation.user_id == user_id,
+                ).first()
+                if row is not None:
+                    self._set_device_state(session, row.id, spoke_key, acked_version=int(version))
+            for ann_id in deleted_ids or []:
+                row = session.query(KoreaderAnnotation).filter(
+                    KoreaderAnnotation.id == int(ann_id),
+                    KoreaderAnnotation.user_id == user_id,
+                ).first()
+                if row is not None:
+                    self._set_device_state(session, row.id, spoke_key, ack_deleted=True)
+            session.commit()
 
     def get_user_annotations_for_book(self, user_id, doc_md5: str, include_deleted: bool = False) -> list:
         """All annotation rows for a (user, document) — dashboard/tests helper."""

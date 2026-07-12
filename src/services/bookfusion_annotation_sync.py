@@ -162,7 +162,7 @@ class BookFusionAnnotationSync:
 
     def _pull_for_book(self, user_id: int, client: BookFusionClient, book_id: str,
                        doc_md5: str, filename: str) -> int:
-        remote = client.pull_highlights(book_id)
+        remote, server_total = client.pull_highlights(book_id)
         if remote is None:
             return 0
         known = set(self._db.get_spoke_server_ids_for_book(user_id, doc_md5, server_id_field=_SERVER_ID_FIELD) or [])
@@ -178,7 +178,25 @@ class BookFusionAnnotationSync:
             else:
                 adds.append(entry)
 
-        deletes = [{"serverId": rid} for rid in sorted(known - remote_ids)]
+        # Absence-based deletion is only trustworthy on a complete listing; a
+        # truncated page would tombstone every highlight beyond the page size.
+        if server_total is not None and server_total > len(remote):
+            logger.warning(
+                "BookFusion pull for book %s returned %d of %d highlights; skipping deletion detection this cycle",
+                book_id,
+                len(remote),
+                server_total,
+            )
+            deletes = []
+        else:
+            deletes = [{"serverId": rid} for rid in sorted(known - remote_ids)]
+        # trust_positions=False: BookFusion positions are chapter+UTF-16-offset
+        # projections, so a pulled xpointer never matches the device
+        # serialization byte-for-byte and BookFusion's added_at moves on our
+        # own create/PATCH. Identity (datetime/pos0/ann_key) must therefore
+        # never be rewritten from pull data — doing so desynced ann_key from
+        # the devices' md5(datetime|pos0) keys and their next complete key
+        # list tombstoned the annotation everywhere.
         result = self._db.apply_spoke_annotations(
             user_id,
             doc_md5,
@@ -189,7 +207,7 @@ class BookFusionAnnotationSync:
             server_id_field=_SERVER_ID_FIELD,
             version_field=_VERSION_FIELD,
             synced_at_field=_SYNCED_AT_FIELD,
-            trust_positions=True,
+            trust_positions=False,
         )
         return len(result.get("applied") or []) + len(result.get("deleted") or [])
 

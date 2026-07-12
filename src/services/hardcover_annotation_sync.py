@@ -8,9 +8,9 @@ available annotation storage.
 
 Each sync cycle collects all active (non-deleted) lighten highlights for a book
 and formats them into a plain-text block that is written verbatim to
-`private_notes`.  The last-written state is tracked via `hardcover_synced_at`
-on each annotation row; if every annotation has `hardcover_synced_at` equal to
-(or later than) its `updated_at` the book is skipped.
+`private_notes`.  The last-written state is tracked as `@hardcover` per-row
+version acks (annotation device state); a book is skipped unless some included
+row has an unacked content version or a previously-written row was tombstoned.
 
 Deletions are handled implicitly: deleted rows are excluded from the formatted
 block, so the next write will omit them.
@@ -33,6 +33,7 @@ from src.utils.user_config import resolve_setting
 logger = logging.getLogger(__name__)
 
 _MAX_ANNOTATIONS = 500
+SPOKE_DEVICE_KEY = "@hardcover"
 
 # The bridge only manages the region between these markers inside private_notes,
 # so a user's own notes above/below survive a rewrite.
@@ -139,15 +140,6 @@ class HardcoverAnnotationSync:
     # Sync
     # ------------------------------------------------------------------
 
-    def _needs_sync(self, rows) -> bool:
-        """Return True if any row has been updated since last Hardcover sync."""
-        for row in rows:
-            if row.hardcover_synced_at is None:
-                return True
-            if row.updated_at and row.updated_at > row.hardcover_synced_at:
-                return True
-        return False
-
     def _sync_book(self, user_id, client: HardcoverClient, book) -> bool:
         from src.db.models import KoreaderAnnotation
 
@@ -161,6 +153,16 @@ class HardcoverAnnotationSync:
         doc_md5 = str(getattr(book, "kosync_doc_id", "") or "").strip().lower()
         if not doc_md5:
             return False
+
+        # Change detection is version-vs-ack, never updated_at vs
+        # hardcover_synced_at: updated_at moves on every bookkeeping write
+        # (onupdate), so a timestamp comparison re-detects "changed" each
+        # cycle and burns a rate-limited Hardcover call per book forever.
+        unacked = self._db.get_unacked_annotation_versions(user_id, doc_md5, SPOKE_DEVICE_KEY)
+        # Highlights deleted since their last push: the live-row query can't
+        # see them, so without this a deletion-only change never rewrites the
+        # block and the highlight lingers on Hardcover.
+        pending_tombstones = self._db.get_unacked_annotation_tombstones(user_id, doc_md5, SPOKE_DEVICE_KEY)
 
         try:
             with self._db.get_session() as session:
@@ -177,23 +179,8 @@ class HardcoverAnnotationSync:
                     .limit(_MAX_ANNOTATIONS)
                     .all()
                 )
-                # Highlights deleted since their last push: the live-row query
-                # can't see them, so without this a deletion-only change never
-                # rewrites the block and the highlight lingers on Hardcover.
-                deleted_since = (
-                    session.query(KoreaderAnnotation)
-                    .filter(
-                        KoreaderAnnotation.md5 == doc_md5,
-                        KoreaderAnnotation.user_id == user_id,
-                        KoreaderAnnotation.deleted == True,  # noqa: E712
-                        KoreaderAnnotation.hardcover_synced_at != None,  # noqa: E711
-                        KoreaderAnnotation.deleted_at != None,  # noqa: E711
-                        KoreaderAnnotation.deleted_at > KoreaderAnnotation.hardcover_synced_at,
-                    )
-                    .all()
-                )
 
-                if not self._needs_sync(rows) and not deleted_since:
+                if not any(row.id in unacked for row in rows) and not pending_tombstones:
                     return False
 
                 # Only now that a change is confirmed do we spend Hardcover API
@@ -211,12 +198,18 @@ class HardcoverAnnotationSync:
                         return False
 
                 now_dt = self._now_dt()
+                acked_versions = {row.id: int(row.version or 1) for row in rows}
                 for row in rows:
-                    row.hardcover_synced_at = now_dt
-                for row in deleted_since:
                     row.hardcover_synced_at = now_dt
 
                 session.commit()
+
+            self._db.ack_annotation_versions(
+                user_id,
+                SPOKE_DEVICE_KEY,
+                versions_by_id=acked_versions,
+                deleted_ids=pending_tombstones,
+            )
         except Exception as e:
             logger.error(
                 "Hardcover annotation sync failed for user %s book %s: %s",

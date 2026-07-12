@@ -37,8 +37,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import or_
-
 from src.api.readest_client import ReadestClient
 from src.utils.user_config import resolve_setting
 
@@ -75,6 +73,7 @@ READEST_TO_KO_STYLE: dict[str, str] = {
 _DEFAULT_KO_COLOR = "yellow"
 _DEFAULT_KO_STYLE = "lighten"
 _MAX_PUSH_PER_CYCLE = 50
+SPOKE_DEVICE_KEY = "@readest"
 
 
 class ReadestAnnotationSync:
@@ -270,25 +269,30 @@ class ReadestAnnotationSync:
             }
 
     def _push_for_book(self, user_id, client: ReadestClient, book, book_hash: str) -> int:
-        """Push unsynced / changed local annotations to Readest. Returns push count."""
+        """Push unsynced / changed local annotations to Readest. Returns push count.
+
+        Selection is version-vs-ack (``@readest`` device state), never
+        ``updated_at`` vs ``readest_synced_at``: ``updated_at`` moves on every
+        bookkeeping write (onupdate), so a timestamp comparison re-selects the
+        same rows every cycle and each re-push overwrites Readest-side state."""
         from src.db.models import KoreaderAnnotation
 
+        doc_md5 = str(getattr(book, "kosync_doc_id", "") or "").strip().lower()
+        unacked = self._db.get_unacked_annotation_versions(user_id, doc_md5, SPOKE_DEVICE_KEY)
         try:
             with self._db.get_session() as session:
-                rows = (
-                    session.query(KoreaderAnnotation)
-                    .filter(
-                        KoreaderAnnotation.md5 == book.kosync_doc_id,
-                        KoreaderAnnotation.user_id == user_id,
-                        KoreaderAnnotation.deleted == False,  # noqa: E712
-                        or_(
-                            KoreaderAnnotation.readest_synced_at == None,  # noqa: E711
-                            KoreaderAnnotation.updated_at > KoreaderAnnotation.readest_synced_at,
-                        ),
+                rows = []
+                if unacked:
+                    rows = (
+                        session.query(KoreaderAnnotation)
+                        .filter(
+                            KoreaderAnnotation.id.in_(list(unacked.keys())),
+                            KoreaderAnnotation.deleted == False,  # noqa: E712
+                        )
+                        .order_by(KoreaderAnnotation.id)
+                        .limit(_MAX_PUSH_PER_CYCLE)
+                        .all()
                     )
-                    .limit(_MAX_PUSH_PER_CYCLE)
-                    .all()
-                )
                 push_ids = [r.id for r in rows]
                 notes = []
                 id_to_note_id: dict[int, str] = {}
@@ -356,6 +360,11 @@ class ReadestAnnotationSync:
         except Exception as e:
             logger.error("Readest push: DB update failed for user %s: %s", user_id, e)
 
+        self._db.ack_annotation_versions(
+            user_id,
+            SPOKE_DEVICE_KEY,
+            versions_by_id={ann_id: unacked[ann_id] for ann_id in push_ids if ann_id in unacked},
+        )
         return pushed
 
     # ------------------------------------------------------------------
@@ -376,6 +385,7 @@ class ReadestAnnotationSync:
         applied = 0
         new_watermark = since_ms
         now_dt = self._now_dt()
+        acked_versions: dict[int, int] = {}
 
         try:
             with self._db.get_session() as session:
@@ -433,17 +443,32 @@ class ReadestAnnotationSync:
                         )
 
                     if row is not None:
-                        # Update mutable fields only; never rewrite identity to avoid cascade
-                        row.drawer = drawer
-                        row.color = color
-                        row.note = note_text
+                        # Update mutable fields only; never rewrite identity to
+                        # avoid cascade. A real content change bumps the row
+                        # version so devices receive the Readest edit; an
+                        # unchanged echo must not bump (that would re-trigger
+                        # the push loop every cycle).
+                        revived = bool(row.deleted)
+                        changed = (
+                            (row.drawer or None) != (drawer or None)
+                            or (row.color or None) != (color or None)
+                            or (row.note or None) != (note_text or None)
+                        )
                         if text and not row.text:
                             row.text = text
-                        row.readest_note_id = note_id
-                        row.readest_synced_at = now_dt
-                        if row.deleted:
+                        if changed or revived:
+                            row.drawer = drawer
+                            row.color = color
+                            row.note = note_text
+                            if ko_datetime_updated:
+                                row.datetime_updated = ko_datetime_updated
+                            row.source_device = "readest"
+                            row.version = int(row.version or 1) + 1
+                        if revived:
                             row.deleted = False
                             row.deleted_at = None
+                        row.readest_note_id = note_id
+                        row.readest_synced_at = now_dt
                     else:
                         row = KoreaderAnnotation(
                             md5=doc_md5,
@@ -464,13 +489,19 @@ class ReadestAnnotationSync:
                         row.readest_note_id = note_id
                         row.readest_synced_at = now_dt
                         session.add(row)
+                        session.flush()
 
+                    acked_versions[row.id] = int(row.version or 1)
                     applied += 1
                 session.commit()
         except Exception as e:
             logger.error("Readest pull: DB apply failed for user %s book %s: %s", user_id, book_hash, e)
             return applied
 
+        if acked_versions:
+            # What Readest just told us is by definition in sync with Readest —
+            # ack it so the next push does not echo it straight back.
+            self._db.ack_annotation_versions(user_id, SPOKE_DEVICE_KEY, versions_by_id=acked_versions)
         if new_watermark > since_ms:
             self._set_watermark(user_id, book_hash, new_watermark)
         return applied

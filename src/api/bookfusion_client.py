@@ -183,7 +183,12 @@ class BookFusionClient:
             return [b for b in books if isinstance(b, dict)]
         return []
 
-    def pull_highlights(self, book_id: str | int) -> Optional[list[dict]]:
+    def pull_highlights(self, book_id: str | int) -> tuple[Optional[list[dict]], Optional[int]]:
+        """Return ``(highlights, server_total)`` for one book.
+
+        ``server_total`` comes from BookFusion's ``Total-Count`` response
+        header when present (the API reports pagination via headers), else
+        ``None``. A ``None`` highlight list means the request itself failed."""
         resp = self._make_request("POST", "/api/user/highlights/search", json_data={"book_id": book_id})
         if resp is None or resp.status_code != 200:
             logger.warning(
@@ -191,14 +196,21 @@ class BookFusionClient:
                 getattr(resp, "status_code", "no-response"),
                 getattr(resp, "text", "")[:200] if resp is not None else "",
             )
-            return None
+            return None, None
+        total = None
+        try:
+            raw_total = resp.headers.get("Total-Count")
+            if raw_total is not None:
+                total = int(raw_total)
+        except (AttributeError, TypeError, ValueError):
+            total = None
         data = self._json(resp)
         if isinstance(data, list):
-            return [h for h in data if isinstance(h, dict)]
+            return [h for h in data if isinstance(h, dict)], total
         if isinstance(data, dict):
             items = data.get("highlights") or data.get("items") or data.get("data") or []
-            return [h for h in items if isinstance(h, dict)]
-        return []
+            return [h for h in items if isinstance(h, dict)], total
+        return [], total
 
     def create_highlight(self, payload: dict) -> Optional[dict]:
         resp = self._make_request("POST", "/api/user/highlights", json_data=payload)

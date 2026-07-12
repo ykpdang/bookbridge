@@ -79,6 +79,9 @@ def _make_db():
     db = MagicMock()
     db.get_books_by_status.return_value = []
     db.get_linked_abs_ids.return_value = None
+    # Version/ack change detection defaults: nothing unacked, no tombstones.
+    db.get_unacked_annotation_versions.return_value = {}
+    db.get_unacked_annotation_tombstones.return_value = []
     return db
 
 
@@ -112,6 +115,7 @@ def _make_ann(
     a.note = note
     a.pageno = pageno
     a.deleted = deleted
+    a.version = 1
     a.hardcover_synced_at = hardcover_synced_at
     a.updated_at = updated_at if updated_at is not None else _NOW
     return a
@@ -208,6 +212,7 @@ class TestHardcoverAnnotationSyncLogic(unittest.TestCase):
         row = _make_ann(id=1, hardcover_synced_at=None)
         _make_session_with_rows(db, [row])
         db.get_hardcover_details = MagicMock(return_value=self._details())
+        db.get_unacked_annotation_versions.return_value = {1: 1}
 
         sync = self._make_sync(db)
         client = MagicMock()
@@ -221,12 +226,12 @@ class TestHardcoverAnnotationSyncLogic(unittest.TestCase):
         self.assertEqual(args[0][0], 55)
         self.assertIn("highlighted text", args[0][1])
 
-    def test_skips_if_all_rows_already_synced(self):
+    def test_skips_if_all_rows_already_acked(self):
         db = _make_db()
-        synced_at = _NOW + timedelta(seconds=1)
-        row = _make_ann(id=1, hardcover_synced_at=synced_at, updated_at=_NOW)
+        row = _make_ann(id=1, hardcover_synced_at=_NOW, updated_at=_NOW)
         _make_session_with_rows(db, [row])
         db.get_hardcover_details = MagicMock(return_value=self._details())
+        db.get_unacked_annotation_versions.return_value = {}
 
         sync = self._make_sync(db)
         client = MagicMock()
@@ -235,13 +240,30 @@ class TestHardcoverAnnotationSyncLogic(unittest.TestCase):
         result = sync._sync_book(1, client, _make_book())
         self.assertFalse(result)
         client.update_private_notes.assert_not_called()
+        client.get_user_book_summary.assert_not_called()
 
-    def test_syncs_if_updated_after_synced_at(self):
+    def test_skips_when_only_excluded_rows_are_unacked(self):
+        # An unacked row that is not part of the pushed block (e.g. non-lighten)
+        # must not trigger a rate-limited Hardcover call.
         db = _make_db()
-        synced_at = _NOW - timedelta(hours=1)
-        row = _make_ann(id=1, hardcover_synced_at=synced_at, updated_at=_NOW)
+        row = _make_ann(id=1, hardcover_synced_at=_NOW)
         _make_session_with_rows(db, [row])
         db.get_hardcover_details = MagicMock(return_value=self._details())
+        db.get_unacked_annotation_versions.return_value = {99: 3}
+
+        sync = self._make_sync(db)
+        client = MagicMock()
+
+        result = sync._sync_book(1, client, _make_book())
+        self.assertFalse(result)
+        client.get_user_book_summary.assert_not_called()
+
+    def test_syncs_if_content_version_above_ack(self):
+        db = _make_db()
+        row = _make_ann(id=1, hardcover_synced_at=_NOW - timedelta(hours=1), updated_at=_NOW)
+        _make_session_with_rows(db, [row])
+        db.get_hardcover_details = MagicMock(return_value=self._details())
+        db.get_unacked_annotation_versions.return_value = {1: 2}
 
         sync = self._make_sync(db)
         client = MagicMock()
@@ -271,6 +293,7 @@ class TestHardcoverAnnotationSyncLogic(unittest.TestCase):
         row = _make_ann(id=1, hardcover_synced_at=None)
         _make_session_with_rows(db, [row])
         db.get_hardcover_details = MagicMock(return_value=self._details())
+        db.get_unacked_annotation_versions.return_value = {1: 1}
         sync = self._make_sync(db)
         client = MagicMock()
         client.get_user_book_summary.return_value = (None, None)
@@ -291,6 +314,7 @@ class TestHardcoverAnnotationSyncLogic(unittest.TestCase):
         row = _make_ann(id=1, hardcover_synced_at=None)
         _make_session_with_rows(db, [row])
         db.get_hardcover_details = MagicMock(return_value=self._details())
+        db.get_unacked_annotation_versions.return_value = {1: 1}
 
         sync = self._make_sync(db)
         client = MagicMock()
@@ -299,12 +323,16 @@ class TestHardcoverAnnotationSyncLogic(unittest.TestCase):
 
         result = sync._sync_book(1, client, _make_book())
         self.assertFalse(result)
+        db.ack_annotation_versions.assert_not_called()
 
-    def test_marks_all_rows_synced_after_push(self):
+    def test_acks_all_rows_after_push(self):
         db = _make_db()
         rows = [_make_ann(id=i, hardcover_synced_at=None) for i in range(3)]
+        for row in rows:
+            row.version = 1
         _make_session_with_rows(db, rows)
         db.get_hardcover_details = MagicMock(return_value=self._details())
+        db.get_unacked_annotation_versions.return_value = {0: 1, 1: 1, 2: 1}
 
         sync = self._make_sync(db)
         client = MagicMock()
@@ -314,6 +342,9 @@ class TestHardcoverAnnotationSyncLogic(unittest.TestCase):
         sync._sync_book(1, client, _make_book())
         for row in rows:
             self.assertIsNotNone(row.hardcover_synced_at)
+        db.ack_annotation_versions.assert_called_once()
+        kwargs = db.ack_annotation_versions.call_args
+        self.assertEqual(kwargs.kwargs["versions_by_id"], {0: 1, 1: 1, 2: 1})
 
     def test_sync_user_not_configured_skips(self):
         from src.services.hardcover_annotation_sync import HardcoverAnnotationSync
@@ -336,15 +367,15 @@ class TestHardcoverAnnotationSyncLogic(unittest.TestCase):
         client.update_private_notes.assert_not_called()
 
     def test_propagates_deletion_when_only_deletion_changed(self):
-        # All live highlights are already synced, but one was deleted after its
-        # last sync — the block must still be rewritten so it disappears remotely.
+        # All live highlights are already acked, but one previously-pushed row
+        # was tombstoned — the block must still be rewritten so it disappears
+        # remotely, and the tombstone acked so it doesn't retrigger next cycle.
         db = _make_db()
-        synced_at = _NOW + timedelta(seconds=1)
-        live = _make_ann(id=1, hardcover_synced_at=synced_at, updated_at=_NOW)
-        deleted = _make_ann(id=2, deleted=True, hardcover_synced_at=_NOW - timedelta(hours=2))
-        deleted.deleted_at = _NOW  # deleted after its last sync
-        _make_session_with_rows(db, [live], deleted_rows=[deleted])
+        live = _make_ann(id=1, hardcover_synced_at=_NOW, updated_at=_NOW)
+        _make_session_with_rows(db, [live])
         db.get_hardcover_details = MagicMock(return_value=self._details())
+        db.get_unacked_annotation_versions.return_value = {}
+        db.get_unacked_annotation_tombstones.return_value = [2]
 
         sync = self._make_sync(db)
         client = MagicMock()
@@ -354,14 +385,15 @@ class TestHardcoverAnnotationSyncLogic(unittest.TestCase):
         result = sync._sync_book(1, client, _make_book())
         self.assertTrue(result)
         client.update_private_notes.assert_called_once()
-        # The deleted row is stamped so it doesn't retrigger next cycle.
-        self.assertEqual(deleted.hardcover_synced_at, live.hardcover_synced_at)
+        kwargs = db.ack_annotation_versions.call_args
+        self.assertEqual(kwargs.kwargs["deleted_ids"], [2])
 
     def test_preserves_user_private_notes_outside_managed_block(self):
         db = _make_db()
         row = _make_ann(id=1, text="my highlight", hardcover_synced_at=None)
         _make_session_with_rows(db, [row])
         db.get_hardcover_details = MagicMock(return_value=self._details())
+        db.get_unacked_annotation_versions.return_value = {1: 1}
 
         sync = self._make_sync(db)
         client = MagicMock()
