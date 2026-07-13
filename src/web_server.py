@@ -7389,31 +7389,46 @@ def mark_complete(abs_id):
             continue
 
         success = False
+        result = None
+        updated_state = {}
         if client_name.lower() == 'abs':
             try:
                 success = bool(client.abs_client.mark_finished(abs_id))
+                if success:
+                    # ABS's isFinished flag does not necessarily move currentTime
+                    # to the exact duration. Persist audio-position seconds here,
+                    # never wall-clock epoch seconds, because ABSSyncClient uses
+                    # State.timestamp as its previous audio position.
+                    duration = getattr(book, 'duration', None)
+                    updated_state = {
+                        'pct': 1.0,
+                        'ts': float(duration) if duration and duration > 0 else 0.0,
+                    }
             except Exception as e:
                 logger.error(f"❌ ABS mark_finished failed for '{abs_id}': {e}")
         else:
             try:
                 result = client.update_progress(book, update_req)
                 success = getattr(result, 'success', False) if result else False
+                if success:
+                    updated_state = getattr(result, 'updated_state', {}) or {}
             except Exception as e:
                 logger.error(f"❌ '{client_name}' mark-complete failed for '{abs_id}': {e}")
 
         # Only persist state when the write succeeded.
         if success:
-            # Preserve any locator metadata returned by the client (e.g. KoSync's
-            # completion XPath) so the synced state has a viable locator.
-            updated_state = {}
-            if client_name.lower() != 'abs':
-                updated_state = getattr(result, 'updated_state', {}) or {}
+            # Preserve locator/audio metadata returned by the client. Percentage
+            # clients historically use State.timestamp as an observation epoch;
+            # audio clients return a real position in updated_state['ts'].
+            now = int(time.time())
+            resolved_timestamp = updated_state.get('ts')
+            state_timestamp = resolved_timestamp if resolved_timestamp is not None else now
             state = State(
                 abs_id=abs_id,
                 client_name=client_name.lower(),
                 percentage=1.0,
-                timestamp=int(time.time()),
-                last_updated=int(time.time()),
+                timestamp=state_timestamp,
+                last_updated=now,
                 user_id=(user.id if user else None),
                 xpath=updated_state.get('xpath'),
                 cfi=updated_state.get('cfi'),

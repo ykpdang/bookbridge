@@ -1986,8 +1986,20 @@ class SyncManager:
         - API noise on long books (Grimmory's 20s rounding errors filtered)
         - Missing real progress on all books (30s+ changes do count)
         """
-        delta_pct = config[client_name].delta
+        delta_pct = self._state_percentage_delta(config[client_name])
         return self._is_significant_pct_delta(delta_pct, book)
+
+    @staticmethod
+    def _state_percentage_delta(client_state) -> float:
+        """Return a service-independent 0-1 progress delta."""
+        try:
+            current_pct = client_state.current.get('pct')
+            previous_pct = client_state.previous_pct
+            if current_pct is None or previous_pct is None:
+                return 0.0
+            return abs(float(current_pct) - float(previous_pct))
+        except (AttributeError, TypeError, ValueError):
+            return 0.0
 
     def _is_significant_pct_delta(self, delta_pct, book):
         # Quick check: percentage threshold
@@ -2343,23 +2355,44 @@ class SyncManager:
                 # Filter normalized positions to only include candidates
                 normalized_candidates = {k: v for k, v in normalized_positions.items() if k in candidates}
                 if normalized_candidates:
+                    recent_external_kosync = next(
+                        (
+                            name for name in normalized_candidates
+                            if name.lower() == "kosync"
+                            and bool(config[name].current.get("_kosync_recent_external_put"))
+                        ),
+                        None,
+                    )
                     high_conf_normalized_candidates = {}
                     for candidate_name, candidate_ts in normalized_candidates.items():
                         candidate_source = config[candidate_name].current.get("_normalization_source")
                         if candidate_name == primary_audio_client or candidate_source != "percent_fallback":
                             high_conf_normalized_candidates[candidate_name] = candidate_ts
-                    selected_normalized_candidates = (
-                        high_conf_normalized_candidates
-                        if high_conf_normalized_candidates
-                        else normalized_candidates
-                    )
-                    if (
-                        high_conf_normalized_candidates
-                        and len(high_conf_normalized_candidates) != len(normalized_candidates)
-                    ):
-                        logger.debug(
-                            f"'{abs_id}' '{title_snip}' Demoting percent_fallback candidates during normalized leader selection"
+                    if recent_external_kosync:
+                        selected_normalized_candidates = {
+                            recent_external_kosync: normalized_candidates[recent_external_kosync]
+                        }
+                        device = (
+                            config[recent_external_kosync].current.get("_kosync_last_put_device")
+                            or "unknown"
                         )
+                        logger.info(
+                            f"🔄 '{abs_id}' '{title_snip}' Trusting recent external KoSync PUT from "
+                            f"'{device}' during zero-delta discrepancy resolution"
+                        )
+                    else:
+                        selected_normalized_candidates = (
+                            high_conf_normalized_candidates
+                            if high_conf_normalized_candidates
+                            else normalized_candidates
+                        )
+                        if (
+                            high_conf_normalized_candidates
+                            and len(high_conf_normalized_candidates) != len(normalized_candidates)
+                        ):
+                            logger.debug(
+                                f"'{abs_id}' '{title_snip}' Demoting percent_fallback candidates during normalized leader selection"
+                            )
 
                     leader = max(selected_normalized_candidates, key=selected_normalized_candidates.get)
                     leader_ts = selected_normalized_candidates[leader]
@@ -2831,7 +2864,8 @@ class SyncManager:
                 char_delta_triggered = False  # Track if character delta triggered significance
                 if not significant_diff and hasattr(book, 'ebook_filename') and book.ebook_filename:
                     for client_name_key, client_state in config.items():
-                         if client_state.delta > 0:
+                         percentage_delta = self._state_percentage_delta(client_state)
+                         if percentage_delta > 0:
                              try:
                                  # Ensure file is available locally (download if needed)
                                  epub_path = self._get_local_epub(book.original_ebook_filename or book.ebook_filename)
@@ -2843,7 +2877,7 @@ class SyncManager:
                                  full_text, _ = self.ebook_parser.extract_text_and_map(epub_path)
                                  if full_text:
                                      total_chars = len(full_text)
-                                     char_delta = int(client_state.delta * total_chars)
+                                     char_delta = int(percentage_delta * total_chars)
 
                                      if char_delta >= self.delta_chars_thresh:
                                          logger.info(f"'{abs_id}' '{title_snip}' Significant character change detected for '{client_name_key}': {char_delta} chars (Threshold: {self.delta_chars_thresh})")

@@ -639,6 +639,76 @@ def test_recent_external_kosync_percent_fallback_can_lead():
     assert leader_pct == config["KoSync"].current["pct"]
 
 
+def test_audio_second_delta_is_normalized_before_significance_check():
+    manager = SyncManager.__new__(SyncManager)
+    book = SimpleNamespace(duration=37588.3)
+    state = _state({"pct": 1.0, "ts": 37588.3})
+    state.previous_pct = 1.0
+    state.delta = 1783839864.0
+
+    assert manager._has_significant_delta("ABS", {"ABS": state}, book) is False
+
+
+def test_recent_external_kosync_zero_delta_discrepancy_can_lead(caplog):
+    """A debounced PUT prewrites State, but the live device event must still lead."""
+    manager = SyncManager.__new__(SyncManager)
+    manager.cross_format_deadband_seconds = 2.0
+
+    class _Client:
+        def can_be_leader(self):
+            return True
+
+    manager.sync_clients = {
+        "ABS": _Client(),
+        "KoSync": _Client(),
+        "Storyteller": _Client(),
+        "BookOrbit": _Client(),
+    }
+    manager._has_significant_delta = MagicMock(return_value=False)
+    manager._normalize_for_cross_format_comparison = MagicMock(
+        return_value={
+            "ABS": 10663.0,
+            "KoSync": 11431.77,
+            "Storyteller": 10663.01,
+            "BookOrbit": 10662.93,
+        }
+    )
+    config = {
+        "ABS": _state({"pct": 0.291283, "ts": 10663.0}),
+        "KoSync": _state(
+            {
+                "pct": 0.3105,
+                "_normalization_source": "percent_fallback",
+                "_kosync_recent_external_put": True,
+                "_kosync_last_put_device": "Kobo_monza",
+                "_kosync_last_put_age_seconds": 124.0,
+            }
+        ),
+        "Storyteller": _state(
+            {"pct": 0.286594, "_normalization_source": "href_frag"}
+        ),
+        "BookOrbit": _state(
+            {"pct": 0.289441, "_normalization_source": "percent_fallback"}
+        ),
+    }
+    book = SimpleNamespace(
+        duration=37189.0,
+        transcript_file="DB_MANAGED",
+        audio_source="ABS",
+    )
+
+    leader, leader_pct = manager._determine_leader(
+        config, book, "polybius", "Polybius"
+    )
+
+    assert leader == "KoSync"
+    assert leader_pct == 0.3105
+    assert (
+        "Trusting recent external KoSync PUT from 'Kobo_monza' during "
+        "zero-delta discrepancy resolution"
+    ) in caplog.text
+
+
 def _percent_fallback_manager():
     manager = SyncManager.__new__(SyncManager)
     manager.cross_format_deadband_seconds = 2.0

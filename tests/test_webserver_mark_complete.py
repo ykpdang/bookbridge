@@ -232,6 +232,38 @@ class MarkCompleteRouteTest(unittest.TestCase):
         abs_client.abs_client.mark_finished.assert_called_once_with("test-book")
         abs_client.update_progress.assert_not_called()
 
+    def test_mark_complete_persists_abs_duration_not_epoch(self):
+        """ABS State.timestamp remains audio-position seconds after completion."""
+        abs_client = _make_client("ABS", sync_types={'audiobook'})
+        abs_client.abs_client.mark_finished.return_value = True
+        client_app = self._build_test({'ABS': abs_client})
+        self._db.get_book.return_value.duration = 37588.3
+
+        response = _post_json(client_app, '/api/mark-complete/test-book')
+
+        self.assertEqual(response.status_code, 200)
+        saved = self._db.save_state.call_args[0][0]
+        self.assertEqual(saved.percentage, 1.0)
+        self.assertEqual(saved.timestamp, 37588.3)
+
+    def test_mark_complete_persists_provider_audio_timestamp(self):
+        """Provider-audio completion keeps the client's resolved audio position."""
+        audio_client = _make_client(
+            "BookOrbitAudio",
+            sync_types={'audiobook'},
+            update_progress_result=MagicMock(
+                success=True,
+                updated_state={'pct': 1.0, 'ts': 41234.5},
+            ),
+        )
+        client_app = self._build_test({'BookOrbitAudio': audio_client})
+
+        response = _post_json(client_app, '/api/mark-complete/test-book')
+
+        self.assertEqual(response.status_code, 200)
+        saved = self._db.save_state.call_args[0][0]
+        self.assertEqual(saved.timestamp, 41234.5)
+
     def test_mark_complete_abs_false_result_does_not_persist(self):
         """ABS HTTP failures return False and must not create a completed state."""
         abs_client = _make_client("ABS", sync_types={'audiobook'})

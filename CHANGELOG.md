@@ -20,6 +20,10 @@ All notable changes to BookBridge will be documented in this file.
 
 ### Fixed
 
+- **Completed audiobooks no longer reopen slightly behind the end.** Audiobookshelf's finished flag now resolves progress to the book duration, Mark Complete persists service-native audio-position timestamps instead of wall-clock time, and significance checks normalize every client to a percentage delta before applying percentage or character thresholds.
+
+- **Fresh external KoSync progress no longer loses zero-delta discrepancy resolution.** A debounced device PUT can already be present in the database when its sync cycle starts, making its ordinary delta zero. Leader selection now retains that explicit recent external activity signal instead of demoting the device's percentage fallback and rolling it back to a stale service position.
+
 - **Cover proxy endpoints now verify book ownership before serving images.** `proxy_cover`, `proxy_booklore_audiobook_cover`, and `proxy_bookorbit_audiobook_cover` reject requests for books the requesting user has not claimed, preventing cross-user cover-image information disclosure. Provider audiobook routes resolve ownership through `audio_source` and `audio_source_id`, so linked ebooks from other providers do not cause false 403 responses.
 
 - **Forge active-tasks API now scoped to the requesting user's linked books.** Non-admin callers of `/api/forge/active` see only forging books they own; admins continue to see all active forge tasks.
