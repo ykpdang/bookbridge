@@ -521,6 +521,44 @@ class TestMatchPathsRegression(unittest.TestCase):
         self.assertIsNone(processed_book.ebook_filename)
         self.assertEqual(web_server._load_match_queue(), [])
 
+    def test_batch_match_audio_only_queue_succeeds_when_abs_lookup_misses(self):
+        """The audio-only Add-to-Queue path must trust the title/duration already
+        submitted from the rendered audiobook card rather than hard-requiring a
+        fresh get_audiobooks_conditionally() lookup to resolve `audiobook_id`.
+
+        That lookup returns a differently-shaped list (raw ABS dicts) than the one
+        the card was actually rendered from (AudioResult records via
+        get_searchable_audiobooks/_search_audiobooks_with_fallback), so a lookup
+        miss is expected in real usage. Before the fix, any miss silently dropped
+        the whole submission before it ever reached _match_queue_add -- no queue
+        item, no error.
+        """
+        self.mock_container.mock_database_service.get_book_by_audio_source.return_value = None
+        self.mock_container.mock_database_service.save_book.side_effect = lambda book: book
+
+        # This id deliberately does NOT appear in MockContainer's
+        # get_all_audiobooks() mock, simulating the real-world lookup miss.
+        add_response = self.client.post(
+            "/batch-match",
+            data={
+                "action": "add_to_queue",
+                "audiobook_id": "ab-not-in-full-library-dump",
+                "audio_source": "ABS",
+                "audio_source_id": "ab-not-in-full-library-dump",
+                "audio_title": "Untracked Audiobook",
+                "audio_duration": "5400",
+                "audio_only": "true",
+            },
+        )
+        self.assertEqual(add_response.status_code, 302)
+
+        queue = web_server._load_match_queue()
+        self.assertEqual(len(queue), 1)
+        self.assertTrue(queue[0]["audio_only"])
+        self.assertEqual(queue[0]["abs_title"], "Untracked Audiobook")
+        self.assertEqual(queue[0]["duration"], 5400.0)
+        self.assertEqual(queue[0]["ebook_filename"], "")
+
     @patch("src.web_server._create_audio_only_mapping_from_queue_item")
     def test_forge_queue_actions_route_audio_only_items_without_forging(self, mock_audio_only):
         item = {

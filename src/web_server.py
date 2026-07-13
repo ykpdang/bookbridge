@@ -5987,19 +5987,33 @@ def _add_book_view(template_name, self_endpoint):
             audio_only = (request.form.get('audio_only') or '').strip().lower() in (
                 'true', '1', 'yes', 'on'
             )
-            audiobooks = get_audiobooks_conditionally()
-            selected_ab = next((ab for ab in audiobooks if ab['id'] == abs_id), None)
+            selected_ab = None
+            if audio_source == 'ABS' and abs_id and (not audio_title or audio_duration is None):
+                # Only re-resolve against ABS when the submitted card didn't already
+                # carry a title/duration. get_audiobooks_conditionally() returns a
+                # differently-shaped list than the AudioResult records the card was
+                # rendered from, so this lookup is a best-effort enrichment, never a
+                # hard requirement for queuing (see below).
+                audiobooks = get_audiobooks_conditionally()
+                selected_ab = next((ab for ab in audiobooks if ab['id'] == abs_id), None)
             selected_audio = None
-            if audio_source == 'ABS' and selected_ab:
+            if audio_source == 'ABS' and abs_id:
+                # Trust the already-submitted title/duration/cover from the rendered
+                # card first; a prior version hard-required re-resolving `abs_id`
+                # here and silently dropped the whole submission (no queue item, no
+                # error) whenever that lookup missed -- e.g. every audio-only
+                # submission with no ebook to otherwise validate the request.
                 selected_audio = {
                     'bridge_key': abs_id,
                     'audio_source': 'ABS',
                     'audio_source_id': abs_id,
-                    'audio_title': manager.get_abs_title(selected_ab),
-                    'audio_duration': manager.get_duration(selected_ab),
-                    'audio_cover_url': f"{clients.abs_client.base_url}/api/items/{abs_id}/cover?token={clients.abs_client.token}",
-                    'audio_provider_book_id': abs_id,
-                    'audio_provider_file_id': None,
+                    'audio_title': audio_title or (manager.get_abs_title(selected_ab) if selected_ab else abs_id),
+                    'audio_duration': audio_duration if audio_duration is not None else (
+                        manager.get_duration(selected_ab) if selected_ab else None
+                    ),
+                    'audio_cover_url': audio_cover_url or f"{clients.abs_client.base_url}/api/items/{abs_id}/cover?token={clients.abs_client.token}",
+                    'audio_provider_book_id': audio_provider_book_id or abs_id,
+                    'audio_provider_file_id': audio_provider_file_id,
                 }
             elif audio_source in _LIBRARY_AUDIO_SOURCES and audio_source_id:
                 selected_audio = {
