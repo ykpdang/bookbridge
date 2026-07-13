@@ -240,7 +240,8 @@ class TestMultiUserAuth(unittest.TestCase):
         resp = self.client.get('/account')
 
         self.assertEqual(resp.status_code, 200)
-        self.assertIn(b'BridgeSync KOReader Plugin', resp.data)
+        self.assertIn(b'Connect a KOReader device', resp.data)
+        self.assertIn(b'BridgeSync plugin', resp.data)
         self.assertIn(b'/api/kosync-plugin/download', resp.data)
         self.assertIn(b'/api/kosync-plugin/version', resp.data)
         self.assertEqual(self.client.get('/api/kosync-plugin/version').status_code, 200)

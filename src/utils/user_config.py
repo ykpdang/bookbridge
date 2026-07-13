@@ -89,12 +89,19 @@ PER_USER_FIELD_GROUPS = [
         ("STORYTELLER_USER", "Username", "text"),
         ("STORYTELLER_PASSWORD", "Password", "secret"),
     ]),
-    ("Calibre-Web (Automated)", [
-        ("CWA_ENABLED", "Enabled", "bool"),
-        ("CWA_USERNAME", "Username", "text"),
-        ("CWA_PASSWORD", "Password", "secret"),
-        ("CWA_SYNC_ENABLED", "Kobo sync enabled", "bool"),
-        ("CWA_SYNC_TOKEN", "Kobo sync token", "secret"),
+    ("Grimmory", [
+        ("BOOKLORE_ENABLED", "Enabled", "bool"),
+        ("BOOKLORE_USER", "Username", "text"),
+        ("BOOKLORE_PASSWORD", "Password", "secret"),
+        ("BOOKLORE_SHELF_NAME", "Shelf name (synced books moved here)", "text"),
+        ("BOOKLORE_LIBRARY_ID", "Library ID (optional)", "text"),
+        ("BOOKLORE_ANNOTATION_SYNC", "Highlight sync", "bool"),
+    ]),
+    ("BookFusion", [
+        ("BOOKFUSION_ENABLED", "Enabled", "bool"),
+        ("BOOKFUSION_ACCESS_TOKEN", "Access token", "secret"),
+        ("BOOKFUSION_API_KEY", "Calibre API key (for uploads)", "secret"),
+        ("BOOKFUSION_ANNOTATION_SYNC", "Highlight sync", "bool"),
     ]),
     ("BookOrbit", [
         ("BOOKORBIT_ENABLED", "Enabled", "bool"),
@@ -105,24 +112,17 @@ PER_USER_FIELD_GROUPS = [
         ("BOOKORBIT_KOSYNC_KEY", "KOReader sync password (highlight sync)", "secret"),
         ("BOOKORBIT_KOSYNC_OWNER", "KOReader sync owner (must match BookOrbit username)", "text"),
     ]),
-    ("Grimmory / BookLore", [
-        ("BOOKLORE_ENABLED", "Enabled", "bool"),
-        ("BOOKLORE_USER", "Username", "text"),
-        ("BOOKLORE_PASSWORD", "Password", "secret"),
-        ("BOOKLORE_SHELF_NAME", "Shelf name (synced books moved here)", "text"),
-        ("BOOKLORE_LIBRARY_ID", "Library ID (optional)", "text"),
-        ("BOOKLORE_ANNOTATION_SYNC", "Highlight sync", "bool"),
-    ]),
     ("Readest", [
         ("READEST_ANNOTATION_SYNC", "Highlight sync", "bool"),
         ("READEST_EMAIL", "Account email", "text"),
         ("READEST_PASSWORD", "Account password", "secret"),
     ]),
-    ("BookFusion", [
-        ("BOOKFUSION_ENABLED", "Enabled", "bool"),
-        ("BOOKFUSION_ACCESS_TOKEN", "Access token", "secret"),
-        ("BOOKFUSION_API_KEY", "Calibre API key (for uploads)", "secret"),
-        ("BOOKFUSION_ANNOTATION_SYNC", "Highlight sync", "bool"),
+    ("Calibre-Web Automated", [
+        ("CWA_ENABLED", "Enabled", "bool"),
+        ("CWA_USERNAME", "Username", "text"),
+        ("CWA_PASSWORD", "Password", "secret"),
+        ("CWA_SYNC_ENABLED", "Kobo sync enabled", "bool"),
+        ("CWA_SYNC_TOKEN", "Kobo sync token", "secret"),
     ]),
     ("Hardcover", [
         ("HARDCOVER_ENABLED", "Enabled", "bool"),

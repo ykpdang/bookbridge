@@ -43,6 +43,12 @@
         .plugin-version { color: #888; font-size: 12px; font-weight: 500; }
         .plugin-card p { color: #aaa; font-size: 13px; line-height: 1.5; margin: 0 0 16px; }
         .plugin-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+        .url-row { display: flex; gap: 8px; margin: 0 0 6px; }
+        .url-row input {
+            flex: 1; margin-bottom: 0; cursor: text;
+            font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+            color: #aab4f5; font-weight: 600;
+        }
         .btn-link {
             display: inline-flex; align-items: center; justify-content: center; gap: 8px;
             padding: 10px 14px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 13px;
@@ -92,13 +98,25 @@
         </div>
     </div>
     <div class="card plugin-card">
-        <h2>
-            BridgeSync KOReader Plugin
-            <span id="bridgesync_plugin_version" class="plugin-version"></span>
-        </h2>
+        <h2>Connect a KOReader device</h2>
         <p>
-            Install this on each KOReader device that should receive bridge-delivered books,
-            sync reading stats, or exchange highlights and notes. Download the zip, unzip it
+            <strong>1 · Point KOReader at the bridge.</strong> On the device, open
+            Tools → Progress sync → Custom sync server and enter this address, then sign in
+            with your KoSync username &amp; password from
+            <a href="{{ url_for('account_integrations') }}" style="color:#aab4f5;">My Integrations</a>.
+        </p>
+        <div class="url-row">
+            <input type="text" id="kosync_public_url" value="" aria-label="Sync server address"
+                onclick="this.select()">
+            <button type="button" class="btn-link" onclick="copyPublicUrl(this)">Copy</button>
+        </div>
+        <p class="help">Suggested from this browser's address — adjust the host or port to match how
+            your devices reach the server (KoSync port: {{ get_val('KOSYNC_PORT', '5757') }}).</p>
+        <p>
+            <strong>2 · Install the BridgeSync plugin</strong>
+            <span id="bridgesync_plugin_version" class="plugin-version"></span><br>
+            Delivers books from the bridge byte-for-byte (so progress auto-links with no manual
+            matching), syncs reading stats, and relays highlights and notes. Download the zip, unzip it
             into <code>koreader/plugins/</code>, then restart KOReader.
         </p>
         <div class="plugin-actions">
@@ -112,6 +130,22 @@
                     document.getElementById('bridgesync_plugin_version').textContent = 'v' + d.version;
                 }
             }).catch(function () { });
+
+        (function () {
+            var urlInput = document.getElementById('kosync_public_url');
+            if (!urlInput) return;
+            urlInput.value = location.protocol + '//' + location.hostname + ':' + {{ get_val('KOSYNC_PORT', '5757')|tojson }};
+        })();
+
+        function copyPublicUrl(btn) {
+            var input = document.getElementById('kosync_public_url');
+            input.select();
+            input.setSelectionRange(0, 99999);
+            try { navigator.clipboard.writeText(input.value); } catch (err) { }
+            var original = btn.textContent;
+            btn.textContent = 'Copied';
+            window.setTimeout(function () { btn.textContent = original; }, 1500);
+        }
     </script>
 </body>
 </html>
