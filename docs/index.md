@@ -17,19 +17,32 @@
 
 **BookBridge** is a self-hosted sync engine for audiobooks and ebooks. It keeps your reading and listening position aligned across multiple apps, whether the source is Audiobookshelf, KOReader, BookFusion, Grimmory, BookOrbit, Calibre-Web Automated, or Storyteller. With the current Bridge Sync KOReader plugin, it can also move highlights and notes between supported readers.
 
+### What do you actually need?
+
+Just two things:
+
+1. **Docker** on any host.
+2. **At least two places you read or listen** that you want to keep in sync — for example Audiobookshelf on the audio side and KOReader on the ebook side.
+
+Every service below is **optional** — enable only the ones you actually use. Ebook-only setups (say, KOReader + Grimmory with Audiobookshelf intentionally disabled) work fine too.
+
+!!! tip "You do not need Storyteller"
+    Storyteller is one optional integration among many — **not** a requirement. BookBridge does its own audio ↔ text alignment with built-in Whisper transcription (and the EPUB's SMIL timing data when present). If you happen to run Storyteller, the bridge will use its transcripts as a higher-quality alignment source and sync its read-along position — but nothing in the bridge requires it.
+
 ### Supported Services
 
 | Platform | Type | Capability |
 | :--- | :--- | :--- |
 | **Audiobookshelf** | Audiobooks + optional ebooks | Audiobook progress sync, optional ebook progress, library matching |
 | **KOReader / KOSync** | Ebooks | Reading progress sync; highlights/notes through the current Bridge Sync plugin |
-| **BookFusion** | Ebooks | Reading progress sync and highlight relay |
-| **Storyteller** | Read-along reader | Progress sync and alignment source for read-along books |
+| **BookFusion** | Ebooks | Reading progress sync, highlight relay, and uploading local EPUBs into your BookFusion bookshelf |
+| **Storyteller** | Read-along reader | Progress sync and a bonus alignment source for read-along books |
 | **Grimmory** | Ebooks + audiobooks | Ebook progress, audiobook-source sync, reading sessions, optional annotation relay |
 | **BookOrbit** | Ebooks + audiobooks | Ebook progress, audiobook-source sync, reading sessions, optional highlight relay |
 | **Calibre-Web Automated (CWA)** | Ebooks + Kobo-protocol sync | Ebook source/search/download; optional progress sync through CWA's Kobo sync protocol, used by stock Kobo readers and KOReader-via-CWA |
 | **Readest** | Ebooks | Optional cloud highlight relay |
-| **Hardcover.app** | Reading tracker + lists | Write-only tracking, optional annotation relay, optional list-backed KOReader collections |
+| **Hardcover** | Reading tracker + lists | Write-only tracking, optional annotation relay, optional list-backed KOReader collections |
+| **StoryGraph** | Reading tracker | Write-only tracking with edition picking |
 
 !!! note "Highlights and notes"
     Annotation sync requires the Bridge Sync KOReader plugin from the current release or newer. Plain KOReader/KOSync clients continue syncing position, but they do not sync highlights or notes.
@@ -46,7 +59,7 @@
 - **Smart conflict handling** with anti-regression guardrails and a deadband to avoid tiny cross-format bounce-backs.
 - **Highlight and note sync** for KOReader devices using the current Bridge Sync plugin, with optional Grimmory, BookOrbit, BookFusion, Readest, and Hardcover relay.
 - **Rich locators** using timestamps, href/fragment data, XPath, and EPUB CFI where available.
-- **Storyteller-first alignment** when valid Storyteller transcript assets exist, followed by SMIL and Whisper fallback.
+- **Built-in audio ↔ text alignment** using Whisper transcription and EPUB SMIL timing data — no extra services required. Storyteller transcript assets are used as a premium alignment source when you happen to run Storyteller.
 - **Resumable jobs** for background processing and transcript work.
 
 ### Management Web UI
@@ -78,7 +91,7 @@
 2. **Normalization**: timestamps, percentages, CFI, and Storyteller locators are converted into a shared timeline.
 3. **Change check**: tiny gaps are ignored so harmless drift does not cause sync churn.
 4. **Leader election**: the bridge picks the most trustworthy current position.
-5. **Translation**: if audio and text need to cross formats, the bridge resolves that position through Storyteller transcript data, SMIL, or Whisper alignment.
+5. **Translation**: if audio and text need to cross formats, the bridge resolves that position through its own alignment map — built from Whisper transcription or the EPUB's SMIL data, or from Storyteller transcripts if you use Storyteller.
 6. **Propagation**: the resolved position is written back to every applicable client for that mapping.
 
 ```mermaid
@@ -92,7 +105,7 @@ graph TD
     E -->|No| A
     E -->|Yes| F[Choose Stable Leader]
     F --> G{Audio/Text Translation Needed?}
-    G -->|Yes| H[Use Storyteller, SMIL, or Whisper Alignment]
+    G -->|Yes| H[Use Alignment Map: Whisper / SMIL / Storyteller]
     G -->|No| I[Direct Update]
     H --> J[Generate Locator or Timestamp]
     I --> J
@@ -102,4 +115,4 @@ graph TD
 ```
 
 !!! note "Storyteller, Grimmory, and BookOrbit"
-    Storyteller transcript assets improve locator quality, and Grimmory or BookOrbit can act as either the ebook target or the audiobook source for a mapping.
+    All three are optional. Storyteller transcript assets improve locator quality when present, and Grimmory or BookOrbit can act as either the ebook target or the audiobook source for a mapping.

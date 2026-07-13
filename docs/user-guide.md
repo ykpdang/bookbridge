@@ -26,10 +26,11 @@ When you start actions like **Create Mapping**, **Forge & Match**, **Add to Queu
 
 The **Account** page is where you manage your own login and reader-specific setup.
 
-- **My Integrations** lets you save your own service usernames, passwords, tokens, API keys, and per-user sync toggles.
+- **My Integrations** lets you save your own service usernames, passwords, tokens, API keys, and per-user sync toggles. The cards here use the same names and order as **Settings -> Integrations**, so it is always clear which side holds what: Settings has the server connection, your Account has your login.
+- **Connect a KOReader device** walks you through pointing KOReader at the bridge (copyable sync-server address) and installing the optional Bridge Sync plugin.
 - Admins can still manage the same fields for any reader from **Settings -> Users -> (user) -> Integrations**.
 - Shared engine settings, such as service URLs, poll intervals, and daemon behavior, still live in **Settings**.
-- BookFusion can be linked from **My Integrations** with the device-link button, or configured manually with an API key from BookFusion's Calibre integration page.
+- BookFusion can be linked from **My Integrations** with the device-link button; a separate Calibre API key enables uploading local EPUBs to BookFusion.
 
 Regular readers do not inherit an admin's account credentials when their own fields are blank. This keeps one reader's BookFusion, Grimmory, BookOrbit, tracker, or KOSync account from being used for another reader by accident.
 
@@ -83,12 +84,11 @@ This is useful when you often read directly in Storyteller, Grimmory, BookOrbit,
 
 ## Settings
 
-The **Settings** page is where you connect your services and adjust how the bridge behaves.
+The **Settings** page is where you connect your services and adjust how the bridge behaves. The sidebar groups it into **Integrations** (one card per service), **Sync**, **Features**, **AI**, **System**, **Users**, and **Logs**.
 
-- Each service section has a **Test** button so you can check a service before saving.
-- Audiobookshelf and Grimmory library ID fields include **Find IDs** helpers so you can pick from a dropdown instead of pasting blindly.
-- If you want an ebook-only or maintenance-focused setup, you can intentionally turn off Audiobookshelf by entering `disabled` in the ABS URL or token field.
-- If you use the built-in KOSync bridge, you can test the KOSync settings you have typed in before saving them.
+- Everything in Settings is server-wide; your own logins live in **Account -> My Integrations**, on cards with the same names in the same order.
+- **My Integrations** cards have **Test** buttons so you can check a login before saving; Audiobookshelf and Grimmory library ID fields include **Find IDs** helpers so you can pick from a dropdown instead of pasting blindly.
+- If you want an ebook-only or maintenance-focused setup, you can intentionally turn off Audiobookshelf by entering `disabled` in the ABS URL field.
 - **Save Settings** applies your changes and restarts the app.
 - When the restart finishes, you are sent back to the dashboard.
 
@@ -102,10 +102,10 @@ BookBridge can sync KOReader highlights and notes between KOReader devices and s
 
 Requirements:
 
-- Install the **Bridge Sync** KOReader plugin from your **Account** page, or from the current release or newer, on each KOReader device that should sync annotations.
+- Install the **Bridge Sync** KOReader plugin from **Account -> Connect a KOReader device**, or from the current release or newer, on each KOReader device that should sync annotations.
 - Configure the plugin with that reader's bridge server URL and KOSync username/key.
-- Leave **KOReader -> Highlight Sync** enabled in Settings. It is enabled by default on the bridge side.
-- For Grimmory web-reader highlights and notes, enable **Highlight Sync** in that reader's Grimmory / BookLore Integrations.
+- Leave **Highlight Sync** enabled on the **Settings -> Integrations -> KOReader / KoSync** card. It is enabled by default on the bridge side.
+- For Grimmory web-reader highlights and notes, enable **Highlight Sync** in that reader's Grimmory integration.
 - For BookOrbit web-reader highlights, fill in that reader's BookOrbit KOReader sync username/password fields. The owner must match the BookOrbit user, or be explicitly set in **KOReader sync owner**.
 - For BookFusion highlights, link that reader's BookFusion account and enable **Highlight Sync** in Account -> My Integrations.
 - For Readest or Hardcover annotation relay, configure that reader's account in My Integrations.
@@ -138,7 +138,7 @@ The source badge on each card tells you where the audiobook came from.
 
 ### Step 2: Choose Storyteller (optional)
 
-If Storyteller is configured, you can also link a Storyteller title.
+This step only appears useful if you run the Storyteller app — skip it otherwise. If Storyteller is configured, you can also link a Storyteller title.
 
 - Pick the Storyteller card when you want read-along support.
 - Leave it on **None / Skip** if you only want the standard ebook.
@@ -232,7 +232,7 @@ When Storyteller transcript assets are available, the bridge can use them direct
 
 ### Storyteller Backfill
 
-Use **Settings -> Storyteller Backfill** to:
+Use **Settings -> System -> Advanced -> Storyteller Backfill** to:
 
 - Re-scan all Storyteller-linked books
 - Ingest any newly available transcript assets
@@ -258,7 +258,7 @@ You can use **Grimmory or BookOrbit audiobooks**, and CWA-backed ebook selection
 
 If **Record Reading Sessions** is enabled in Settings, Grimmory or BookOrbit also receives session updates as you make progress. If CWA Kobo sync is enabled, CWA-sourced ebook progress can participate through its Kobo sync endpoints. BookFusion progress sync uses BookFusion's percentage-based reading position.
 
-If Grimmory imports change and results look stale, open **Settings** and run **Refresh Grimmory Cache**. If BookOrbit or CWA imports look stale, confirm the service is enabled and reachable, then run the normal sync or matching flow again.
+If Grimmory imports change and results look stale, run **Settings -> System -> Advanced -> Refresh Grimmory Cache**. If BookOrbit or CWA imports look stale, confirm the service is enabled and reachable, then run the normal sync or matching flow again.
 
 ---
 

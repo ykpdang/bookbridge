@@ -6,6 +6,16 @@ All notable changes to BookBridge will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Integration cards got a face-lift.** Every service card in Settings → Integrations now shows a monogram badge, a one-line description of what the service does for the bridge, and a status pill (Configured / Not configured / Per-user accounts) so you can read the state of your setup at a glance. Card headers click to expand or collapse, the sidebar has a "Find a setting…" search that filters the cards, and the save bar counts your unsaved changes.
+
+- **The docs got a clarity pass.** The site now leads with "What do you actually need?" — Docker plus any two reading/listening apps — and says plainly, in several places, that **Storyteller is optional**: the bridge does its own audio ↔ ebook alignment with built-in Whisper transcription and SMIL data. Outdated content was refreshed too: BookFusion uploads are documented, the KOSync settings reference matches the per-user login model, StoryGraph appears in the supported-services table, and every "Settings → …" path points at the new layout.
+
+- **Settings got a full reorganization.** Every service now has one card, one name, and one position — identical between the admin **Settings → Integrations** panel and each user's **My Account → My Integrations** page — so it's finally obvious that the Settings card holds the server connection and the Account card holds your personal login. The admin sidebar is now Integrations / Sync / Features / AI / System / Users / Logs; sync-behavior settings live under **Sync**, and Telegram, Shelfmark, and Suggestions under **Features**. Old settings bookmarks keep working. Hardcover and StoryGraph are tagged as write-only trackers.
+
+- **Connecting a KOReader device moved to My Account.** The sync-server address (pre-filled from your browser's address) and the BridgeSync plugin download now live in a step-by-step "Connect a KOReader device" card on the Account page, instead of being buried in admin settings. The KOReader / KoSync settings card keeps only sync behavior; the rarely-used external-KoSync-server option is tucked under Advanced.
+
 ### Added
 
 - **BridgeSync device diagnostics now reach the bridge logs automatically.** After each book sync or reading-session upload, BridgeSync 0.5.3 sends a bounded unread tail of `bridge_sync.log` through the authenticated device-sync API. Docker logs identify the KOReader device, plugin version, operation, and success/partial/failure status while preserving each relayed line's info, warning, or error severity. Failed telemetry keeps its device-side byte offset and retries on the next operation; telemetry failure never fails the underlying sync.
