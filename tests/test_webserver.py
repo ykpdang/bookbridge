@@ -705,6 +705,65 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
         finally:
             src.web_server.get_kosync_id_for_ebook = original_get_kosync
 
+    def test_match_endpoint_creates_abs_audio_only_mapping(self):
+        """Audio-only ABS mappings do not require an EPUB or KOSync hash."""
+        from src.db.models import Book
+
+        self.mock_abs_client.get_all_audiobooks.return_value = [
+            {
+                'id': 'audio-only-abs-1',
+                'media': {'metadata': {'title': 'Audio Only Title'}, 'duration': 1800},
+            }
+        ]
+        self.mock_database_service.get_book.return_value = None
+        self.mock_database_service.get_book_by_audio_source.return_value = None
+        self.mock_abs_client.is_configured.return_value = True
+
+        response = self.client.post('/match', data={
+            'audiobook_id': 'audio-only-abs-1',
+            'audio_source': 'ABS',
+            'audio_source_id': 'audio-only-abs-1',
+            'audio_title': 'Audio Only Title',
+            'audio_duration': '1800',
+            'audio_provider_book_id': 'audio-only-abs-1',
+            'audio_only': 'true',
+        })
+
+        self.assertEqual(response.status_code, 302)
+        saved_book = self.mock_database_service.save_book.call_args[0][0]
+        self.assertIsInstance(saved_book, Book)
+        self.assertEqual(saved_book.abs_id, 'audio-only-abs-1')
+        self.assertEqual(saved_book.audio_source, 'ABS')
+        self.assertEqual(saved_book.audio_source_id, 'audio-only-abs-1')
+        self.assertEqual(saved_book.sync_mode, 'audiobook_only')
+        self.assertEqual(saved_book.status, 'active')
+        self.assertIsNone(saved_book.ebook_filename)
+        self.assertIsNone(saved_book.kosync_doc_id)
+        self.mock_abs_client.add_to_collection.assert_called_once()
+
+    def test_match_endpoint_creates_booklore_audio_only_mapping(self):
+        """Library-backed audiobook sources use their namespaced bridge key."""
+        self.mock_database_service.get_book.return_value = None
+        self.mock_database_service.get_book_by_audio_source.return_value = None
+
+        response = self.client.post('/match', data={
+            'audio_source': 'BookLore',
+            'audio_source_id': 'grimmory-audio-7',
+            'audio_title': 'Grimmory Audio Only',
+            'audio_duration': '2400',
+            'audio_provider_book_id': 'grimmory-audio-7',
+            'audio_only': 'true',
+        })
+
+        self.assertEqual(response.status_code, 302)
+        saved_book = self.mock_database_service.save_book.call_args[0][0]
+        self.assertEqual(saved_book.abs_id, 'booklore:grimmory-audio-7')
+        self.assertEqual(saved_book.audio_source, 'BookLore')
+        self.assertEqual(saved_book.sync_mode, 'audiobook_only')
+        self.assertEqual(saved_book.status, 'active')
+        self.assertIsNone(saved_book.ebook_filename)
+        self.assertIsNone(saved_book.kosync_doc_id)
+
     def test_storyteller_unlink_removes_from_collection_by_uuid(self):
         """Unlinking Storyteller should remove the prior UUID from Storyteller collection."""
         from src.db.models import Book

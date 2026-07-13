@@ -6,12 +6,6 @@ All notable changes to BookBridge will be documented in this file.
 
 ## [Unreleased]
 
-- **Fixed:** Shelf-watch is now scoped per user for GitHub issue [#318]. Global and
-  custom polling use each user's own library client and candidate pool, shared
-  mappings are claimed through `UserBook`, and per-user BookOrbit ebook/audio IDs
-  are stored in a new link table so one reader's library identity cannot be used
-  for another reader.
-
 ## [7.2.0] - 2026-07-13
 
 The headline is **reader-owned integrations, full BookFusion support, and a more reliable BridgeSync**: BookBridge now gives each reader a self-service place for their own service accounts, connects to BookFusion for progress, highlight, and book-upload sync, reorganizes Settings and Integrations around a clearer per-service layout, and makes large-library synchronization faster and more resilient.
@@ -19,6 +13,12 @@ The headline is **reader-owned integrations, full BookFusion support, and a more
 Highlight and note sync still requires the **BridgeSync KOReader plugin from 7.1.0 or newer**. Older BridgeSync builds and plain KOSync clients continue syncing reading position, but they do not have annotation exchange, sweep, close-capture, or managed collection support. Install the latest bundled plugin (0.5.4) for the reliability improvements below. Devices that briefly installed BridgeSync 0.5.0 must reinstall manually because that disabled build cannot run its own updater.
 
 ### What's New
+
+- **Audiobook-only mappings are now supported.** Add / Update Book, the legacy
+  Match page, and Batch Match can link an Audiobookshelf, Grimmory, or BookOrbit
+  audiobook without an ebook. These mappings activate immediately and keep
+  audiobook progress on the audio-time axis without EPUB, transcript, or Forge
+  work; when a locator EPUB is unavailable, sync uses percentage fallback.
 
 - **BookFusion progress and highlight sync is now wired in.** Readers can link a BookFusion account and sync reading progress with a real navigation anchor (chapter index, spine-normalized position, and CFI), so a book reopens in BookFusion where it was left off instead of jumping to the start. Highlights relay through the annotation hub using a freshly implemented UTF-16 offset/xpointer mapper and a stable creation-time identity key, so BookFusion's own mutable timestamps never get mistaken for an edit or a deletion on your other devices. BookFusion can be linked by device flow, and the integration forms point manual token setup to BookFusion's Calibre integration page.
 
@@ -51,6 +51,11 @@ Highlight and note sync still requires the **BridgeSync KOReader plugin from 7.1
 - **EPUB position resolution is substantially faster.** Book paths are cached and shared by the parser and sync manager (bounded to a configured LRU size), managed cache files bypass unnecessary library scans, and generated XPath lookups reuse already-resolved EPUB text instead of parsing the same book twice. (#318)
 
 ### Fixed
+
+- **Shelf-watch matching is now scoped per reader.** Global and custom polling use
+  each user's own library client and candidate pool, shared mappings are claimed
+  through `UserBook`, and per-user BookOrbit ebook/audio IDs are stored in a link
+  table so one reader's library identity cannot be used for another reader. (#318)
 
 - **Manually selected KoSync hashes now stay selected.** The previous and served-file hashes remain linked as siblings, so devices and progress resolve through either EPUB build without a manifest refresh replacing the chosen primary hash. (#316)
 

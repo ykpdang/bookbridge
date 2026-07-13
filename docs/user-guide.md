@@ -38,7 +38,7 @@ Regular readers do not inherit an admin's account credentials when their own fie
 
 ## Sync Modes
 
-Each mapping runs in one of two modes.
+Each mapping runs in one of three modes.
 
 ### 1. Audiobook Sync
 
@@ -50,7 +50,17 @@ This is the normal mode when a mapping has an audiobook source.
 
 Use this when you want listening and reading progress to stay aligned.
 
-### 2. Ebook-Only Sync
+### 2. Audiobook-Only Sync
+
+This mode tracks an audiobook without attaching an ebook or Storyteller text.
+
+- Create it by choosing an audiobook and **Audio only (no ebook)** in **Add / Update Book** or **Batch Match**.
+- The audio source can be **Audiobookshelf**, **Grimmory**, or **BookOrbit**.
+- It activates immediately and skips EPUB lookup, transcript generation, alignment, and Forge.
+
+Use this when you want to track or mirror audiobook progress without a text edition.
+
+### 3. Ebook-Only Sync
 
 This mode tracks reading progress without attaching an audiobook source.
 
@@ -133,6 +143,7 @@ You can choose:
 - A **Grimmory audiobook**
 - A **BookOrbit audiobook**
 - **None / Skip** for an ebook-only link
+- **Audio only (no ebook)** when you want an audiobook mapping without text
 
 The source badge on each card tells you where the audiobook came from.
 
@@ -159,6 +170,7 @@ The bridge can pull ebook choices from:
 - **Forge & Match** uploads the book to Storyteller for processing first, then finishes the link when Forge completes.
 
 If you skip audio, **Create Mapping** makes an ebook-only link instead.
+If you choose **Audio only (no ebook)**, the mapping activates immediately without EPUB or transcript processing.
 
 ---
 
@@ -170,6 +182,7 @@ Use it when you want to review multiple links and process them together.
 
 - Queue entries can use **Audiobookshelf**, **Grimmory**, or **BookOrbit** as the audio source.
 - You can attach a standard ebook, a Storyteller title, or both.
+- You can also queue **Audio only (no ebook)** entries for immediate audiobook-only mappings.
 - Queue items created from **Suggestions** land here too.
 
 ---

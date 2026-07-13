@@ -135,7 +135,7 @@ class Book(Base):
     transcript_file = Column(String(500))
     status = Column(String(50), default='active')
     duration = Column(Float)  # Duration in seconds from AudioBookShelf
-    sync_mode = Column(String(20), default='audiobook')  # 'audiobook' or 'ebook_only'
+    sync_mode = Column(String(20), default='audiobook')  # 'audiobook', 'audiobook_only', or 'ebook_only'
     transcript_source = Column(String(32), nullable=True)  # 'storyteller', 'smil', 'whisper'
     storyteller_uuid = Column(String(36), index=True, nullable=True)
     bookfusion_id = Column(String(255), nullable=True, index=True)

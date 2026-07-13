@@ -6,6 +6,11 @@ Highlight and note sync still requires the **BridgeSync KOReader plugin from 7.1
 
 ## Added
 
+- **Audiobook-only mappings** - Add / Update Book, the legacy Match page, and
+  Batch Match can link an Audiobookshelf, Grimmory, or BookOrbit audiobook
+  without an ebook. These mappings activate immediately, avoid EPUB/hash,
+  transcript, and Forge work, and use percentage fallback when no locator EPUB
+  exists.
 - **BookFusion progress and highlight sync** - readers can link their own BookFusion account and sync reading progress with a real navigation anchor (chapter index, spine-normalized position, and CFI), so books reopen where they were left off. Highlights relay through the annotation hub using a fresh UTF-16 offset/xpointer mapper and a stable creation-time identity key, so BookFusion's own timestamp churn never gets mistaken for an edit or deletion on your other devices.
 - **BookFusion book upload, including the Storyteller ReadAloud edition** - when BookFusion's search finds no match for a book with a local EPUB, the dashboard offers to upload it via BookFusion's Calibre upload API. Books linked to Storyteller can instead upload the full ReadAloud EPUB3 (SMIL media overlays plus narration audio) so BookFusion's own read-aloud feature has something to read. Upload failures report a specific reason, including when a file exceeds your BookFusion account's own upload size limit.
 - **Self-service reader integrations** - each signed-in reader now has Account -> My Integrations, where they can manage service usernames, passwords, tokens, API keys, and per-user sync toggles. Admins can still manage those same fields for any reader from Settings -> Users.
@@ -26,6 +31,11 @@ Highlight and note sync still requires the **BridgeSync KOReader plugin from 7.1
 
 ## Fixed
 
+- **Shelf-watch matching is now scoped per reader** - global and custom polling
+  use each user's own library client and candidate pool, shared mappings are
+  claimed through `UserBook`, and per-user BookOrbit ebook/audio IDs are stored
+  in a link table so one reader's library identity cannot be used for another
+  reader. (#318)
 - **Manually selected KoSync hashes now stay selected** - previous and served-file hashes remain linked as siblings, so devices and progress resolve through either EPUB build without a manifest refresh replacing the chosen primary hash. (#316)
 - **Mark Complete and audiobook completion are more reliable** - BookBridge filters clients by book type and support and records completion only after a successful remote update; Audiobookshelf's finished flag resolves progress to the book duration, Mark Complete persists service-native audio-position timestamps, and significance checks normalize every client to a percentage delta before applying thresholds. (#318)
 - **Fresh external KoSync progress no longer loses zero-delta discrepancy resolution** - leader selection now retains an explicit recent external activity signal instead of rolling a device back to a stale service position when its ordinary delta happens to be zero.

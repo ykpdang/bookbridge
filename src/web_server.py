@@ -2826,6 +2826,108 @@ def _create_or_update_library_audio_mapping(
     return saved_book, None, None
 
 
+def _create_or_update_audio_only_mapping(
+    *,
+    audio_source="ABS",
+    audio_source_id,
+    audio_title=None,
+    audio_cover_url=None,
+    audio_duration=None,
+    audio_provider_book_id=None,
+    audio_provider_file_id=None,
+):
+    """Create or refresh a mapping that contains only an audiobook source.
+
+    Audio-only mappings intentionally have no EPUB, KOSync hash, transcript, or
+    alignment work.  They still use the normal provider bridge keys so ABS,
+    Grimmory, and BookOrbit audio progress can be tracked consistently.
+    """
+    audio_source = str(audio_source or "").strip()
+    audio_source_id = str(audio_source_id or "").strip()
+    if audio_source not in ("ABS", *_LIBRARY_AUDIO_SOURCES):
+        return None, f"Unsupported audio source '{audio_source}'", 400
+    if not audio_source_id:
+        return None, "Missing audiobook source id", 400
+
+    bridge_key = (
+        audio_source_id
+        if audio_source == "ABS"
+        else _build_bridge_key(audio_source, audio_source_id)
+    )
+    existing_book = (
+        database_service.get_book(bridge_key)
+        or database_service.get_book_by_audio_source(audio_source, audio_source_id)
+    )
+
+    clients = uc()
+    default_cover = None
+    if audio_source == "ABS":
+        abs_client = getattr(clients, "abs_client", None)
+        if abs_client is not None and getattr(abs_client, "is_configured", lambda: False)():
+            default_cover = (
+                f"{abs_client.base_url}/api/items/{audio_source_id}/cover"
+                f"?token={abs_client.token}"
+            )
+    elif audio_source == "BookLore":
+        default_cover = f"/api/booklore/audiobook-cover/{audio_source_id}"
+    else:
+        default_cover = f"/api/bookorbit/audiobook-cover/{audio_source_id}"
+
+    from src.db.models import Book
+
+    title = audio_title or f"{_audio_source_display_name(audio_source)} {audio_source_id}"
+    target_book = existing_book or Book(abs_id=bridge_key, sync_mode="audiobook_only")
+    target_book.abs_id = bridge_key
+    target_book.abs_title = title or target_book.abs_title or bridge_key
+    target_book.audio_source = audio_source
+    target_book.audio_source_id = audio_source_id
+    target_book.audio_title = title or target_book.audio_title or target_book.abs_title
+    target_book.audio_cover_url = audio_cover_url or target_book.audio_cover_url or default_cover
+    if audio_duration is not None:
+        target_book.audio_duration = audio_duration
+        target_book.duration = audio_duration
+    target_book.audio_provider_book_id = str(audio_provider_book_id or audio_source_id)
+    target_book.audio_provider_file_id = (
+        str(audio_provider_file_id) if audio_provider_file_id else None
+    )
+
+    # A deliberate audio-only rematch must not leave stale text-side metadata
+    # visible or active in the mapping.
+    for field_name in (
+        "ebook_filename",
+        "ebook_source",
+        "ebook_source_id",
+        "original_ebook_filename",
+        "kosync_doc_id",
+        "transcript_file",
+        "transcript_source",
+        "storyteller_uuid",
+        "bookfusion_id",
+        "abs_ebook_item_id",
+    ):
+        setattr(target_book, field_name, None)
+    target_book.status = "active"
+    target_book.sync_mode = "audiobook_only"
+
+    saved_book = database_service.save_book(target_book)
+
+    if audio_source == "ABS":
+        try:
+            clients.abs_client.add_to_collection(
+                saved_book.abs_id,
+                user_setting("ABS_COLLECTION_NAME", "Synced with KOReader"),
+            )
+        except Exception as exc:
+            logger.warning("Failed to add audio-only ABS mapping to collection: %s", exc)
+
+    try:
+        database_service.dismiss_suggestion(saved_book.abs_id)
+    except Exception:
+        pass
+
+    return saved_book, None, None
+
+
 def _ensure_bookfusion_ebook_cached(bookfusion_id) -> "str | None":
     """Download a BookFusion EPUB into the epub cache and return its filename.
 
@@ -4762,6 +4864,37 @@ def match():
             # audio_source == 'ABS': fall through to the standard ABS + ebook match
             # path below (Storyteller tri-link, forge/Whisper, tracker auto-match).
 
+        audio_only = (request.form.get("audio_only") or "").strip().lower() in (
+            "true", "1", "yes", "on"
+        )
+        if audio_only and request.form.get('action') != 'forge_match':
+            if selected_filename or storyteller_uuid:
+                return "Audio-only mappings cannot include a text source", 400
+            if not audio_source or not audio_source_id:
+                return "Please select an audiobook for an audio-only mapping", 400
+            if audio_source == "ABS":
+                if not selected_ab:
+                    return "Audiobook not found", 404
+                if not audio_title:
+                    audio_title = manager.get_abs_title(selected_ab)
+                if audio_duration is None:
+                    audio_duration = manager.get_duration(selected_ab)
+
+            saved_book, err_msg, err_code = _create_or_update_audio_only_mapping(
+                audio_source=audio_source,
+                audio_source_id=audio_source_id,
+                audio_title=audio_title,
+                audio_cover_url=audio_cover_url,
+                audio_duration=audio_duration,
+                audio_provider_book_id=audio_provider_book_id,
+                audio_provider_file_id=audio_provider_file_id,
+            )
+            if err_msg:
+                return err_msg, err_code
+            if saved_book:
+                _claim_book_for_current_user(saved_book.abs_id)
+            return redirect(url_for('index'))
+
         if audio_source in _LIBRARY_AUDIO_SOURCES and audio_source_id and request.form.get('action') != 'forge_match':
             saved_book, err_msg, err_code = _create_or_update_library_audio_mapping(
                 audio_source=audio_source,
@@ -5171,6 +5304,32 @@ def _create_ebook_only_mapping_from_queue_item(item):
         _claim_book_for_user_id(get_current_user_id(), saved_book.abs_id)
 
 
+def _create_audio_only_mapping_from_queue_item(item):
+    """Create an audio-only mapping from a queued audiobook selection."""
+    audio_source = (item.get("audio_source") or "").strip() or None
+    audio_source_id = (item.get("audio_source_id") or item.get("abs_id") or "").strip()
+    if not audio_source or not audio_source_id:
+        return
+
+    saved_book, err_msg, _err_code = _create_or_update_audio_only_mapping(
+        audio_source=audio_source,
+        audio_source_id=audio_source_id,
+        audio_title=item.get("audio_title") or item.get("abs_title"),
+        audio_cover_url=item.get("audio_cover_url") or item.get("cover_url"),
+        audio_duration=_parse_audio_duration(item.get("audio_duration") or item.get("duration")),
+        audio_provider_book_id=item.get("audio_provider_book_id"),
+        audio_provider_file_id=item.get("audio_provider_file_id"),
+    )
+    if err_msg:
+        logger.warning(
+            "⚠️ Add Book (audio-only) skipped '%s': %s",
+            sanitize_log_data(item.get("abs_title") or audio_source_id),
+            err_msg,
+        )
+    elif saved_book:
+        _claim_book_for_user_id(get_current_user_id(), saved_book.abs_id)
+
+
 def _record_forge_match_job(abs_id: str, progress: float = 0.0, last_error: str = None):
     """Persist Forge & Match wait state so it survives refreshes and restarts."""
     if not abs_id:
@@ -5200,6 +5359,9 @@ def _process_forge_only_queue(queue_items, forge_stage_mode=None):
     """
     clients = uc()
     for item in queue_items:
+        if item.get('audio_only'):
+            _create_audio_only_mapping_from_queue_item(item)
+            continue
         audio_source = item.get('audio_source')
         if audio_source and _normalize_text_source_type(item.get('ebook_source')) == "BookFusion" and item.get('ebook_source_id'):
             saved_book, err_msg, _err_code = _create_or_update_bookfusion_progress_mapping(
@@ -5305,6 +5467,9 @@ def _process_batch_queue(queue_items):
         if not item.get('audio_source'):
             # No audio: ebook-only / storyteller-only item — match only.
             _create_ebook_only_mapping_from_queue_item(item)
+            continue
+        if item.get('audio_only'):
+            _create_audio_only_mapping_from_queue_item(item)
             continue
         audio_source = item.get('audio_source') or 'ABS'
         if _normalize_text_source_type(item.get('ebook_source')) == "BookFusion" and item.get('ebook_source_id'):
@@ -5482,6 +5647,9 @@ def _process_forge_match_queue(queue_items):
     from src.db.models import Book
     clients = uc()
     for item in queue_items:
+        if item.get('audio_only'):
+            _create_audio_only_mapping_from_queue_item(item)
+            continue
         if not item.get('audio_source'):
             # No audio: ebook-only / storyteller-only item — match only (nothing to forge).
             _create_ebook_only_mapping_from_queue_item(item)
@@ -5816,6 +5984,9 @@ def _add_book_view(template_name, self_endpoint):
             ebook_source_id = (request.form.get('ebook_source_id') or request.form.get('source_id') or '').strip() or None
             ebook_source_path = (request.form.get('ebook_source_path') or request.form.get('source_path') or '').strip() or None
             storyteller_uuid = request.form.get('storyteller_uuid', '')
+            audio_only = (request.form.get('audio_only') or '').strip().lower() in (
+                'true', '1', 'yes', 'on'
+            )
             audiobooks = get_audiobooks_conditionally()
             selected_ab = next((ab for ab in audiobooks if ab['id'] == abs_id), None)
             selected_audio = None
@@ -5856,7 +6027,7 @@ def _add_book_view(template_name, self_endpoint):
                         'audio_provider_file_id': None,
                     }
 
-            if selected_audio and (ebook_filename or storyteller_uuid):
+            if selected_audio and (ebook_filename or storyteller_uuid or audio_only):
                 _match_queue_add({
                     **selected_audio,
                     "abs_id": selected_audio['bridge_key'],
@@ -5867,6 +6038,7 @@ def _add_book_view(template_name, self_endpoint):
                     "ebook_source_id": ebook_source_id,
                     "ebook_source_path": ebook_source_path,
                     "storyteller_uuid": storyteller_uuid,
+                    "audio_only": audio_only and not (ebook_filename or storyteller_uuid),
                     "duration": selected_audio['audio_duration'],
                     "cover_url": selected_audio['audio_cover_url'],
                 })

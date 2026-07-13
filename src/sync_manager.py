@@ -1526,6 +1526,27 @@ class SyncManager:
         if not target_book:
             return
 
+        # Audio-only mappings have no EPUB/transcript work to prepare. They are
+        # normally saved active, but this also repairs legacy/pending rows without
+        # sending them through the text-processing worker.
+        if getattr(target_book, "sync_mode", "audiobook") == "audiobook_only":
+            target_book.status = "active"
+            self.database_service.save_book(target_book)
+            self.database_service.save_job(
+                Job(
+                    abs_id=target_book.abs_id,
+                    last_attempt=time.time(),
+                    retry_count=0,
+                    last_error=None,
+                    progress=1.0,
+                )
+            )
+            logger.info(
+                "✅ Activated audio-only mapping without text processing: %s",
+                sanitize_log_data(target_book.abs_title),
+            )
+            return
+
         total_jobs = len(eligible_books)
         job_idx = (eligible_books.index(target_book) + 1) if total_jobs else 1
 
@@ -3036,6 +3057,7 @@ class SyncManager:
                 txt = None
                 locator = None
                 locator_source = None
+                audio_only_mode = getattr(book, "sync_mode", "audiobook") == "audiobook_only"
 
                 primary_audio_client = self._get_primary_audio_client_name(book)
                 if leader == primary_audio_client:
@@ -3064,33 +3086,37 @@ class SyncManager:
                             )
 
                 if not locator:
-                    if not epub:
-                        logger.warning(
-                            f"⚠️ '{abs_id}' '{title_snip}' Missing locator target EPUB; cannot derive cross-client locator"
-                        )
-                        continue
-                    if not self._get_local_epub(epub):
-                        logger.warning(
-                            f"⚠️ '{abs_id}' '{title_snip}' Could not locate or download locator target EPUB '{sanitize_log_data(epub)}'"
-                        )
-                        continue
-                    txt = leader_client.get_text_from_current_state(book, leader_state)
-                    if not txt:
-                        logger.warning(f"⚠️ '{abs_id}' '{title_snip}' Could not get text from leader '{leader}'")
-                        continue
+                    if audio_only_mode:
+                        locator = LocatorResult(percentage=leader_pct)
+                        locator_source = "audio_only_percent"
+                    else:
+                        if not epub:
+                            logger.warning(
+                                f"⚠️ '{abs_id}' '{title_snip}' Missing locator target EPUB; cannot derive cross-client locator"
+                            )
+                            continue
+                        if not self._get_local_epub(epub):
+                            logger.warning(
+                                f"⚠️ '{abs_id}' '{title_snip}' Could not locate or download locator target EPUB '{sanitize_log_data(epub)}'"
+                            )
+                            continue
+                        txt = leader_client.get_text_from_current_state(book, leader_state)
+                        if not txt:
+                            logger.warning(f"⚠️ '{abs_id}' '{title_snip}' Could not get text from leader '{leader}'")
+                            continue
 
-                    locator = leader_client.get_locator_from_text(txt, epub, leader_pct)
-                    if locator:
-                        locator_source = "fuzzy_text"
-                    if not locator:
-                        if getattr(self.ebook_parser, 'useXpathSegmentFallback', False):
-                            fallback_txt = leader_client.get_fallback_text(book, leader_state)
-                            if fallback_txt and fallback_txt != txt:
-                                logger.info(f"🔄 '{abs_id}' '{title_snip}' Primary text match failed. Trying previous segment fallback...")
-                                locator = leader_client.get_locator_from_text(fallback_txt, epub, leader_pct)
-                                if locator:
-                                    logger.info(f"✅ '{abs_id}' '{title_snip}' Fallback successful!")
-                                    locator_source = "fuzzy_text_previous_segment"
+                        locator = leader_client.get_locator_from_text(txt, epub, leader_pct)
+                        if locator:
+                            locator_source = "fuzzy_text"
+                        if not locator:
+                            if getattr(self.ebook_parser, 'useXpathSegmentFallback', False):
+                                fallback_txt = leader_client.get_fallback_text(book, leader_state)
+                                if fallback_txt and fallback_txt != txt:
+                                    logger.info(f"🔄 '{abs_id}' '{title_snip}' Primary text match failed. Trying previous segment fallback...")
+                                    locator = leader_client.get_locator_from_text(fallback_txt, epub, leader_pct)
+                                    if locator:
+                                        logger.info(f"✅ '{abs_id}' '{title_snip}' Fallback successful!")
+                                        locator_source = "fuzzy_text_previous_segment"
 
                 if not locator:
                     logger.warning(f"⚠️ '{abs_id}' '{title_snip}' Could not resolve locator from text for leader '{leader}', falling back to percentage of leader")
@@ -3663,8 +3689,13 @@ class SyncManager:
 
                 # [CHANGED LOGIC] Handle book status update based on alignment presence and user setting
                 smart_reset = os.getenv('REPROCESS_ON_CLEAR_IF_NO_ALIGNMENT', 'true').lower() == 'true'
-                
-                if smart_reset:
+
+                if getattr(book, 'sync_mode', 'audiobook') == 'audiobook_only':
+                    # Audio-only mappings never need alignment or EPUB recovery.
+                    book.status = 'active'
+                    self.database_service.save_book(book)
+                    logger.info("   ✅ Audio-only mapping remains active after progress reset")
+                elif smart_reset:
                     # Check if we already have a valid alignment map in the DB
                     has_alignment = False
                     if self.alignment_service:
