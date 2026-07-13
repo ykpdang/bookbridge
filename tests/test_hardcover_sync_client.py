@@ -476,6 +476,34 @@ class TestHardcoverSyncClient(unittest.TestCase):
         text = self.hardcover_sync_client.get_text_from_current_state(self.test_book, None)
         self.assertIsNone(text)
 
+    def test_get_user_book_returns_none_logs_warning(self):
+        """When get_user_book() returns None (e.g. upstream HTTP 500),
+        update_progress must log a warning and return SyncResult(None, False).
+        """
+        # Pre-setup matched book
+        hardcover_details = HardcoverDetails(
+            abs_id='test-hardcover-book',
+            hardcover_book_id='none-book-123',
+            hardcover_edition_id='none-edition-456',
+            hardcover_pages=200,
+            matched_by='test'
+        )
+        self.database_service.save_hardcover_details(hardcover_details)
+
+        # Simulate upstream failure — get_user_book returns None
+        self.mock_hardcover_client.get_user_book.return_value = None
+
+        update_request = UpdateProgressRequest(
+            locator_result=LocatorResult(percentage=0.5)
+        )
+
+        with self.assertLogs('src.sync_clients.hardcover_sync_client', level='WARNING') as logs:
+            result = self.hardcover_sync_client.update_progress(self.test_book, update_request)
+
+        self.assertFalse(result.success)
+        self.assertIsNone(result.location)
+        self.assertTrue(any('get_user_book returned None' in entry for entry in logs.output))
+
 
 
 if __name__ == '__main__':

@@ -459,6 +459,10 @@ class HardcoverSyncClient(SyncClient):
         # Get user book from Hardcover
         ub = self.hardcover_client.get_user_book(hardcover_details.hardcover_book_id)
         if not ub:
+            logger.warning(
+                f"⚠️ Hardcover: get_user_book returned None for book_id={hardcover_details.hardcover_book_id} "
+                f"('{sanitize_log_data(book.abs_title)}') — skipping progress update"
+            )
             return SyncResult(None, False)
 
         # Check if this is an audiobook edition

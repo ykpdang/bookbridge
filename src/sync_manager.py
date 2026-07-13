@@ -216,7 +216,7 @@ class SyncManager:
             return None
 
         current = getattr(book, "ebook_filename", None)
-        if current and str(current).startswith("storyteller_"):
+        if current and str(current).startswith("storyteller_") and self._get_local_epub(current):
             return current
 
         storyteller_uuid = getattr(book, "storyteller_uuid", None)
