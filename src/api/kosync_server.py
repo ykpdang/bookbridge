@@ -18,10 +18,13 @@ from typing import Optional
 
 from flask import Blueprint, jsonify, request, send_file, g
 
+from src.api.booklore_client import BookloreClient
+from src.api.hardcover_client import HardcoverClient
 from src.utils.cache_paths import safe_cache_path
 from src.utils.kosync_headers import hash_kosync_key
 from src.utils.time_utils import utcnow
 from src.utils.user_context import set_current_user_id, reset_current_user_id
+from src.utils.user_config import _ALLOW_GLOBAL_FALLBACK_KEY, resolve_setting
 from src.utils.string_utils import calculate_similarity, clean_book_title
 from src.services.llm_matching import judge_best_candidate
 from src.db.models import State
@@ -52,6 +55,12 @@ _manifest_cache: Optional[dict] = None
 _manifest_cache_lock = threading.Lock()
 _manifest_rebuild_event = threading.Event()
 _manifest_prebuilder_started = False
+_booklore_shelf_mapping_cache: dict = {}
+_booklore_shelf_mapping_cache_lock = threading.Lock()
+_BOOKLORE_SHELF_MAPPING_TTL_SECONDS = 86400
+_hardcover_list_mapping_cache: dict = {}
+_hardcover_list_mapping_cache_lock = threading.Lock()
+_HARDCOVER_LIST_MAPPING_TTL_SECONDS = 86400
 
 # KoSync PUT debounce state
 _kosync_debounce: dict = {}  # {(abs_id, user_id): {'last_event': float, 'title': str, 'synced': bool, 'user_id', 'abs_id'}}
@@ -71,6 +80,9 @@ _kosync_recent_external_puts_lock = threading.Lock()
 _KOREADER_STATS_MAX_BOOKS = 1000
 _KOREADER_STATS_MAX_PAGE_STATS = 10000
 _KOREADER_STATS_MERGE_LIMIT = 10000
+_BRIDGESYNC_LOG_MAX_LINES = 200
+_BRIDGESYNC_LOG_MAX_LINE_CHARS = 1000
+_BRIDGESYNC_LOG_MAX_PAYLOAD_BYTES = 64 * 1024
 
 
 def _recent_external_put_ttl_seconds() -> int:
@@ -135,38 +147,6 @@ def signal_manifest_rebuild() -> None:
     _manifest_rebuild_event.set()
 
 
-def _build_shelf_mapping_for_cache() -> Optional[dict]:
-    """Fetch the Booklore shelf mapping — same logic as the manifest endpoint."""
-    collections_mode = os.environ.get("DEVICE_SYNC_COLLECTIONS", "off").lower()
-    if collections_mode == "off" or not _container:
-        return None
-    try:
-        bl = _container.booklore_client()
-        if not bl.is_configured():
-            return None
-        excluded_raw = os.environ.get("DEVICE_SYNC_EXCLUDED_SHELVES", "")
-        excludes = [s.strip() for s in excluded_raw.split(",") if s.strip()]
-        sync_shelf = os.environ.get("BOOKLORE_SHELF_NAME", "").strip()
-        if sync_shelf and sync_shelf not in excludes:
-            excludes.append(sync_shelf)
-        service = _get_koreader_device_sync_service()
-        if not service:
-            return None
-        target_book_ids = [
-            str(book.ebook_source_id)
-            for book in service.database_service.get_books_by_status("active")
-            if getattr(book, "ebook_source_id", None)
-        ]
-        return bl.get_book_shelf_mapping(
-            mode=collections_mode,
-            excludes=excludes,
-            target_book_ids=target_book_ids,
-        )
-    except Exception as e:
-        logger.warning("Manifest prebuilder: shelf mapping failed: %s", e)
-        return None
-
-
 def _compute_manifest_revision(items) -> str:
     """Deterministic revision over a manifest's book items.
 
@@ -179,11 +159,247 @@ def _compute_manifest_revision(items) -> str:
             "filename": item.get("filename"),
             "content_hash": item.get("content_hash"),
             "size": item.get("size"),
+            "shelves": item.get("shelves") or [],
         }
         for item in sorted(items, key=lambda value: str(value.get("abs_id")))
     ]
     payload = json.dumps(digest_items, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _device_collection_source(credentials: Optional[dict] = None) -> str:
+    source = str(resolve_setting(credentials, "DEVICE_SYNC_COLLECTION_SOURCE", "off") or "off").strip().lower()
+    if source not in {"off", "grimmory", "hardcover"}:
+        source = "off"
+    mode = str(resolve_setting(credentials, "DEVICE_SYNC_COLLECTIONS", "off") or "off").strip().lower()
+    if source == "grimmory" and mode == "off":
+        return "off"
+    return source
+
+
+def _split_csv(value: str) -> list[str]:
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def _manifest_fallback_allowed(user_id) -> bool:
+    """Whether manifest collection resolution may fall back to the global config.
+
+    Mirrors the app-wide policy (see _bind_request_user_context): admins inherit
+    the shared os.environ settings/credentials, regular users are isolated to
+    their own so one reader's shelves/lists never bleed into another's manifest."""
+    try:
+        user = _database_service.get_user(user_id) if _database_service else None
+    except Exception as e:
+        logger.warning("Manifest fallback-policy lookup failed (user_id=%s): %s", user_id, e)
+        return False
+    return bool(user and getattr(user, "is_admin", False))
+
+
+def _booklore_credentials_for_manifest(user_id):
+    if user_id is None or _database_service is None:
+        return None
+    try:
+        credentials = _database_service.get_user_credentials(user_id)
+    except Exception as e:
+        logger.warning("Manifest Grimmory shelf credentials lookup failed (user_id=%s): %s", user_id, e)
+        return {_ALLOW_GLOBAL_FALLBACK_KEY: False}
+    credentials[_ALLOW_GLOBAL_FALLBACK_KEY] = _manifest_fallback_allowed(user_id)
+    return credentials
+
+
+def _booklore_shelf_cache_key(user_id, credentials: Optional[dict]) -> tuple:
+    server = resolve_setting(credentials, "BOOKLORE_SERVER", "") or ""
+    username = resolve_setting(credentials, "BOOKLORE_USER", "") or ""
+    password = resolve_setting(credentials, "BOOKLORE_PASSWORD", "") or ""
+    library_id = resolve_setting(credentials, "BOOKLORE_LIBRARY_ID", "") or ""
+    secret_hash = hashlib.sha256(f"{username}\0{password}".encode("utf-8")).hexdigest()[:16]
+    mode = str(resolve_setting(credentials, "DEVICE_SYNC_COLLECTIONS", "off") or "off").strip().lower()
+    excludes = tuple(sorted(_split_csv(str(resolve_setting(credentials, "DEVICE_SYNC_EXCLUDED_SHELVES", "") or ""))))
+    sync_shelf = resolve_setting(credentials, "BOOKLORE_SHELF_NAME", "") or ""
+    global_sync_shelf = os.environ.get("BOOKLORE_SHELF_NAME", "") or ""
+    return (user_id, server, library_id, secret_hash, mode, excludes, sync_shelf, global_sync_shelf)
+
+
+def _is_booklore_manifest_book(book) -> bool:
+    source = str(getattr(book, "ebook_source", "") or "").strip().lower()
+    return source in {"booklore", "grimmory"} and bool(getattr(book, "ebook_source_id", None))
+
+
+def _build_booklore_shelf_mapping(user_id) -> Optional[dict[str, list[str]]]:
+    """Return Grimmory book id -> shelf names for the manifest user, cached daily."""
+    credentials = _booklore_credentials_for_manifest(user_id)
+    mode = str(resolve_setting(credentials, "DEVICE_SYNC_COLLECTIONS", "off") or "off").strip().lower()
+    if mode == "off" or _database_service is None:
+        return None
+
+    cache_key = _booklore_shelf_cache_key(user_id, credentials)
+    now = time.time()
+    with _booklore_shelf_mapping_cache_lock:
+        cached = _booklore_shelf_mapping_cache.get(cache_key)
+        if cached and (now - cached["time"]) < _BOOKLORE_SHELF_MAPPING_TTL_SECONDS:
+            return cached["mapping"]
+
+    try:
+        client = BookloreClient(database_service=_database_service, credentials=credentials)
+        if not client.is_configured():
+            return None
+        excludes = _split_csv(str(resolve_setting(credentials, "DEVICE_SYNC_EXCLUDED_SHELVES", "") or ""))
+        sync_shelves = [
+            str(resolve_setting(credentials, "BOOKLORE_SHELF_NAME", "") or "").strip(),
+            str(os.environ.get("BOOKLORE_SHELF_NAME", "") or "").strip(),
+        ]
+        for sync_shelf in sync_shelves:
+            if sync_shelf and sync_shelf not in excludes:
+                excludes.append(sync_shelf)
+        books = _database_service.get_books_by_status("active", user_id=user_id) if user_id else _database_service.get_books_by_status("active")
+        target_book_ids = [
+            str(book.ebook_source_id)
+            for book in books
+            if _is_booklore_manifest_book(book)
+        ]
+        mapping = client.get_book_shelf_mapping(
+            mode=mode,
+            excludes=excludes,
+            target_book_ids=target_book_ids,
+        )
+        with _booklore_shelf_mapping_cache_lock:
+            _booklore_shelf_mapping_cache[cache_key] = {"time": now, "mapping": mapping}
+        return mapping
+    except Exception as e:
+        logger.warning("Manifest Grimmory shelf mapping failed (user_id=%s): %s", user_id, e)
+        with _booklore_shelf_mapping_cache_lock:
+            cached = _booklore_shelf_mapping_cache.get(cache_key)
+        return cached["mapping"] if cached else None
+
+
+def _hardcover_list_cache_key(user_id, credentials: Optional[dict]) -> tuple:
+    token = ""
+    if credentials:
+        token = str(credentials.get("HARDCOVER_TOKEN") or "")
+    elif user_id is None:
+        token = os.environ.get("HARDCOVER_TOKEN", "")
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16] if token else ""
+    mode = str(resolve_setting(credentials, "DEVICE_SYNC_HARDCOVER_LISTS", "all") or "all").strip().lower()
+    names = tuple(sorted(_split_csv(str(resolve_setting(credentials, "DEVICE_SYNC_HARDCOVER_LIST_NAMES", "") or ""))))
+    return (user_id, token_hash, mode, names)
+
+
+def _hardcover_credentials_for_manifest(user_id):
+    if user_id is None or _database_service is None:
+        return None
+    try:
+        credentials = _database_service.get_user_credentials(user_id)
+    except Exception as e:
+        logger.warning("Manifest Hardcover list credentials lookup failed (user_id=%s): %s", user_id, e)
+        return {_ALLOW_GLOBAL_FALLBACK_KEY: False}
+    credentials[_ALLOW_GLOBAL_FALLBACK_KEY] = _manifest_fallback_allowed(user_id)
+    return credentials
+
+
+def _build_hardcover_list_mapping(user_id) -> Optional[dict[str, list[str]]]:
+    """Return Hardcover book id -> list names for the manifest user, cached daily."""
+    credentials = _hardcover_credentials_for_manifest(user_id)
+    cache_key = _hardcover_list_cache_key(user_id, credentials)
+    now = time.time()
+    with _hardcover_list_mapping_cache_lock:
+        cached = _hardcover_list_mapping_cache.get(cache_key)
+        if cached and (now - cached["time"]) < _HARDCOVER_LIST_MAPPING_TTL_SECONDS:
+            return cached["mapping"]
+
+    try:
+        client = HardcoverClient(credentials=credentials)
+        if not client.is_configured():
+            return None
+        lists = client.get_user_lists()
+        mode = str(resolve_setting(credentials, "DEVICE_SYNC_HARDCOVER_LISTS", "all") or "all").strip().lower()
+        if mode == "selected":
+            selected = {
+                name.lower()
+                for name in _split_csv(str(resolve_setting(credentials, "DEVICE_SYNC_HARDCOVER_LIST_NAMES", "") or ""))
+            }
+            lists = [entry for entry in lists if str(entry.get("name") or "").strip().lower() in selected]
+        if not lists:
+            mapping = {}
+        else:
+            list_names = {
+                int(entry["id"]): str(entry.get("name") or "").strip()
+                for entry in lists
+                if entry.get("id") and str(entry.get("name") or "").strip()
+            }
+            memberships = client.get_list_book_memberships(list(list_names.keys()))
+            mapping = {}
+            for row in memberships:
+                book_id = str(row.get("book_id") or "").strip()
+                try:
+                    list_id = int(row.get("list_id"))
+                except (TypeError, ValueError):
+                    continue
+                if not book_id or list_id not in list_names:
+                    continue
+                mapping.setdefault(book_id, [])
+                list_name = list_names[list_id]
+                if list_name not in mapping[book_id]:
+                    mapping[book_id].append(list_name)
+        with _hardcover_list_mapping_cache_lock:
+            _hardcover_list_mapping_cache[cache_key] = {"time": now, "mapping": mapping}
+        return mapping
+    except Exception as e:
+        logger.warning("Manifest Hardcover list mapping failed (user_id=%s): %s", user_id, e)
+        with _hardcover_list_mapping_cache_lock:
+            cached = _hardcover_list_mapping_cache.get(cache_key)
+        return cached["mapping"] if cached else None
+
+
+def _apply_hardcover_list_collections(manifest: dict, user_id) -> None:
+    mapping = _build_hardcover_list_mapping(user_id)
+    if mapping is None or _database_service is None:
+        return
+    try:
+        details_by_abs = {
+            str(getattr(details, "abs_id", "") or ""): details
+            for details in _database_service.get_all_hardcover_details()
+        }
+    except Exception as e:
+        logger.warning("Manifest Hardcover details lookup failed (user_id=%s): %s", user_id, e)
+        return
+    for item in manifest.get("books") or []:
+        abs_id = str(item.get("abs_id") or "")
+        if not abs_id:
+            continue
+        details = details_by_abs.get(abs_id)
+        hardcover_book_id = str(getattr(details, "hardcover_book_id", "") or "").strip()
+        if not hardcover_book_id:
+            item.pop("shelves", None)
+            continue
+        item["shelves"] = mapping.get(hardcover_book_id) or ["Unsorted"]
+
+
+def _apply_booklore_shelf_collections(manifest: dict, user_id) -> None:
+    mapping = _build_booklore_shelf_mapping(user_id)
+    if mapping is None or _database_service is None:
+        return
+    try:
+        books = _database_service.get_books_by_status("active", user_id=user_id) if user_id else _database_service.get_books_by_status("active")
+    except Exception as e:
+        logger.warning("Manifest Grimmory shelf book lookup failed (user_id=%s): %s", user_id, e)
+        return
+    books_by_abs = {str(book.abs_id): book for book in books}
+    for item in manifest.get("books") or []:
+        book = books_by_abs.get(str(item.get("abs_id") or ""))
+        if not book or not _is_booklore_manifest_book(book):
+            item.pop("shelves", None)
+            continue
+        source_id = str(getattr(book, "ebook_source_id", "") or "").strip()
+        item["shelves"] = mapping.get(source_id) or ["Unsorted"]
+
+
+def _apply_user_collection_source(manifest: dict, user_id) -> None:
+    credentials = _booklore_credentials_for_manifest(user_id)
+    source = _device_collection_source(credentials)
+    if source == "grimmory":
+        _apply_booklore_shelf_collections(manifest, user_id)
+    elif source == "hardcover":
+        _apply_hardcover_list_collections(manifest, user_id)
 
 
 def _scope_manifest_to_user(manifest, user_id):
@@ -194,8 +410,14 @@ def _scope_manifest_to_user(manifest, user_id):
     by ownership and recompute the revision over the trimmed set. `user_id` None
     (single-user install / no accounts) serves the manifest unscoped; when the
     user owns the whole manifest the original (revision included) is returned."""
-    if not manifest or user_id is None or _database_service is None:
+    if not manifest or _database_service is None:
         return manifest
+    if user_id is None:
+        scoped = dict(manifest)
+        scoped["books"] = [dict(item) for item in manifest.get("books") or []]
+        _apply_user_collection_source(scoped, user_id)
+        scoped["revision"] = _compute_manifest_revision(scoped["books"])
+        return scoped
     try:
         owned_ids = {
             str(book.abs_id)
@@ -205,12 +427,14 @@ def _scope_manifest_to_user(manifest, user_id):
         logger.warning("Manifest user-scoping failed (user_id=%s): %s", user_id, e)
         return manifest
     all_books = manifest.get("books") or []
-    books = [item for item in all_books if str(item.get("abs_id")) in owned_ids]
-    if len(books) == len(all_books):
+    books = [dict(item) for item in all_books if str(item.get("abs_id")) in owned_ids]
+    credentials = _booklore_credentials_for_manifest(user_id)
+    if len(books) == len(all_books) and _device_collection_source(credentials) == "off":
         return manifest
     scoped = dict(manifest)
     scoped["books"] = books
-    scoped["revision"] = _compute_manifest_revision(books)
+    _apply_user_collection_source(scoped, user_id)
+    scoped["revision"] = _compute_manifest_revision(scoped["books"])
     return scoped
 
 
@@ -226,8 +450,7 @@ def _manifest_prebuilder_loop() -> None:
         if not service:
             continue
         try:
-            shelf_mapping = _build_shelf_mapping_for_cache()
-            manifest = service.build_manifest(shelf_mapping=shelf_mapping)
+            manifest = service.build_manifest()
             with _manifest_cache_lock:
                 _manifest_cache = manifest
             logger.debug(
@@ -1499,8 +1722,7 @@ def koreader_device_sync_manifest():
     if not service:
         return jsonify({"error": "Device sync service unavailable"}), 503
 
-    shelf_mapping = _build_shelf_mapping_for_cache()
-    manifest = service.build_manifest(shelf_mapping=shelf_mapping)
+    manifest = service.build_manifest()
     with _manifest_cache_lock:
         _manifest_cache = manifest
 
@@ -1579,22 +1801,45 @@ def koreader_upload_statistics():
         return jsonify({"error": "Database service unavailable"}), 503
     user_id = getattr(g, "kosync_user_id", None)
 
-    try:
-        accepted_books = _database_service.upsert_koreader_book_stats(
+    def _persist():
+        accepted = _database_service.upsert_koreader_book_stats(
             device=device,
             device_id=device_id,
             books=books,
             user_id=user_id,
         )
-        page_insert_result = _database_service.bulk_insert_koreader_page_stats(
+        result = _database_service.bulk_insert_koreader_page_stats(
             device=device,
             device_id=device_id,
             page_stats=page_stats,
             user_id=user_id,
         )
-    except Exception as e:
-        logger.error("KOReader statistics upload failed for device '%s': %s", device_key, e)
-        return jsonify({"error": "Failed to persist statistics upload"}), 500
+        return accepted, result
+
+    # A long sync cycle can hold the SQLite writer past the busy timeout, so a
+    # single "database is locked" shouldn't surface as a 500. Retry with
+    # exponential backoff before giving up (see issue #315).
+    max_attempts = 3
+
+    accepted_books = None
+    page_insert_result = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            accepted_books, page_insert_result = _persist()
+            break
+        except Exception as e:
+            is_locked = "database is locked" in str(e).lower()
+            if is_locked and attempt < max_attempts:
+                backoff = 0.5 * (2 ** (attempt - 1))
+                logger.warning(
+                    "KOReader statistics write for device '%s' hit a locked database "
+                    "(attempt %d/%d); retrying in %.1fs",
+                    device_key, attempt, max_attempts, backoff,
+                )
+                time.sleep(backoff)
+                continue
+            logger.error("KOReader statistics upload failed for device '%s': %s", device_key, e)
+            return jsonify({"error": "Failed to persist statistics upload"}), 500
 
     return jsonify({
         "accepted_books": int(accepted_books or 0),
@@ -1675,8 +1920,9 @@ def koreader_exchange_annotations():
     Body mirrors the exchange convention the BookOrbit koplugin established:
     ``{device, device_id, books: [{hash, keys: [{k, dt}], keysComplete,
     changes: [...]}]}``. The response returns this device's pending delta per
-    book: ``{books: [{hash, toApply: {add, edit, delete}}]}``. The device
-    applies it and reports back via the exchange-ack endpoint.
+    book: ``{books: [{hash, toApply: {add, edit, delete}, more}]}``. ``more``
+    tells paged clients to acknowledge this batch and immediately pull the
+    remainder. The device reports applied changes via the exchange-ack endpoint.
     """
     if not _annotation_sync_enabled():
         return jsonify({"enabled": False, "books": []}), 200
@@ -1762,8 +2008,26 @@ def kosync_upload_sessions():
 
     accepted = 0
     rejected = 0
+    results = []
 
-    for session in data:
+    def record_result(index: int, session: dict, was_accepted: bool,
+                      reason: str = None) -> None:
+        """Record one ordered acknowledgement for the plugin's local queue."""
+        result = {"index": index, "accepted": was_accepted}
+        session_id = session.get('session_id') if isinstance(session, dict) else None
+        if session_id:
+            result["session_id"] = session_id
+        if reason:
+            result["reason"] = reason
+        results.append(result)
+
+    for index, session in enumerate(data, start=1):
+        if not isinstance(session, dict):
+            logger.warning("Session upload: invalid session at index %d", index)
+            rejected += 1
+            record_result(index, {}, False, "invalid_session")
+            continue
+
         abs_id = session.get('abs_id')
         doc_hash = session.get('document_hash')
         book = None
@@ -1785,6 +2049,7 @@ def kosync_upload_sessions():
         if not book:
             logger.warning(f"Session upload: book not found for abs_id='{abs_id}' hash='{doc_hash}'")
             rejected += 1
+            record_result(index, session, False, "book_not_found")
             continue
 
         session_type = session.get('session_type', 'EBOOK')
@@ -1799,6 +2064,35 @@ def kosync_upload_sessions():
             start_progress = float(start_progress) / 100.0
         if end_progress is not None:
             end_progress = float(end_progress) / 100.0
+
+        # A plugin keeps its local queue until SQLite acknowledges the remote
+        # upload. If that acknowledgement fails, the same payload is retried.
+        # Treat an identical, already-recorded plugin session as accepted so the
+        # retry is idempotent and does not inflate reading statistics.
+        already_recorded = False
+        if _database_service:
+            try:
+                already_recorded = _database_service.has_matching_reading_session(
+                    abs_id=abs_id,
+                    session_type=session_type,
+                    start_time=float(start_time),
+                    end_time=float(end_time),
+                    duration_seconds=int(duration_seconds),
+                    start_progress=start_progress,
+                    end_progress=end_progress,
+                    leader_client="BridgeSync_Plugin",
+                ) is True
+            except Exception as e:
+                logger.warning(
+                    "Session upload: duplicate check failed for '%s': %s",
+                    abs_id,
+                    e,
+                )
+        if already_recorded:
+            logger.info("Session upload: accepted duplicate retry for '%s'", abs_id)
+            accepted += 1
+            record_result(index, session, True)
+            continue
 
         try:
             _database_service.record_reading_session(
@@ -1815,7 +2109,10 @@ def kosync_upload_sessions():
         except Exception as e:
             logger.warning(f"Session upload: failed to record session for '{abs_id}': {e}")
             rejected += 1
+            record_result(index, session, False, "record_failed")
             continue
+
+        record_result(index, session, True)
 
         if _database_service:
             try:
@@ -1934,7 +2231,74 @@ def kosync_upload_sessions():
         )
 
     logger.info(f"Session upload: accepted={accepted}, rejected={rejected}")
-    return jsonify({"accepted": accepted, "rejected": rejected}), 200
+    return jsonify({"accepted": accepted, "rejected": rejected, "results": results}), 200
+
+
+@kosync_sync_bp.route('/device-sync/logs', methods=['POST'])
+@kosync_sync_bp.route('/koreader/device-sync/logs', methods=['POST'])
+@kosync_auth_required
+def kosync_upload_device_logs():
+    """Relay a bounded BridgeSync log tail into the bridge's Docker logs."""
+    if request.content_length and request.content_length > _BRIDGESYNC_LOG_MAX_PAYLOAD_BYTES:
+        return jsonify({"error": "Log payload is too large"}), 413
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Expected JSON object"}), 400
+
+    raw_lines = data.get("lines", [])
+    if not isinstance(raw_lines, list):
+        return jsonify({"error": "lines must be an array"}), 400
+
+    def clean_field(value, limit: int) -> str:
+        text = str(value or "").replace("\r", " ").replace("\n", " ")
+        return " ".join(text.split())[:limit]
+
+    operation = clean_field(data.get("operation"), 64) or "unknown"
+    status = clean_field(data.get("status"), 16).lower()
+    if status not in {"success", "partial", "failure"}:
+        status = "unknown"
+    device = clean_field(data.get("device"), 128) or "KOReader"
+    device_id = clean_field(data.get("device_id"), 128) or "unknown"
+    plugin_version = clean_field(data.get("plugin_version"), 32) or "unknown"
+    user_id = getattr(g, "kosync_user_id", None)
+
+    accepted_lines = []
+    for raw_line in raw_lines[:_BRIDGESYNC_LOG_MAX_LINES]:
+        if not isinstance(raw_line, (str, int, float, bool)):
+            continue
+        line = clean_field(raw_line, _BRIDGESYNC_LOG_MAX_LINE_CHARS)
+        if line:
+            accepted_lines.append(line)
+
+    report_logger = (
+        logger.error if status == "failure"
+        else logger.warning if status == "partial"
+        else logger.info
+    )
+    report_logger(
+        "BridgeSync device report: user_id=%s device=%s device_id=%s plugin=%s "
+        "operation=%s status=%s lines=%d",
+        user_id,
+        device,
+        device_id,
+        plugin_version,
+        operation,
+        status,
+        len(accepted_lines),
+    )
+
+    prefix = f"BridgeSync device log [{device}/{device_id}] [{operation}]"
+    for line in accepted_lines:
+        lowered = line.lower()
+        if "[error]" in lowered or "[err]" in lowered:
+            logger.error("%s %s", prefix, line)
+        elif "[warn]" in lowered or "[warning]" in lowered:
+            logger.warning("%s %s", prefix, line)
+        else:
+            logger.info("%s %s", prefix, line)
+
+    return jsonify({"accepted": len(accepted_lines)}), 200
 
 
 # ── Plugin self-update helpers ──
@@ -2374,7 +2738,24 @@ def _respond_from_book_states(doc_id, book):
         # book was just advanced from ABS/Storyteller/etc.) must be pulled forward —
         # returning its stale spot here drags the reader back and starts a GET/PUT
         # tug-of-war (e.g. a 40% audiobook position repeatedly snapping back to 9%).
-        if float(best_doc.percentage) > synced_pct + 0.0001:
+        # An ahead sibling still wins. An equal sibling is only a locator fallback
+        # when the synced State has no viable locator of its own; otherwise an old
+        # sibling XPath from another EPUB build could replace the authoritative
+        # synced locator at the same percentage.
+        sibling_pct = float(best_doc.percentage)
+        synced_has_locator = bool(
+            kosync_state
+            and (
+                str(getattr(kosync_state, "xpath", "") or "").strip()
+                or str(getattr(kosync_state, "cfi", "") or "").strip()
+            )
+        )
+        sibling_is_ahead = sibling_pct > synced_pct + 0.0001
+        sibling_is_equal_fallback = (
+            abs(sibling_pct - synced_pct) <= 0.0001
+            and not synced_has_locator
+        )
+        if sibling_is_ahead or sibling_is_equal_fallback:
             logger.info(f"KOSync: Resolved {doc_id} to '{book.abs_title}' via sibling hash {best_doc.document_hash} ({float(best_doc.percentage):.2%})")
             poison_pill = _suppress_empty_progress_response(doc_id, float(best_doc.percentage), best_doc.progress)
             if poison_pill is not None:
@@ -2557,8 +2938,11 @@ def _suppress_empty_progress_response(doc_id: str, percentage: float, progress: 
 
 @kosync_admin_bp.route('/api/kosync-documents', methods=['GET'])
 def api_get_kosync_documents():
-    """Get all KOSync documents with their link status."""
-    docs = _database_service.get_all_kosync_documents()
+    """Get all KOSync documents with their link status.
+    Optional query param ?user_id= to scope results to a specific user
+    (only reachable by admins via _ADMIN_ONLY_ENDPOINTS; when omitted returns all)."""
+    user_id = request.args.get('user_id', type=int)
+    docs = _database_service.get_all_kosync_documents(user_id=user_id)
     result = []
     for doc in docs:
         linked_book = None

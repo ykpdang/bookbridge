@@ -37,6 +37,8 @@ from .models import (
     User,
     UserCredential,
     UserBook,
+    UserBookFusionLink,
+    UserBookOrbitLink,
     Base,
 )
 from src.utils.time_utils import utcnow
@@ -436,18 +438,6 @@ class DatabaseService:
                 session.expunge(book)
             return book
 
-    def update_book_kosync_doc_id(self, abs_id: str, kosync_doc_id: str) -> bool:
-        """Update only a book's kosync_doc_id column.
-
-        Used to reconcile the stored hash with the hash of the ebook actually served
-        to KOReader, without rewriting the rest of the book row.
-        """
-        with self.get_session() as session:
-            updated = session.query(Book).filter(Book.abs_id == abs_id).update(
-                {Book.kosync_doc_id: kosync_doc_id}, synchronize_session=False
-            )
-            return bool(updated)
-
     def set_book_status(self, abs_id: str, status: str) -> bool:
         """Set a book's status column (e.g. 'pending' to queue re-processing)."""
         with self.get_session() as session:
@@ -532,6 +522,11 @@ class DatabaseService:
     def get_all_books(self, user_id: int = None) -> List[Book]:
         """Get all books as model objects. When user_id is given, scope to the
         books that user has matched/claimed (shared catalog, per-user links)."""
+        if user_id is None:
+            logger.debug(
+                "get_all_books called with user_id=None — returning unfiltered "
+                "bulk data. Future callers should pass an explicit user_id."
+            )
         with self.get_session() as session:
             query = session.query(Book)
             if user_id is not None:
@@ -564,7 +559,7 @@ class DatabaseService:
                            'audio_provider_file_id', 'ebook_filename', 'ebook_source',
                            'ebook_source_id', 'original_ebook_filename', 'kosync_doc_id',
                            'transcript_file', 'status', 'duration', 'sync_mode',
-                           'transcript_source', 'storyteller_uuid', 'abs_ebook_item_id',
+                           'transcript_source', 'storyteller_uuid', 'bookfusion_id', 'abs_ebook_item_id',
                            'series_name', 'series_sequence']:
                     if hasattr(book, attr):
                         setattr(existing, attr, getattr(book, attr))
@@ -591,6 +586,32 @@ class DatabaseService:
                 session.refresh(book)
                 session.expunge(book)
                 return book
+
+    def update_book_if_exists(self, book: Book) -> Optional[Book]:
+        """Update a book without ever inserting a missing/deleted mapping."""
+        with self.get_session() as session:
+            attrs = [
+                'abs_title', 'audio_source', 'audio_source_id', 'audio_title',
+                'audio_cover_url', 'audio_duration', 'audio_provider_book_id',
+                'audio_provider_file_id', 'ebook_filename', 'ebook_source',
+                'ebook_source_id', 'original_ebook_filename', 'kosync_doc_id',
+                'transcript_file', 'status', 'duration', 'sync_mode',
+                'transcript_source', 'storyteller_uuid', 'bookfusion_id',
+                'abs_ebook_item_id', 'series_name', 'series_sequence',
+            ]
+            values = {attr: getattr(book, attr) for attr in attrs if hasattr(book, attr)}
+            updated = session.query(Book).filter(Book.abs_id == book.abs_id).update(
+                values,
+                synchronize_session=False,
+            )
+            if updated == 0:
+                return None
+            existing = session.query(Book).filter(Book.abs_id == book.abs_id).first()
+            if existing is None:
+                return None
+            session.refresh(existing)
+            session.expunge(existing)
+            return existing
 
     def migrate_book_data(self, old_abs_id: str, new_abs_id: str):
         """
@@ -635,12 +656,44 @@ class DatabaseService:
             session.query(KosyncDocument).filter(
                 KosyncDocument.linked_abs_id == abs_id
             ).update({KosyncDocument.linked_abs_id: None})
+
+            # SQLite foreign-key enforcement is not guaranteed on established
+            # installs, so remove membership rows explicitly instead of relying
+            # on their ON DELETE CASCADE declarations.
+            session.query(UserBookFusionLink).filter(
+                UserBookFusionLink.abs_id == abs_id
+            ).delete(synchronize_session=False)
+            session.query(UserBook).filter(
+                UserBook.abs_id == abs_id
+            ).delete(synchronize_session=False)
             
             book = session.query(Book).filter(Book.abs_id == abs_id).first()
             if book:
                 session.delete(book)  # Cascade will handle states and jobs
                 return True
             return False
+
+    def cleanup_orphaned_book_references(self) -> dict[str, int]:
+        """Remove legacy membership or hash links whose book no longer exists."""
+        from sqlalchemy import select
+
+        with self.get_session() as session:
+            valid_book_ids = select(Book.abs_id)
+            user_book_links = session.query(UserBook).filter(
+                ~UserBook.abs_id.in_(valid_book_ids)
+            ).delete(synchronize_session=False)
+            bookfusion_links = session.query(UserBookFusionLink).filter(
+                ~UserBookFusionLink.abs_id.in_(valid_book_ids)
+            ).delete(synchronize_session=False)
+            kosync_links = session.query(KosyncDocument).filter(
+                KosyncDocument.linked_abs_id.isnot(None),
+                ~KosyncDocument.linked_abs_id.in_(valid_book_ids),
+            ).update({KosyncDocument.linked_abs_id: None}, synchronize_session=False)
+            return {
+                "user_books": int(user_book_links or 0),
+                "user_bookfusion_links": int(bookfusion_links or 0),
+                "kosync_documents": int(kosync_links or 0),
+            }
 
     def get_books_by_status(self, status: str, user_id: int = None) -> List[Book]:
         """Get books by status. When user_id is given, scope to the books that
@@ -694,6 +747,235 @@ class DatabaseService:
             rows = session.query(UserBook.abs_id).filter(UserBook.user_id == user_id).all()
             return {r[0] for r in rows}
 
+    # ---- per-user BookFusion book links (shared catalog, user-specific remote ids) ----
+    def _serialize_bookfusion_link(self, link: UserBookFusionLink) -> dict:
+        return {
+            "user_id": link.user_id,
+            "abs_id": link.abs_id,
+            "bookfusion_id": link.bookfusion_id,
+            "title": link.title,
+            "author": link.author,
+            "created_at": link.created_at,
+            "updated_at": link.updated_at,
+        }
+
+    def get_user_bookfusion_link(self, user_id: int, abs_id: str) -> Optional[dict]:
+        """Return the user's BookFusion link for one BookBridge book."""
+        if user_id is None or not abs_id:
+            return None
+        with self.get_session() as session:
+            link = session.query(UserBookFusionLink).filter(
+                UserBookFusionLink.user_id == user_id,
+                UserBookFusionLink.abs_id == abs_id,
+            ).first()
+            return self._serialize_bookfusion_link(link) if link else None
+
+    def get_user_bookfusion_links_for_books(self, user_id: int, abs_ids: list[str]) -> dict:
+        """Return BookFusion links keyed by abs_id for a user's visible books."""
+        if user_id is None or not abs_ids:
+            return {}
+        with self.get_session() as session:
+            rows = session.query(UserBookFusionLink).filter(
+                UserBookFusionLink.user_id == user_id,
+                UserBookFusionLink.abs_id.in_(abs_ids),
+            ).all()
+            return {link.abs_id: self._serialize_bookfusion_link(link) for link in rows}
+
+    def set_user_bookfusion_link(
+        self,
+        user_id: int,
+        abs_id: str,
+        bookfusion_id: str,
+        title: str = None,
+        author: str = None,
+    ) -> Optional[dict]:
+        """Create or update a user's BookFusion link for a shared book."""
+        if user_id is None or not abs_id:
+            return None
+        bf_id = str(bookfusion_id or "").strip()
+        if not bf_id:
+            return None
+        with self.get_session() as session:
+            existing = session.query(UserBookFusionLink).filter(
+                UserBookFusionLink.user_id == user_id,
+                UserBookFusionLink.abs_id == abs_id,
+            ).first()
+            if existing is None:
+                existing = UserBookFusionLink(
+                    user_id=user_id,
+                    abs_id=abs_id,
+                    bookfusion_id=bf_id,
+                    title=title,
+                    author=author,
+                )
+                session.add(existing)
+            else:
+                existing.bookfusion_id = bf_id
+                existing.title = title
+                existing.author = author
+                existing.updated_at = utcnow()
+            session.flush()
+            return self._serialize_bookfusion_link(existing)
+
+    def delete_user_bookfusion_link(self, user_id: int, abs_id: str) -> bool:
+        """Delete a user's BookFusion link for one BookBridge book."""
+        if user_id is None or not abs_id:
+            return False
+        with self.get_session() as session:
+            deleted = session.query(UserBookFusionLink).filter(
+                UserBookFusionLink.user_id == user_id,
+                UserBookFusionLink.abs_id == abs_id,
+            ).delete(synchronize_session=False)
+            return bool(deleted)
+
+    def resolve_bookfusion_id(self, user_id: int, book) -> Optional[str]:
+        """Resolve the user's BookFusion id for a shared book."""
+        abs_id = getattr(book, "abs_id", None)
+        if user_id is not None and abs_id:
+            link = self.get_user_bookfusion_link(user_id, abs_id)
+            if link and link.get("bookfusion_id"):
+                return str(link["bookfusion_id"])
+        return None
+
+    # ---- per-user BookOrbit book links (ebook + audio per user) ----
+
+    def _serialize_bookorbit_link(self, link: 'UserBookOrbitLink') -> dict:
+        return {
+            "user_id": link.user_id,
+            "abs_id": link.abs_id,
+            "ebook_id": link.ebook_id,
+            "audio_id": link.audio_id,
+            "title": link.title,
+            "author": link.author,
+            "created_at": link.created_at,
+            "updated_at": link.updated_at,
+        }
+
+    def get_user_bookorbit_link(self, user_id: int, abs_id: str) -> Optional[dict]:
+        """Return the user's BookOrbit link for one BookBridge book."""
+        if user_id is None or not abs_id:
+            return None
+        with self.get_session() as session:
+            link = session.query(UserBookOrbitLink).filter(
+                UserBookOrbitLink.user_id == user_id,
+                UserBookOrbitLink.abs_id == abs_id,
+            ).first()
+            return self._serialize_bookorbit_link(link) if link else None
+
+    def get_user_bookorbit_links_for_books(self, user_id: int, abs_ids: list) -> dict:
+        """Return BookOrbit links keyed by abs_id for a user's visible books."""
+        if user_id is None or not abs_ids:
+            return {}
+        with self.get_session() as session:
+            rows = session.query(UserBookOrbitLink).filter(
+                UserBookOrbitLink.user_id == user_id,
+                UserBookOrbitLink.abs_id.in_(abs_ids),
+            ).all()
+            return {link.abs_id: self._serialize_bookorbit_link(link) for link in rows}
+
+    def set_user_bookorbit_link(
+        self,
+        user_id: int,
+        abs_id: str,
+        ebook_id: str = None,
+        audio_id: str = None,
+        title: str = None,
+        author: str = None,
+    ) -> Optional[dict]:
+        """Create or update a user's BookOrbit link for a shared book.
+
+        At least one of ``ebook_id`` or ``audio_id`` must be provided.
+        """
+        if user_id is None or not abs_id:
+            return None
+        e_id = str(ebook_id).strip() if ebook_id else None
+        a_id = str(audio_id).strip() if audio_id else None
+        if not e_id and not a_id:
+            return None
+        with self.get_session() as session:
+            existing = session.query(UserBookOrbitLink).filter(
+                UserBookOrbitLink.user_id == user_id,
+                UserBookOrbitLink.abs_id == abs_id,
+            ).first()
+            if existing is None:
+                existing = UserBookOrbitLink(
+                    user_id=user_id,
+                    abs_id=abs_id,
+                    ebook_id=e_id,
+                    audio_id=a_id,
+                    title=title,
+                    author=author,
+                )
+                session.add(existing)
+            else:
+                if e_id:
+                    existing.ebook_id = e_id
+                if a_id:
+                    existing.audio_id = a_id
+                if title:
+                    existing.title = title
+                if author:
+                    existing.author = author
+                existing.updated_at = utcnow()
+            session.flush()
+            return self._serialize_bookorbit_link(existing)
+
+    def delete_user_bookorbit_link(self, user_id: int, abs_id: str) -> bool:
+        """Delete a user's BookOrbit link for one BookBridge book."""
+        if user_id is None or not abs_id:
+            return False
+        with self.get_session() as session:
+            deleted = session.query(UserBookOrbitLink).filter(
+                UserBookOrbitLink.user_id == user_id,
+                UserBookOrbitLink.abs_id == abs_id,
+            ).delete(synchronize_session=False)
+            return bool(deleted)
+
+    def has_user_bookorbit_link(self, abs_id: str) -> bool:
+        """Return whether any user has a BookOrbit identity for a shared book."""
+        if not abs_id:
+            return False
+        with self.get_session() as session:
+            return session.query(UserBookOrbitLink.id).filter(
+                UserBookOrbitLink.abs_id == abs_id,
+            ).first() is not None
+
+    def resolve_bookorbit_ebook_id(self, user_id: int, book) -> Optional[str]:
+        """Resolve the user's BookOrbit ebook id for a shared book.
+
+        Prefers the active user's ``UserBookOrbitLink``; falls back to the
+        shared legacy ``Book.ebook_source_id`` for single-user / old rows.
+        """
+        abs_id = getattr(book, "abs_id", None)
+        if user_id is not None and abs_id:
+            link = self.get_user_bookorbit_link(user_id, abs_id)
+            if link is not None:
+                return str(link["ebook_id"]) if link.get("ebook_id") else None
+        # Fallback: legacy shared Book fields
+        if getattr(book, "ebook_source", None) == "BookOrbit":
+            val = getattr(book, "ebook_source_id", None)
+            if val:
+                return str(val)
+        return None
+
+    def resolve_bookorbit_audio_id(self, user_id: int, book) -> Optional[str]:
+        """Resolve the user's BookOrbit audio id for a shared book.
+
+        Prefers the active user's ``UserBookOrbitLink``; falls back to the
+        shared legacy ``Book.audio_source_id`` for single-user / old rows.
+        """
+        abs_id = getattr(book, "abs_id", None)
+        if user_id is not None and abs_id:
+            link = self.get_user_bookorbit_link(user_id, abs_id)
+            if link is not None:
+                return str(link["audio_id"]) if link.get("audio_id") else None
+        # Fallback: legacy shared Book fields
+        if getattr(book, "audio_source", None) == "BookOrbit":
+            val = getattr(book, "audio_provider_book_id", None) or getattr(book, "audio_source_id", None)
+            if val:
+                return str(val)
+        return None
+
     def get_book_user_ids(self, abs_id: str) -> List[int]:
         """All user ids that have claimed this book."""
         if not abs_id:
@@ -717,6 +999,11 @@ class DatabaseService:
         ctx_uid = get_current_user_id()
         if ctx_uid is not None:
             return ctx_uid
+        logger.warning(
+            "⚠️ _resolve_uid falling back to _default_user_id() — "
+            "neither explicit user_id nor ambient contextvar set. "
+            "Operations may be silently attributed to the default (first admin) user."
+        )
         return self._default_user_id()
 
     def _default_user_id(self):
@@ -759,6 +1046,11 @@ class DatabaseService:
     def get_all_states(self, user_id: int = None) -> List[State]:
         """Get all states. When user_id is given, scope to that user; otherwise
         return every row (dashboard, until per-user scoping in the UI)."""
+        if user_id is None:
+            logger.debug(
+                "get_all_states called with user_id=None — returning unfiltered "
+                "bulk data. Future callers should pass an explicit user_id."
+            )
         with self.get_session() as session:
             query = session.query(State)
             if user_id is not None:
@@ -1035,12 +1327,15 @@ class DatabaseService:
             session.expunge(merged)
             return merged
 
-    def get_all_kosync_documents(self) -> List[KosyncDocument]:
-        """Get all KOSync documents."""
+    def get_all_kosync_documents(self, user_id: int = None) -> List[KosyncDocument]:
+        """Get all KOSync documents. When user_id is given, scope to that user."""
         with self.get_session() as session:
-            docs = session.query(KosyncDocument).order_by(
+            query = session.query(KosyncDocument).order_by(
                 KosyncDocument.last_updated.desc()
-            ).all()
+            )
+            if user_id is not None:
+                query = query.filter(KosyncDocument.user_id == user_id)
+            docs = query.all()
             for doc in docs:
                 session.expunge(doc)
             return docs
@@ -1082,9 +1377,9 @@ class DatabaseService:
 
         Upsert variant of :meth:`link_kosync_document`: creates the row when it is
         missing (instead of returning False), and (re)links it when it points
-        elsewhere. Lets a manually-pinned or device-sync-reconciled hash become a
-        durable, resolvable sibling so a later primary-pointer change can never
-        strand it. Returns True if a row was created or its link changed.
+        elsewhere. Lets manually pinned, previous-primary, and device-served hashes
+        remain durable siblings for the same book. Returns True if a row was created
+        or its link changed.
         """
         if not document_hash or not abs_id:
             return False
@@ -1718,12 +2013,15 @@ class DatabaseService:
         if not rows:
             return {"accepted": 0, "duplicates": 0, "echoes": 0}
 
-        with self.get_session() as session:
-            # Echo suppression: an event whose (md5, start_time, duration) already exists
-            # under another device_key is a merged copy injected into this device's
-            # statistics.sqlite by the plugin, not new reading on this device.
-            batch_md5s = {row["md5"] for row in rows}
-            foreign_query = session.query(
+        # Echo suppression: an event whose (md5, start_time, duration) already exists
+        # under another device_key is a merged copy injected into this device's
+        # statistics.sqlite by the plugin, not new reading on this device.
+        # Run this read in its own short session and release it before opening the
+        # write session below, so the INSERT holds the write lock for as little
+        # time as possible under contention (see issue #315).
+        batch_md5s = {row["md5"] for row in rows}
+        with self.get_session() as read_session:
+            foreign_query = read_session.query(
                 KOReaderPageStat.md5,
                 KOReaderPageStat.start_time,
                 KOReaderPageStat.duration,
@@ -1735,14 +2033,15 @@ class DatabaseService:
             foreign_fingerprints = {
                 (item.md5, float(item.start_time), float(item.duration)) for item in foreign
             }
-            fresh_rows = [
-                row for row in rows
-                if (row["md5"], row["start_time"], row["duration"]) not in foreign_fingerprints
-            ]
-            echoes = len(rows) - len(fresh_rows)
+        fresh_rows = [
+            row for row in rows
+            if (row["md5"], row["start_time"], row["duration"]) not in foreign_fingerprints
+        ]
+        echoes = len(rows) - len(fresh_rows)
 
-            inserted = 0
-            if fresh_rows:
+        inserted = 0
+        if fresh_rows:
+            with self.get_session() as session:
                 stmt = sqlite_insert(KOReaderPageStat).values(fresh_rows)
                 stmt = stmt.on_conflict_do_nothing(
                     index_elements=["md5", "user_id", "device_key", "page", "start_time"]
@@ -2148,9 +2447,15 @@ class DatabaseService:
                                                acked_version=row.version, ack_deleted=True)
 
                 # 3. Per-device delta.
+                delta = self._compute_annotation_delta(session, user_id, doc_md5, device_key)
                 response_books.append({
                     "hash": doc_md5,
-                    "toApply": self._compute_annotation_delta(session, user_id, doc_md5, device_key),
+                    "toApply": {
+                        "add": delta["add"],
+                        "edit": delta["edit"],
+                        "delete": delta["delete"],
+                    },
+                    "more": delta["more"],
                 })
 
             session.commit()
@@ -2158,6 +2463,7 @@ class DatabaseService:
 
     def _compute_annotation_delta(self, session, user_id, doc_md5: str, device_key: str) -> dict:
         adds, edits, deletes = [], [], []
+        pending_count = 0
         rows = (
             session.query(KoreaderAnnotation)
             .filter(
@@ -2171,19 +2477,27 @@ class DatabaseService:
             state = self._get_device_state(session, row.id, device_key)
             if row.deleted:
                 if state is not None and int(state.acked_version or 0) > 0 and not state.ack_deleted:
-                    deletes.append({"serverId": row.id, "datetime": row.datetime})
+                    pending_count += 1
+                    if pending_count <= self._ANNOTATION_APPLY_CAP:
+                        deletes.append({"serverId": row.id, "datetime": row.datetime})
                 continue
             acked = int(state.acked_version or 0) if state is not None else 0
             if acked >= int(row.version or 1):
+                continue
+            pending_count += 1
+            if pending_count > self._ANNOTATION_APPLY_CAP:
                 continue
             entry = self._annotation_response_entry(row)
             if acked == 0:
                 adds.append(entry)
             else:
                 edits.append(entry)
-            if len(adds) + len(edits) + len(deletes) >= self._ANNOTATION_APPLY_CAP:
-                break
-        return {"add": adds, "edit": edits, "delete": deletes}
+        return {
+            "add": adds,
+            "edit": edits,
+            "delete": deletes,
+            "more": pending_count > self._ANNOTATION_APPLY_CAP,
+        }
 
     def ack_koreader_annotations(self, user_id, device_key: str, books: list[dict]) -> dict:
         """Record which exchanged annotations a device actually applied/deleted.
@@ -2382,8 +2696,13 @@ class DatabaseService:
                             row.source_device = spoke_key
                             row.version = int(row.version or 1) + 1
                             row.updated_at = utcnow()
-                        # The ann_key follows pos0 edits so device key lists stay consistent.
-                        row.ann_key = ann_key
+                        # The ann_key follows pos0 edits so device key lists
+                        # stay consistent — anchored to the row's own datetime,
+                        # never the entry's: devices hash (datetime|pos0), and a
+                        # spoke timestamp (e.g. BookFusion's added_at, which
+                        # moves on our own create/PATCH) in the key desyncs it
+                        # from every device's key list.
+                        row.ann_key = self.compute_annotation_key(row.datetime, row.pos0)
                     else:
                         # Identity (datetime/pos0/pos1/ann_key) stays canonical:
                         # the spoke's round-tripped position is a lossy
@@ -2483,6 +2802,77 @@ class DatabaseService:
                 .all()
             )
             return [int(r[0]) for r in rows if r[0] is not None]
+
+    def get_unacked_annotation_versions(self, user_id, doc_md5: str, spoke_key: str) -> dict:
+        """``{annotation_id: version}`` for alive rows whose current version the
+        spoke has not acknowledged.
+
+        Push-selection primitive for one-way spokes (Readest/Hardcover): row
+        versions move only on content changes, so bookkeeping-column writes
+        (which bump ``updated_at`` via onupdate) can never re-qualify a row —
+        ``updated_at > <spoke>_synced_at`` comparisons self-invalidate and
+        re-push everything every cycle."""
+        doc_md5 = str(doc_md5 or "").strip().lower()
+        with self.get_session() as session:
+            rows = (
+                session.query(KoreaderAnnotation)
+                .filter(
+                    KoreaderAnnotation.md5 == doc_md5,
+                    KoreaderAnnotation.user_id == user_id,
+                    KoreaderAnnotation.deleted == False,  # noqa: E712
+                )
+                .all()
+            )
+            unacked = {}
+            for row in rows:
+                state = self._get_device_state(session, row.id, spoke_key)
+                acked = int(state.acked_version or 0) if state is not None else 0
+                version = int(row.version or 1)
+                if acked < version:
+                    unacked[row.id] = version
+            return unacked
+
+    def get_unacked_annotation_tombstones(self, user_id, doc_md5: str, spoke_key: str) -> list[int]:
+        """Ids of tombstoned rows the spoke has seen alive but not yet as deleted."""
+        doc_md5 = str(doc_md5 or "").strip().lower()
+        with self.get_session() as session:
+            rows = (
+                session.query(KoreaderAnnotation)
+                .filter(
+                    KoreaderAnnotation.md5 == doc_md5,
+                    KoreaderAnnotation.user_id == user_id,
+                    KoreaderAnnotation.deleted == True,  # noqa: E712
+                )
+                .all()
+            )
+            pending = []
+            for row in rows:
+                state = self._get_device_state(session, row.id, spoke_key)
+                if state is not None and int(state.acked_version or 0) > 0 and not state.ack_deleted:
+                    pending.append(row.id)
+            return pending
+
+    def ack_annotation_versions(self, user_id, spoke_key: str,
+                                versions_by_id: dict = None,
+                                deleted_ids: list = None) -> None:
+        """Record a spoke's acks: content versions it pushed/absorbed and
+        tombstones it processed, so neither is re-sent every cycle."""
+        with self.get_session() as session:
+            for ann_id, version in (versions_by_id or {}).items():
+                row = session.query(KoreaderAnnotation).filter(
+                    KoreaderAnnotation.id == int(ann_id),
+                    KoreaderAnnotation.user_id == user_id,
+                ).first()
+                if row is not None:
+                    self._set_device_state(session, row.id, spoke_key, acked_version=int(version))
+            for ann_id in deleted_ids or []:
+                row = session.query(KoreaderAnnotation).filter(
+                    KoreaderAnnotation.id == int(ann_id),
+                    KoreaderAnnotation.user_id == user_id,
+                ).first()
+                if row is not None:
+                    self._set_device_state(session, row.id, spoke_key, ack_deleted=True)
+            session.commit()
 
     def get_user_annotations_for_book(self, user_id, doc_md5: str, include_deleted: bool = False) -> list:
         """All annotation rows for a (user, document) — dashboard/tests helper."""
@@ -3350,6 +3740,34 @@ class DatabaseService:
             }
 
     # Reading session operations
+    def has_matching_reading_session(
+        self,
+        abs_id: str,
+        session_type: str,
+        start_time: float,
+        end_time: float,
+        duration_seconds: int,
+        start_progress: float = None,
+        end_progress: float = None,
+        leader_client: str = None,
+        user_id: int = None,
+    ) -> bool:
+        """Return whether an identical user-scoped reading session exists."""
+        uid = self._resolve_uid(user_id)
+        duration_seconds = min(int(duration_seconds), 14400)
+        with self.get_session() as session:
+            return session.query(ReadingSession.id).filter(
+                ReadingSession.abs_id == abs_id,
+                ReadingSession.session_type == session_type,
+                ReadingSession.start_time == float(start_time),
+                ReadingSession.end_time == float(end_time),
+                ReadingSession.duration_seconds == duration_seconds,
+                ReadingSession.start_progress == start_progress,
+                ReadingSession.end_progress == end_progress,
+                ReadingSession.leader_client == leader_client,
+                ReadingSession.user_id == uid,
+            ).first() is not None
+
     def record_reading_session(self, abs_id: str, session_type: str, start_time: float,
                                end_time: float, duration_seconds: int,
                                start_progress: float = None, end_progress: float = None,

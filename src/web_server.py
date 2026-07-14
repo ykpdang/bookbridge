@@ -41,6 +41,7 @@ from src.api.api_clients import ABS_DISABLED_SENTINEL, is_abs_disabled_value
 from src.api.kosync_server import kosync_sync_bp, kosync_admin_bp, init_kosync_server, signal_manifest_rebuild
 from src.api.hardcover_routes import hardcover_bp, init_hardcover_routes
 from src.api.storygraph_routes import storygraph_bp, init_storygraph_routes
+from src.api.bookfusion_upload_client import extract_epub_metadata, _S3_TIMEOUT_LARGE
 from src.version import APP_VERSION, get_update_status
 from src.db.models import State
 from src.sync_clients.sync_client_interface import LocatorResult, UpdateProgressRequest
@@ -482,6 +483,8 @@ class _GlobalClients:
     @property
     def booklore_client(self): return container.booklore_client()
     @property
+    def bookfusion_client(self): return container.bookfusion_client()
+    @property
     def bookorbit_client(self): return container.bookorbit_client()
     @property
     def cwa_client(self): return container.cwa_client()
@@ -523,6 +526,17 @@ def uc():
         user = current_user()
     except RuntimeError:
         user = None
+    if user is None:
+        # Background per-user work has no Flask request context. The sync
+        # cycle/poller binds the ambient user id before invoking helpers such
+        # as SuggestionsService, so resolve that user's bundle instead of
+        # silently falling back to the admin/global clients.
+        user_id = get_current_user_id()
+        if user_id is not None:
+            try:
+                return container.user_client_registry().get_clients(user_id)
+            except Exception as e:
+                logger.debug("uc(): ambient user bundle unavailable: %s", e)
     if user is not None:
         try:
             return container.user_client_registry().get_clients(user.id)
@@ -834,6 +848,8 @@ def admin_required(f):
     """Decorator for routes that require an admin user (e.g. user management)."""
     @wraps(f)
     def wrapper(*args, **kwargs):
+        if current_app.config.get('LOGIN_DISABLED'):
+            return f(*args, **kwargs)
         user = current_user()
         if user is None:
             if _request_wants_json():
@@ -980,7 +996,43 @@ def account():
                 message = "Updated " + " and ".join(changed) + "." if changed else "No changes made."
                 user = database_service.get_user(user.id)  # refresh for display
 
-    return render_template('account.html', error=error, message=message, account_user=user)
+    return render_template(
+        'account.html',
+        error=error,
+        message=message,
+        account_user=user,
+    )
+
+
+def account_integrations():
+    """Self-service integration settings for the signed-in user."""
+    user = current_user()
+    if user is None:
+        return redirect(url_for('login'))
+
+    from src.utils.user_config import PER_USER_FIELD_GROUPS
+
+    message = None
+    if request.method == 'POST':
+        _apply_user_integrations(user.id)
+        message = "Saved your integrations."
+        user = database_service.get_user(user.id)
+
+    creds = database_service.get_user_credentials(user.id)
+    master = {
+        key: os.environ.get(key, '')
+        for _g, fields in PER_USER_FIELD_GROUPS for key, _l, _t in fields
+    }
+    return render_template(
+        'account_integrations.html',
+        groups=PER_USER_FIELD_GROUPS,
+        creds=creds,
+        master=master,
+        allow_master_fallback=bool(getattr(user, "is_admin", False)),
+        message=message,
+        account_user=user,
+        user_test_services=_USER_TEST_SERVICES,
+    )
 
 
 # Library-lookup credentials the primary admin's account also lends to the
@@ -1012,8 +1064,16 @@ def _apply_user_integrations(user_id):
                 submitted = request.form.get(key, '')
                 if submitted:  # blank => keep existing secret
                     database_service.set_user_credential(user_id, key, submitted)
-            else:  # text: blank clears => inherit master
+            else:  # text/select: blank clears => inherit master/default
                 database_service.set_user_credential(user_id, key, request.form.get(key, ''))
+
+    # A newly-entered Readest password belongs to a (possibly different) account,
+    # so any cached Supabase tokens are stale — drop them so the next sync logs in
+    # fresh with the new credentials rather than refreshing the old session.
+    if request.form.get('READEST_PASSWORD'):
+        for _tok in ('READEST_ACCESS_TOKEN', 'READEST_REFRESH_TOKEN', 'READEST_TOKEN_EXPIRES_AT'):
+            database_service.set_user_credential(user_id, _tok, '')
+
     try:
         container.user_client_registry().invalidate(user_id)
     except Exception as e:
@@ -1070,17 +1130,22 @@ def admin_user_integrations(user_id):
         allow_master_fallback=bool(getattr(target, "is_admin", False)),
         message=message,
         target_user=target,
-        user_test_services={
-            "Audiobookshelf": "abs",
-            "KOReader / KoSync": "kosync",
-            "Storyteller": "storyteller",
-            "Calibre-Web (Automated)": "cwa",
-            "BookOrbit": "bookorbit",
-            "Grimmory / BookLore": "booklore",
-            "Hardcover": "hardcover",
-            "StoryGraph": "storygraph",
-        },
+        user_test_services=_USER_TEST_SERVICES,
     )
+
+
+_USER_TEST_SERVICES = {
+    "Audiobookshelf": "abs",
+    "KOReader / KoSync": "kosync",
+    "Storyteller": "storyteller",
+    "Grimmory": "booklore",
+    "BookFusion": "bookfusion",
+    "BookOrbit": "bookorbit",
+    "Readest": "readest",
+    "Calibre-Web Automated": "cwa",
+    "Hardcover": "hardcover",
+    "StoryGraph": "storygraph",
+}
 
 
 _TEST_CONNECTION_FIELDS = {
@@ -1089,7 +1154,9 @@ _TEST_CONNECTION_FIELDS = {
     'storyteller': ['STORYTELLER_ENABLED', 'STORYTELLER_API_URL', 'STORYTELLER_USER', 'STORYTELLER_PASSWORD'],
     'booklore': ['BOOKLORE_ENABLED', 'BOOKLORE_SERVER', 'BOOKLORE_USER', 'BOOKLORE_PASSWORD'],
     'bookorbit': ['BOOKORBIT_ENABLED', 'BOOKORBIT_SERVER', 'BOOKORBIT_USER', 'BOOKORBIT_PASSWORD'],
+    'bookfusion': ['BOOKFUSION_ENABLED', 'BOOKFUSION_API_URL', 'BOOKFUSION_ACCESS_TOKEN'],
     'cwa': ['CWA_ENABLED', 'CWA_SERVER', 'CWA_USERNAME', 'CWA_PASSWORD', 'CWA_SYNC_TOKEN'],
+    'readest': ['READEST_ANNOTATION_SYNC', 'READEST_EMAIL', 'READEST_PASSWORD', 'READEST_SUPABASE_URL'],
     'hardcover': ['HARDCOVER_ENABLED', 'HARDCOVER_TOKEN'],
     'storygraph': ['STORYGRAPH_ENABLED', 'STORYGRAPH_SESSION_COOKIE', 'STORYGRAPH_REMEMBER_USER_TOKEN'],
 }
@@ -1143,6 +1210,14 @@ def admin_user_test_connection(user_id, service):
     return _run_test_connection(service, payload)
 
 
+def account_test_connection(service):
+    user = current_user()
+    if user is None:
+        return jsonify({"ok": False, "message": "Authentication required"}), 401
+    payload = _posted_user_test_credentials(user, request.get_json(silent=True) or {})
+    return _run_test_connection(service, payload)
+
+
 @admin_required
 def admin_user_abs_libraries(user_id):
     """List this user's Audiobookshelf libraries, using the credentials posted
@@ -1162,6 +1237,23 @@ def admin_user_abs_libraries(user_id):
         return jsonify({"error": str(e)}), 502
 
 
+def account_abs_libraries():
+    """List current user's Audiobookshelf libraries from unsaved form credentials."""
+    user = current_user()
+    if user is None:
+        return jsonify({"error": "Authentication required"}), 401
+    payload = _posted_user_test_credentials(user, request.get_json(silent=True) or {})
+    from src.api.api_clients import ABSClient
+    client = ABSClient(credentials=payload)
+    if not client.is_configured():
+        return jsonify({"error": "Audiobookshelf not configured for this user (set the API token above)"}), 400
+    try:
+        return jsonify(client.get_libraries() or [])
+    except Exception as e:
+        logger.warning("Self-service ABS library lookup failed for user %s: %s", user.id, e)
+        return jsonify({"error": str(e)}), 502
+
+
 @admin_required
 def admin_user_booklore_libraries(user_id):
     """List this user's Grimmory libraries, using the credentials posted from
@@ -1178,6 +1270,23 @@ def admin_user_booklore_libraries(user_id):
         return jsonify(client.get_libraries() or [])
     except Exception as e:
         logger.warning("Per-user Grimmory library lookup failed for user %s: %s", user_id, e)
+        return jsonify({"error": str(e)}), 502
+
+
+def account_booklore_libraries():
+    """List current user's Grimmory libraries from unsaved form credentials."""
+    user = current_user()
+    if user is None:
+        return jsonify({"error": "Authentication required"}), 401
+    payload = _posted_user_test_credentials(user, request.get_json(silent=True) or {})
+    from src.api.booklore_client import BookloreClient
+    client = BookloreClient(database_service=database_service, credentials=payload)
+    if not client.is_configured():
+        return jsonify({"error": "Grimmory not configured for this user (set the login above)"}), 400
+    try:
+        return jsonify(client.get_libraries() or [])
+    except Exception as e:
+        logger.warning("Self-service Grimmory library lookup failed for user %s: %s", user.id, e)
         return jsonify({"error": str(e)}), 502
 
 
@@ -1756,6 +1865,8 @@ def _upsert_storyteller_mapping(
     selected_ebook_source = _normalize_text_source_type(ebook_source)
     selected_ebook_source_id = str(ebook_source_id or "").strip() or None
     requested_abs_id = str(abs_id or "").strip() or None
+    if selected_ebook_source == "BookFusion":
+        return None, "BookFusion links require an audiobook mapping", 400
 
     target_book = existing_book
     if mode_hint == "existing":
@@ -2326,6 +2437,33 @@ def get_searchable_ebooks(search_term):
         except Exception as e:
             logger.warning(f"⚠️ BookOrbit search failed: {e}")
 
+    # 1c. BookFusion existing user library links. Search-only because BookFusion
+    # does not provide a bridge-side EPUB download in Phase 1/3.
+    if search_term and clients.bookfusion_client.is_configured():
+        try:
+            bf_books = clients.bookfusion_client.search_books(page=1, per_page=50, query=search_term)
+            query_lower = search_term.lower()
+            for b in bf_books or []:
+                bf_id = b.get("id") or b.get("book_id")
+                if bf_id in (None, ""):
+                    continue
+                title = str(b.get("title") or b.get("name") or f"BookFusion {bf_id}").strip()
+                authors = _coerce_author_display(b.get("authors") or b.get("author"))
+                haystack = f"{title} {authors}".lower()
+                if query_lower and query_lower not in haystack:
+                    continue
+                fname = f"bookfusion_{bf_id}.epub"
+                results.append(EbookResult(
+                    name=fname,
+                    title=title,
+                    authors=authors,
+                    path=None,
+                    source='BookFusion',
+                    source_id=bf_id,
+                ))
+        except Exception as e:
+            logger.warning(f"⚠️ BookFusion search failed: {e}")
+
     # 2. ABS ebook libraries
     if search_term:
         try:
@@ -2413,11 +2551,13 @@ def get_searchable_ebooks(search_term):
     # Check if we have no sources at all
     if (not results and not EBOOK_DIR.exists()
             and not clients.booklore_client.is_configured()
-            and not clients.bookorbit_client.is_configured()):
+            and not clients.bookorbit_client.is_configured()
+            and not clients.bookfusion_client.is_configured()):
         logger.warning(
             "⚠️ No ebooks available: No ebook source configured. "
             "Enable Grimmory (BOOKLORE_SERVER, BOOKLORE_USER, BOOKLORE_PASSWORD), "
             "enable BookOrbit (BOOKORBIT_SERVER, BOOKORBIT_USER, BOOKORBIT_PASSWORD), "
+            "link BookFusion, "
             "or mount the ebooks directory to /books"
         )
 
@@ -2495,6 +2635,7 @@ def _normalize_text_source_type(raw_source):
         "booklore": "Booklore",
         "grimmory": "Booklore",
         "bookorbit": "BookOrbit",
+        "bookfusion": "BookFusion",
         "abs": "ABS",
         "cwa": "CWA",
         "local file": "Local File",
@@ -2512,6 +2653,7 @@ def _build_forge_text_item(source_type, source_id, source_path, original_filenam
         "path": normalized_source_path,
         "booklore_id": normalized_source_id,
         "bookorbit_id": normalized_source_id,
+        "bookfusion_id": normalized_source_id,
         "cwa_id": normalized_source_id,
         "abs_id": normalized_source_id,
         "source_id": normalized_source_id,
@@ -2524,6 +2666,8 @@ def _build_forge_text_item(source_type, source_id, source_path, original_filenam
         text_item["booklore_id"] = normalized_source_id
     if normalized_source == "BookOrbit":
         text_item["bookorbit_id"] = normalized_source_id
+    if normalized_source == "BookFusion":
+        text_item["bookfusion_id"] = normalized_source_id
     if normalized_source == "CWA":
         text_item["cwa_id"] = normalized_source_id
         if normalized_source_path:
@@ -2682,6 +2826,308 @@ def _create_or_update_library_audio_mapping(
     return saved_book, None, None
 
 
+def _create_or_update_audio_only_mapping(
+    *,
+    audio_source="ABS",
+    audio_source_id,
+    audio_title=None,
+    audio_cover_url=None,
+    audio_duration=None,
+    audio_provider_book_id=None,
+    audio_provider_file_id=None,
+):
+    """Create or refresh a mapping that contains only an audiobook source.
+
+    Audio-only mappings intentionally have no EPUB, KOSync hash, transcript, or
+    alignment work.  They still use the normal provider bridge keys so ABS,
+    Grimmory, and BookOrbit audio progress can be tracked consistently.
+    """
+    audio_source = str(audio_source or "").strip()
+    audio_source_id = str(audio_source_id or "").strip()
+    if audio_source not in ("ABS", *_LIBRARY_AUDIO_SOURCES):
+        return None, f"Unsupported audio source '{audio_source}'", 400
+    if not audio_source_id:
+        return None, "Missing audiobook source id", 400
+
+    bridge_key = (
+        audio_source_id
+        if audio_source == "ABS"
+        else _build_bridge_key(audio_source, audio_source_id)
+    )
+    existing_book = (
+        database_service.get_book(bridge_key)
+        or database_service.get_book_by_audio_source(audio_source, audio_source_id)
+    )
+
+    clients = uc()
+    default_cover = None
+    if audio_source == "ABS":
+        abs_client = getattr(clients, "abs_client", None)
+        if abs_client is not None and getattr(abs_client, "is_configured", lambda: False)():
+            default_cover = (
+                f"{abs_client.base_url}/api/items/{audio_source_id}/cover"
+                f"?token={abs_client.token}"
+            )
+    elif audio_source == "BookLore":
+        default_cover = f"/api/booklore/audiobook-cover/{audio_source_id}"
+    else:
+        default_cover = f"/api/bookorbit/audiobook-cover/{audio_source_id}"
+
+    from src.db.models import Book
+
+    title = audio_title or f"{_audio_source_display_name(audio_source)} {audio_source_id}"
+    target_book = existing_book or Book(abs_id=bridge_key, sync_mode="audiobook_only")
+    target_book.abs_id = bridge_key
+    target_book.abs_title = title or target_book.abs_title or bridge_key
+    target_book.audio_source = audio_source
+    target_book.audio_source_id = audio_source_id
+    target_book.audio_title = title or target_book.audio_title or target_book.abs_title
+    target_book.audio_cover_url = audio_cover_url or target_book.audio_cover_url or default_cover
+    if audio_duration is not None:
+        target_book.audio_duration = audio_duration
+        target_book.duration = audio_duration
+    target_book.audio_provider_book_id = str(audio_provider_book_id or audio_source_id)
+    target_book.audio_provider_file_id = (
+        str(audio_provider_file_id) if audio_provider_file_id else None
+    )
+
+    # A deliberate audio-only rematch must not leave stale text-side metadata
+    # visible or active in the mapping.
+    for field_name in (
+        "ebook_filename",
+        "ebook_source",
+        "ebook_source_id",
+        "original_ebook_filename",
+        "kosync_doc_id",
+        "transcript_file",
+        "transcript_source",
+        "storyteller_uuid",
+        "bookfusion_id",
+        "abs_ebook_item_id",
+    ):
+        setattr(target_book, field_name, None)
+    target_book.status = "active"
+    target_book.sync_mode = "audiobook_only"
+
+    saved_book = database_service.save_book(target_book)
+
+    if audio_source == "ABS":
+        try:
+            clients.abs_client.add_to_collection(
+                saved_book.abs_id,
+                user_setting("ABS_COLLECTION_NAME", "Synced with KOReader"),
+            )
+        except Exception as exc:
+            logger.warning("Failed to add audio-only ABS mapping to collection: %s", exc)
+
+    try:
+        database_service.dismiss_suggestion(saved_book.abs_id)
+    except Exception:
+        pass
+
+    return saved_book, None, None
+
+
+def _ensure_bookfusion_ebook_cached(bookfusion_id) -> "str | None":
+    """Download a BookFusion EPUB into the epub cache and return its filename.
+
+    Makes BookFusion behave like every other ebook source: the file is written to
+    the epub cache as ``bookfusion_<id>.epub`` so it resolves for KOSync hashing,
+    progress text-anchoring, and annotation offset math. Returns ``None`` (best
+    effort) when BookFusion is unconfigured or the download/write fails.
+    """
+    bf_id = str(bookfusion_id or "").strip()
+    if not bf_id:
+        return None
+    filename = f"bookfusion_{bf_id}.epub"
+    epub_cache = container.epub_cache_dir()
+    epub_cache.mkdir(parents=True, exist_ok=True)
+    cached_path = epub_cache / filename
+    try:
+        if cached_path.exists() and cached_path.stat().st_size > 0:
+            return filename
+    except OSError:
+        pass
+
+    client = uc().bookfusion_client
+    if not client.is_configured():
+        return None
+    try:
+        content = client.download_book(bf_id)
+    except Exception as e:
+        logger.warning("⚠️ BookFusion download failed for '%s': %s", bf_id, e)
+        return None
+    if not content:
+        logger.warning("⚠️ BookFusion download returned no content for '%s'", bf_id)
+        return None
+    try:
+        cached_path.write_bytes(content)
+    except Exception as e:
+        logger.error("❌ Could not cache BookFusion EPUB for '%s': %s", bf_id, e)
+        return None
+    logger.info("📥 Cached BookFusion EPUB '%s' (%d bytes)", filename, len(content))
+    return filename
+
+
+def _link_bookfusion_ebook_source(target_book, bookfusion_id) -> None:
+    """Attach a downloaded BookFusion EPUB to a book so it syncs like other ebook
+    sources: set the ebook fields and compute the KOSync hash for KOReader linking.
+
+    Best effort — if the file can't be acquired, the book keeps its BookFusion
+    progress link but annotations/leading progress stay unavailable until the EPUB
+    is cached. The KOSync document is linked by the caller after ``save_book``.
+    """
+    ebook_filename = _ensure_bookfusion_ebook_cached(bookfusion_id)
+    if not ebook_filename:
+        logger.warning(
+            "⚠️ BookFusion '%s' linked without a cached EPUB; progress is one-way and "
+            "annotations will not sync until the file can be downloaded.",
+            bookfusion_id,
+        )
+        return
+    target_book.ebook_filename = ebook_filename
+    target_book.original_ebook_filename = ebook_filename
+    target_book.ebook_source = "BookFusion"
+    target_book.ebook_source_id = str(bookfusion_id)
+    try:
+        cached_path = container.epub_cache_dir() / ebook_filename
+        kosync_id = container.ebook_parser().get_kosync_id(cached_path)
+    except Exception as e:
+        logger.warning("⚠️ Could not compute KOSync hash for BookFusion '%s': %s", bookfusion_id, e)
+        kosync_id = None
+    if kosync_id:
+        target_book.kosync_doc_id = kosync_id
+
+
+def _create_or_update_bookfusion_progress_mapping(
+    *,
+    audio_source="ABS",
+    audio_source_id,
+    audio_title,
+    audio_cover_url=None,
+    audio_duration=None,
+    audio_provider_book_id=None,
+    audio_provider_file_id=None,
+    bookfusion_id,
+    bookfusion_title=None,
+    bookfusion_author=None,
+    storyteller_uuid=None,
+):
+    """Create/update an audio mapping linked to a BookFusion ebook.
+
+    Downloads + caches BookFusion's EPUB and hashes it for KOReader linking, sets
+    status 'pending' so the forge/Whisper pipeline aligns audio↔ebook, tri-links a
+    Storyteller readalong when ``storyteller_uuid`` is given (BookFusion's own EPUB
+    stays as ``original_ebook_filename`` for annotation offsets), persists the
+    per-user BookFusion link, and enqueues Hardcover/StoryGraph auto-match — i.e. it
+    behaves like every other ebook source instead of a progress-only dead end.
+    """
+    if not bookfusion_id:
+        return None, "Missing BookFusion book id", 400
+    if audio_source not in ("ABS", *_LIBRARY_AUDIO_SOURCES):
+        return None, f"Unsupported audio source '{audio_source}'", 400
+    if not audio_source_id:
+        return None, "BookFusion linking requires an audio source", 400
+
+    from src.db.models import Book
+
+    if audio_source in _LIBRARY_AUDIO_SOURCES:
+        abs_id = _build_bridge_key(audio_source, audio_source_id)
+        existing_book = (
+            database_service.get_book(abs_id)
+            or database_service.get_book_by_audio_source(audio_source, audio_source_id)
+        )
+        default_cover = (
+            f"/api/bookorbit/audiobook-cover/{audio_source_id}"
+            if audio_source == "BookOrbit"
+            else f"/api/booklore/audiobook-cover/{audio_source_id}"
+        )
+        resolved_title = audio_title or bookfusion_title or f"{_audio_source_display_name(audio_source)} {audio_source_id}"
+    else:
+        abs_id = str(audio_source_id)
+        existing_book = database_service.get_book(abs_id)
+        default_cover = audio_cover_url
+        resolved_title = audio_title or bookfusion_title or abs_id
+
+    target_book = existing_book or Book(abs_id=abs_id, sync_mode="audiobook")
+    target_book.abs_id = abs_id
+    target_book.abs_title = resolved_title or target_book.abs_title or abs_id
+    target_book.audio_source = audio_source
+    target_book.audio_source_id = str(audio_source_id)
+    target_book.audio_title = resolved_title or target_book.audio_title
+    target_book.audio_cover_url = audio_cover_url or target_book.audio_cover_url or default_cover
+    target_book.audio_duration = audio_duration if audio_duration is not None else target_book.audio_duration
+    target_book.audio_provider_book_id = str(audio_provider_book_id or audio_source_id)
+    target_book.audio_provider_file_id = str(audio_provider_file_id) if audio_provider_file_id else target_book.audio_provider_file_id
+    target_book.duration = audio_duration if audio_duration is not None else target_book.duration
+    target_book.sync_mode = "audiobook"
+    target_book.status = "pending"
+
+    # Acquire the EPUB locally so BookFusion behaves like every other ebook source
+    # (cached file + KOSync hash → progress text-anchoring and annotation offsets).
+    _link_bookfusion_ebook_source(target_book, bookfusion_id)
+
+    # Storyteller tri-link: the readalong artifact becomes the working text file
+    # (drives forge/Whisper alignment) while BookFusion's own EPUB stays as
+    # original_ebook_filename so annotation offsets resolve against it — mirrors the
+    # Grimmory/BookOrbit + Storyteller tri-link model.
+    if storyteller_uuid:
+        bf_original = target_book.ebook_filename
+        artifact_filename, _artifact_path = _download_storyteller_artifact(
+            storyteller_uuid, target_book.abs_title, original_ebook_filename=bf_original,
+        )
+        if artifact_filename:
+            target_book.storyteller_uuid = storyteller_uuid
+            if bf_original:
+                target_book.original_ebook_filename = bf_original
+            target_book.ebook_filename = artifact_filename
+            trilink_hash = _compute_storyteller_trilink_kosync_id(
+                bf_original, artifact_filename, "BookFusion Tri-Link",
+            )
+            if trilink_hash:
+                target_book.kosync_doc_id = trilink_hash
+            chapters = _resolve_abs_chapters_for_storyteller_ingest(target_book)
+            manifest = ingest_storyteller_transcripts(
+                target_book.abs_id, target_book.abs_title or "", chapters,
+            )
+            target_book.transcript_file = manifest
+            target_book.transcript_source = _storyteller_transcript_source(storyteller_uuid, manifest)
+        else:
+            logger.warning(
+                "⚠️ BookFusion tri-link: could not obtain Storyteller artifact '%s' for '%s'",
+                storyteller_uuid, target_book.abs_title,
+            )
+
+    saved_book = database_service.save_book(target_book)
+    if not isinstance(getattr(saved_book, "abs_id", None), str):
+        saved_book = target_book
+
+    if getattr(saved_book, "kosync_doc_id", None):
+        try:
+            database_service.ensure_linked_kosync_document(saved_book.kosync_doc_id, saved_book.abs_id)
+        except Exception as e:
+            logger.warning(
+                "⚠️ Could not link BookFusion KOSync document for '%s': %s", saved_book.abs_id, e
+            )
+
+    _persist_bookfusion_link_for_current_user(
+        saved_book.abs_id,
+        "BookFusion",
+        str(bookfusion_id),
+        title=bookfusion_title or target_book.abs_title,
+        author=bookfusion_author,
+    )
+    try:
+        _enqueue_tracker_automatch(uc().sync_clients, saved_book)
+    except Exception as e:
+        logger.warning(
+            "⚠️ Could not enqueue tracker automatch for BookFusion book '%s': %s",
+            saved_book.abs_id, e,
+        )
+    database_service.dismiss_suggestion(saved_book.abs_id)
+    return saved_book, None, None
+
+
 
 def restart_server():
     """
@@ -2749,10 +3195,12 @@ def settings():
             'KOSYNC_ENABLED',
             'STORYTELLER_ENABLED',
             'BOOKLORE_ENABLED',
+            'BOOKFUSION_ENABLED',
             'GRIMMORY_READING_SESSIONS',
             'CWA_ENABLED',
             'CWA_SYNC_ENABLED',
             'HARDCOVER_ENABLED',
+            'HARDCOVER_ANNOTATION_SYNC',
             'STORYGRAPH_ENABLED',
             'TELEGRAM_ENABLED',
             'SUGGESTIONS_ENABLED',
@@ -2793,7 +3241,7 @@ def settings():
             for key in booklore_setting_keys
         }
         url_keys = [
-            'SHELFMARK_URL', 'ABS_SERVER', 'BOOKLORE_SERVER',
+            'SHELFMARK_URL', 'ABS_SERVER', 'BOOKLORE_SERVER', 'BOOKFUSION_API_URL',
             'STORYTELLER_API_URL', 'CWA_SERVER', 'KOSYNC_SERVER',
             'OLLAMA_URL', 'LLM_BASE_URL',
         ]
@@ -3488,6 +3936,8 @@ def _build_dashboard_mapping(
         "audio_duration": getattr(book, "audio_duration", None) or book.duration or 0,
         "audio_cover_url": getattr(book, "audio_cover_url", None),
         "ebook_filename": book.ebook_filename,
+        "original_ebook_filename": getattr(book, "original_ebook_filename", None),
+        "has_local_epub": bool(book.original_ebook_filename or book.ebook_filename),
         "ebook_source": getattr(book, "ebook_source", None),
         "ebook_source_id": getattr(book, "ebook_source_id", None),
         "kosync_doc_id": book.kosync_doc_id,
@@ -3587,6 +4037,27 @@ def _build_dashboard_mapping(
             "storygraph_rating": None,
             "storygraph_review_count": None,
         })
+
+    bookfusion_link = None
+    try:
+        user = current_user()
+    except RuntimeError:
+        user = None
+    try:
+        if user is not None:
+            bookfusion_link = database_service.get_user_bookfusion_link(user.id, book.abs_id)
+        elif current_app.config.get('LOGIN_DISABLED'):
+            uid = database_service._default_user_id()
+            bookfusion_link = database_service.get_user_bookfusion_link(uid, book.abs_id) if uid else None
+    except Exception as exc:
+        logger.debug("BookFusion dashboard link lookup failed for '%s': %s", book.abs_id, exc)
+    if not isinstance(bookfusion_link, dict):
+        bookfusion_link = None
+    mapping.update({
+        "bookfusion_id": (bookfusion_link or {}).get("bookfusion_id"),
+        "bookfusion_title": (bookfusion_link or {}).get("title"),
+        "bookfusion_linked": bool(bookfusion_link),
+    })
 
     mapping["storyteller_legacy_link"] = "storyteller" in state_by_client and not book.storyteller_uuid
 
@@ -3747,6 +4218,71 @@ def _claim_book_for_user_id(user_id, abs_id):
         database_service.link_user_book(user_id, abs_id)
     except Exception as e:
         logger.debug("Could not link book '%s' to user %s: %s", abs_id, user_id, e)
+
+
+def _active_bookfusion_link_user_id() -> int | None:
+    """Resolve the user id for user-scoped BookFusion book links."""
+    uid = get_current_user_id()
+    if uid is not None:
+        return uid
+    try:
+        user = current_user()
+    except RuntimeError:
+        user = None
+    if user is not None:
+        return user.id
+    try:
+        if current_app.config.get('LOGIN_DISABLED'):
+            return database_service._default_user_id()
+    except RuntimeError:
+        pass
+    return None
+
+
+def _persist_bookfusion_link_for_user_id(
+    user_id: int,
+    abs_id: str,
+    source: str,
+    source_id: str,
+    title: str = None,
+    author: str = None,
+) -> None:
+    """Persist a BookFusion source selection as a per-user remote-book link."""
+    if _normalize_text_source_type(source) != "BookFusion" or not user_id or not abs_id or not source_id:
+        return
+    try:
+        database_service.set_user_bookfusion_link(
+            user_id,
+            abs_id,
+            source_id,
+            title=title,
+            author=author,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not save BookFusion link for user %s book '%s': %s",
+            user_id,
+            sanitize_log_data(abs_id),
+            exc,
+        )
+
+
+def _persist_bookfusion_link_for_current_user(
+    abs_id: str,
+    source: str,
+    source_id: str,
+    title: str = None,
+    author: str = None,
+) -> None:
+    """Persist a BookFusion source selection for the active request/background user."""
+    _persist_bookfusion_link_for_user_id(
+        _active_bookfusion_link_user_id(),
+        abs_id,
+        source,
+        source_id,
+        title=title,
+        author=author,
+    )
 
 
 def audiobook_matches_search(ab, search_term):
@@ -4013,6 +4549,34 @@ def forge_search_text():
     except Exception as e:
         logger.warning(f"⚠️ Forge: BookOrbit search failed: {e}")
 
+    # 2b. BookFusion
+    try:
+        bookfusion_client = clients.bookfusion_client
+        if bookfusion_client and bookfusion_client.is_configured():
+            bf_books = bookfusion_client.search_books(page=1, per_page=50, q=query)
+            for b in bf_books or []:
+                bf_id = b.get("id") or b.get("book_id")
+                if bf_id in (None, ""):
+                    continue
+                title = str(b.get("title") or b.get("name") or f"BookFusion {bf_id}").strip()
+                author = _coerce_author_display(b.get("authors") or b.get("author"))
+                if query_lower and query_lower not in f"{title} {author}".lower():
+                    continue
+                key = f"bookfusion_{bf_id}"
+                if key not in found_ids:
+                    found_ids.add(key)
+                    results.append({
+                        "id": key,
+                        "title": title,
+                        "author": author,
+                        "source": "BookFusion",
+                        "filename": f"bookfusion_{bf_id}.epub",
+                        "bookfusion_id": bf_id,
+                        "source_id": bf_id,
+                    })
+    except Exception as e:
+        logger.warning(f"⚠️ Forge: BookFusion search failed: {e}")
+
     # 3. ABS Ebooks
     try:
         abs_client = clients.abs_client
@@ -4260,6 +4824,76 @@ def match():
 
         if request.form.get('action') == 'forge_match' and audio_source == 'ABS' and not selected_ab:
             return "Audiobook not found", 404
+
+        if _normalize_text_source_type(ebook_source) == "BookFusion" and ebook_source_id and request.form.get('action') != 'forge_match':
+            if audio_source not in ('ABS', *_LIBRARY_AUDIO_SOURCES):
+                return "BookFusion linking requires an audiobook", 400
+            if audio_source == 'ABS' and not selected_ab:
+                return "Audiobook not found", 404
+            # Download BookFusion's EPUB into the epub cache so the link flows
+            # through the normal ebook match path — hash → pending → forge/Whisper
+            # → Hardcover/StoryGraph, tri-linking with any selected Storyteller
+            # readalong — exactly like every other ebook source, instead of the
+            # progress-only dead end that skipped transcription and tracker matching.
+            bf_cached = _ensure_bookfusion_ebook_cached(ebook_source_id)
+            if not bf_cached:
+                return "Could not download the BookFusion book for linking", 502
+            if not selected_filename:
+                selected_filename = bf_cached
+                ebook_filename = bf_cached
+                original_ebook_filename = bf_cached
+            if audio_source in _LIBRARY_AUDIO_SOURCES:
+                bf_title = request.form.get('ebook_display_name') or Path(selected_filename or f"bookfusion_{ebook_source_id}").stem
+                saved_book, err_msg, err_code = _create_or_update_bookfusion_progress_mapping(
+                    audio_source=audio_source,
+                    audio_source_id=audio_source_id,
+                    audio_title=audio_title or bf_title,
+                    audio_cover_url=audio_cover_url,
+                    audio_duration=audio_duration,
+                    audio_provider_book_id=audio_provider_book_id,
+                    audio_provider_file_id=audio_provider_file_id,
+                    bookfusion_id=ebook_source_id,
+                    bookfusion_title=bf_title,
+                    storyteller_uuid=storyteller_uuid,
+                )
+                if err_msg:
+                    return err_msg, err_code
+                if saved_book:
+                    _claim_book_for_current_user(saved_book.abs_id)
+                return redirect(url_for('index'))
+            # audio_source == 'ABS': fall through to the standard ABS + ebook match
+            # path below (Storyteller tri-link, forge/Whisper, tracker auto-match).
+
+        audio_only = (request.form.get("audio_only") or "").strip().lower() in (
+            "true", "1", "yes", "on"
+        )
+        if audio_only and request.form.get('action') != 'forge_match':
+            if selected_filename or storyteller_uuid:
+                return "Audio-only mappings cannot include a text source", 400
+            if not audio_source or not audio_source_id:
+                return "Please select an audiobook for an audio-only mapping", 400
+            if audio_source == "ABS":
+                if not selected_ab:
+                    return "Audiobook not found", 404
+                if not audio_title:
+                    audio_title = manager.get_abs_title(selected_ab)
+                if audio_duration is None:
+                    audio_duration = manager.get_duration(selected_ab)
+
+            saved_book, err_msg, err_code = _create_or_update_audio_only_mapping(
+                audio_source=audio_source,
+                audio_source_id=audio_source_id,
+                audio_title=audio_title,
+                audio_cover_url=audio_cover_url,
+                audio_duration=audio_duration,
+                audio_provider_book_id=audio_provider_book_id,
+                audio_provider_file_id=audio_provider_file_id,
+            )
+            if err_msg:
+                return err_msg, err_code
+            if saved_book:
+                _claim_book_for_current_user(saved_book.abs_id)
+            return redirect(url_for('index'))
 
         if audio_source in _LIBRARY_AUDIO_SOURCES and audio_source_id and request.form.get('action') != 'forge_match':
             saved_book, err_msg, err_code = _create_or_update_library_audio_mapping(
@@ -4578,6 +5212,13 @@ def match():
         # Trigger Hardcover/StoryGraph automatch in the background (redirect now).
         _enqueue_tracker_automatch(clients.sync_clients, book)
 
+        # Record the per-user BookFusion link so progress + annotation sync resolve
+        # the remote book (the EPUB was cached above as original_ebook_filename).
+        if _normalize_text_source_type(ebook_source) == "BookFusion" and ebook_source_id:
+            _persist_bookfusion_link_for_current_user(
+                abs_id, "BookFusion", ebook_source_id, title=abs_title, author=None,
+            )
+
         if not str(abs_id).startswith('booklore:'):
             clients.abs_client.add_to_collection(abs_id, user_setting("ABS_COLLECTION_NAME", "Synced with KOReader"))
         # Use original filename for shelf if we switched to storyteller
@@ -4634,6 +5275,12 @@ def _create_ebook_only_mapping_from_queue_item(item):
     ebook_filename = (item.get('ebook_filename') or '').strip() or None
     ebook_source = item.get('ebook_source')
     ebook_source_id = item.get('ebook_source_id')
+    if _normalize_text_source_type(ebook_source) == "BookFusion":
+        logger.warning(
+            "⚠️ Add Book (ebook-only) skipped '%s': BookFusion links require an audio mapping",
+            sanitize_log_data(item.get('abs_title') or ebook_source_id or ebook_filename),
+        )
+        return
     if not (storyteller_uuid or ebook_filename):
         return
     title = (
@@ -4653,6 +5300,32 @@ def _create_ebook_only_mapping_from_queue_item(item):
     )
     if err_msg:
         logger.warning("⚠️ Add Book (ebook-only) skipped '%s': %s", sanitize_log_data(title), err_msg)
+    elif saved_book:
+        _claim_book_for_user_id(get_current_user_id(), saved_book.abs_id)
+
+
+def _create_audio_only_mapping_from_queue_item(item):
+    """Create an audio-only mapping from a queued audiobook selection."""
+    audio_source = (item.get("audio_source") or "").strip() or None
+    audio_source_id = (item.get("audio_source_id") or item.get("abs_id") or "").strip()
+    if not audio_source or not audio_source_id:
+        return
+
+    saved_book, err_msg, _err_code = _create_or_update_audio_only_mapping(
+        audio_source=audio_source,
+        audio_source_id=audio_source_id,
+        audio_title=item.get("audio_title") or item.get("abs_title"),
+        audio_cover_url=item.get("audio_cover_url") or item.get("cover_url"),
+        audio_duration=_parse_audio_duration(item.get("audio_duration") or item.get("duration")),
+        audio_provider_book_id=item.get("audio_provider_book_id"),
+        audio_provider_file_id=item.get("audio_provider_file_id"),
+    )
+    if err_msg:
+        logger.warning(
+            "⚠️ Add Book (audio-only) skipped '%s': %s",
+            sanitize_log_data(item.get("abs_title") or audio_source_id),
+            err_msg,
+        )
     elif saved_book:
         _claim_book_for_user_id(get_current_user_id(), saved_book.abs_id)
 
@@ -4686,7 +5359,32 @@ def _process_forge_only_queue(queue_items, forge_stage_mode=None):
     """
     clients = uc()
     for item in queue_items:
+        if item.get('audio_only'):
+            _create_audio_only_mapping_from_queue_item(item)
+            continue
         audio_source = item.get('audio_source')
+        if audio_source and _normalize_text_source_type(item.get('ebook_source')) == "BookFusion" and item.get('ebook_source_id'):
+            saved_book, err_msg, _err_code = _create_or_update_bookfusion_progress_mapping(
+                audio_source=audio_source,
+                audio_source_id=item.get('audio_source_id') or item.get('abs_id'),
+                audio_title=item.get('audio_title') or item.get('abs_title'),
+                audio_cover_url=item.get('audio_cover_url') or item.get('cover_url'),
+                audio_duration=_parse_audio_duration(item.get('audio_duration') or item.get('duration')),
+                audio_provider_book_id=item.get('audio_provider_book_id'),
+                audio_provider_file_id=item.get('audio_provider_file_id'),
+                bookfusion_id=item.get('ebook_source_id'),
+                bookfusion_title=item.get('ebook_display_name') or item.get('ebook_filename'),
+                storyteller_uuid=item.get('storyteller_uuid'),
+            )
+            if err_msg:
+                logger.warning(
+                    "Forge only skipped BookFusion link for '%s': %s",
+                    sanitize_log_data(item.get('audio_title') or item.get('abs_title') or item.get('abs_id')),
+                    err_msg,
+                )
+            elif saved_book:
+                _claim_book_for_user_id(get_current_user_id(), saved_book.abs_id)
+            continue
         # Forge-only requires audio + a standard ebook (never a Storyteller edition).
         if not audio_source or item.get('storyteller_uuid') or not item.get('ebook_filename'):
             logger.info(
@@ -4770,7 +5468,32 @@ def _process_batch_queue(queue_items):
             # No audio: ebook-only / storyteller-only item — match only.
             _create_ebook_only_mapping_from_queue_item(item)
             continue
+        if item.get('audio_only'):
+            _create_audio_only_mapping_from_queue_item(item)
+            continue
         audio_source = item.get('audio_source') or 'ABS'
+        if _normalize_text_source_type(item.get('ebook_source')) == "BookFusion" and item.get('ebook_source_id'):
+            saved_book, err_msg, _err_code = _create_or_update_bookfusion_progress_mapping(
+                audio_source=audio_source,
+                audio_source_id=item.get('audio_source_id') or item.get('abs_id'),
+                audio_title=item.get('audio_title') or item.get('abs_title'),
+                audio_cover_url=item.get('audio_cover_url') or item.get('cover_url'),
+                audio_duration=_parse_audio_duration(item.get('audio_duration') or item.get('duration')),
+                audio_provider_book_id=item.get('audio_provider_book_id'),
+                audio_provider_file_id=item.get('audio_provider_file_id'),
+                bookfusion_id=item.get('ebook_source_id'),
+                bookfusion_title=item.get('ebook_display_name') or item.get('ebook_filename'),
+                storyteller_uuid=item.get('storyteller_uuid'),
+            )
+            if err_msg:
+                logger.warning(
+                    "⚠️ Batch Match skipped BookFusion link for '%s': %s",
+                    sanitize_log_data(item.get('audio_title') or item.get('abs_title') or item.get('abs_id')),
+                    err_msg,
+                )
+            elif saved_book:
+                _claim_book_for_user_id(get_current_user_id(), saved_book.abs_id)
+            continue
         if audio_source in _LIBRARY_AUDIO_SOURCES:
             saved_book, err_msg, _err_code = _create_or_update_library_audio_mapping(
                 audio_source=audio_source,
@@ -4924,12 +5647,37 @@ def _process_forge_match_queue(queue_items):
     from src.db.models import Book
     clients = uc()
     for item in queue_items:
+        if item.get('audio_only'):
+            _create_audio_only_mapping_from_queue_item(item)
+            continue
         if not item.get('audio_source'):
             # No audio: ebook-only / storyteller-only item — match only (nothing to forge).
             _create_ebook_only_mapping_from_queue_item(item)
             continue
         audio_source = item.get('audio_source') or 'ABS'
         storyteller_uuid = item.get('storyteller_uuid', '')
+        if _normalize_text_source_type(item.get('ebook_source')) == "BookFusion" and item.get('ebook_source_id'):
+            saved_book, err_msg, _err_code = _create_or_update_bookfusion_progress_mapping(
+                audio_source=audio_source,
+                audio_source_id=item.get('audio_source_id') or item.get('abs_id'),
+                audio_title=item.get('audio_title') or item.get('abs_title'),
+                audio_cover_url=item.get('audio_cover_url') or item.get('cover_url'),
+                audio_duration=_parse_audio_duration(item.get('audio_duration') or item.get('duration')),
+                audio_provider_book_id=item.get('audio_provider_book_id'),
+                audio_provider_file_id=item.get('audio_provider_file_id'),
+                bookfusion_id=item.get('ebook_source_id'),
+                bookfusion_title=item.get('ebook_display_name') or item.get('ebook_filename'),
+                storyteller_uuid=item.get('storyteller_uuid'),
+            )
+            if err_msg:
+                logger.warning(
+                    "Batch Forge skipped BookFusion link for '%s': %s",
+                    sanitize_log_data(item.get('audio_title') or item.get('abs_title') or item.get('abs_id')),
+                    err_msg,
+                )
+            elif saved_book:
+                _claim_book_for_user_id(get_current_user_id(), saved_book.abs_id)
+            continue
 
         # If Storyteller is selected, keep the current direct-match path.
         if storyteller_uuid:
@@ -5236,19 +5984,36 @@ def _add_book_view(template_name, self_endpoint):
             ebook_source_id = (request.form.get('ebook_source_id') or request.form.get('source_id') or '').strip() or None
             ebook_source_path = (request.form.get('ebook_source_path') or request.form.get('source_path') or '').strip() or None
             storyteller_uuid = request.form.get('storyteller_uuid', '')
-            audiobooks = get_audiobooks_conditionally()
-            selected_ab = next((ab for ab in audiobooks if ab['id'] == abs_id), None)
+            audio_only = (request.form.get('audio_only') or '').strip().lower() in (
+                'true', '1', 'yes', 'on'
+            )
+            selected_ab = None
+            if audio_source == 'ABS' and abs_id and (not audio_title or audio_duration is None):
+                # Only re-resolve against ABS when the submitted card didn't already
+                # carry a title/duration. get_audiobooks_conditionally() returns a
+                # differently-shaped list than the AudioResult records the card was
+                # rendered from, so this lookup is a best-effort enrichment, never a
+                # hard requirement for queuing (see below).
+                audiobooks = get_audiobooks_conditionally()
+                selected_ab = next((ab for ab in audiobooks if ab['id'] == abs_id), None)
             selected_audio = None
-            if audio_source == 'ABS' and selected_ab:
+            if audio_source == 'ABS' and abs_id:
+                # Trust the already-submitted title/duration/cover from the rendered
+                # card first; a prior version hard-required re-resolving `abs_id`
+                # here and silently dropped the whole submission (no queue item, no
+                # error) whenever that lookup missed -- e.g. every audio-only
+                # submission with no ebook to otherwise validate the request.
                 selected_audio = {
                     'bridge_key': abs_id,
                     'audio_source': 'ABS',
                     'audio_source_id': abs_id,
-                    'audio_title': manager.get_abs_title(selected_ab),
-                    'audio_duration': manager.get_duration(selected_ab),
-                    'audio_cover_url': f"{clients.abs_client.base_url}/api/items/{abs_id}/cover?token={clients.abs_client.token}",
-                    'audio_provider_book_id': abs_id,
-                    'audio_provider_file_id': None,
+                    'audio_title': audio_title or (manager.get_abs_title(selected_ab) if selected_ab else abs_id),
+                    'audio_duration': audio_duration if audio_duration is not None else (
+                        manager.get_duration(selected_ab) if selected_ab else None
+                    ),
+                    'audio_cover_url': audio_cover_url or f"{clients.abs_client.base_url}/api/items/{abs_id}/cover?token={clients.abs_client.token}",
+                    'audio_provider_book_id': audio_provider_book_id or abs_id,
+                    'audio_provider_file_id': audio_provider_file_id,
                 }
             elif audio_source in _LIBRARY_AUDIO_SOURCES and audio_source_id:
                 selected_audio = {
@@ -5276,7 +6041,7 @@ def _add_book_view(template_name, self_endpoint):
                         'audio_provider_file_id': None,
                     }
 
-            if selected_audio and (ebook_filename or storyteller_uuid):
+            if selected_audio and (ebook_filename or storyteller_uuid or audio_only):
                 _match_queue_add({
                     **selected_audio,
                     "abs_id": selected_audio['bridge_key'],
@@ -5287,6 +6052,7 @@ def _add_book_view(template_name, self_endpoint):
                     "ebook_source_id": ebook_source_id,
                     "ebook_source_path": ebook_source_path,
                     "storyteller_uuid": storyteller_uuid,
+                    "audio_only": audio_only and not (ebook_filename or storyteller_uuid),
                     "duration": selected_audio['audio_duration'],
                     "cover_url": selected_audio['audio_cover_url'],
                 })
@@ -5994,6 +6760,28 @@ def suggestions_page():
             clients = uc()
             for item in _load_match_queue():
                 audio_source = item.get('audio_source') or 'ABS'
+                if _normalize_text_source_type(item.get('ebook_source')) == "BookFusion" and item.get('ebook_source_id'):
+                    saved_book, err_msg, _err_code = _create_or_update_bookfusion_progress_mapping(
+                        audio_source=audio_source,
+                        audio_source_id=item.get('audio_source_id') or item.get('abs_id'),
+                        audio_title=item.get('audio_title') or item.get('abs_title'),
+                        audio_cover_url=item.get('audio_cover_url') or item.get('cover_url'),
+                        audio_duration=_parse_audio_duration(item.get('audio_duration') or item.get('duration')),
+                        audio_provider_book_id=item.get('audio_provider_book_id'),
+                        audio_provider_file_id=item.get('audio_provider_file_id'),
+                        bookfusion_id=item.get('ebook_source_id'),
+                        bookfusion_title=item.get('ebook_display_name') or item.get('ebook_filename'),
+                        storyteller_uuid=item.get('storyteller_uuid'),
+                    )
+                    if err_msg:
+                        logger.warning(
+                            "Suggestions skipped BookFusion link for '%s': %s",
+                            sanitize_log_data(item.get('audio_title') or item.get('abs_title') or item.get('abs_id')),
+                            err_msg,
+                        )
+                    elif saved_book:
+                        _claim_book_for_user_id(get_current_user_id(), saved_book.abs_id)
+                    continue
                 if audio_source in _LIBRARY_AUDIO_SOURCES:
                     saved_book, err_msg, _err_code = _create_or_update_library_audio_mapping(
                         audio_source=audio_source,
@@ -6367,7 +7155,7 @@ def suggestions_scan_status():
     return jsonify(response)
 
 
-def cleanup_mapping_resources(book):
+def cleanup_mapping_resources(book, defer_audio_cache: bool = False):
     """Delete external artifacts and membership data for a mapped book."""
     if not book:
         return
@@ -6381,7 +7169,7 @@ def cleanup_mapping_resources(book):
 
     # Clean up audio cache directory (WAV files from whisper transcription)
     audio_cache_dir = DATA_DIR / "audio_cache" / book.abs_id
-    if audio_cache_dir.exists():
+    if audio_cache_dir.exists() and not defer_audio_cache:
         try:
             shutil.rmtree(audio_cache_dir)
             logger.info(f"🗑️ Deleted audio cache: {audio_cache_dir}")
@@ -6698,8 +7486,9 @@ def _delete_or_unlink_book(user, abs_id, book) -> None:
         database_service.unlink_user_book(user.id, abs_id)
         database_service.delete_states_for_book(abs_id, user_id=user.id)
         return
-    cleanup_mapping_resources(book)
+    worker_cancelled = manager.cancel_background_job(abs_id)
     database_service.delete_book(abs_id)
+    cleanup_mapping_resources(book, defer_audio_cache=worker_cancelled)
 
 
 def delete_mapping(abs_id):
@@ -6776,29 +7565,70 @@ def mark_complete(abs_id):
 
     perform_delete = request.json.get('delete', False) if request.json else False
 
-    locator = LocatorResult(percentage=1.0)
+    # Determine applicable sync type from the book's sync_mode.
+    sync_type = 'ebook' if getattr(book, 'sync_mode', 'audiobook') == 'ebook_only' else 'audiobook'
 
+    locator = LocatorResult(percentage=1.0)
     update_req = UpdateProgressRequest(locator_result=locator, txt="Book finished", previous_location=None)
 
     # Push through the acting user's own clients (not the global/admin bundle) so a
     # user's "finished" never lands on another account's trackers.
+    # Follow the same applicability pattern as SyncManager.clear_progress:
+    # configured + matching sync_type + supports_book.
     for client_name, client in uc().sync_clients.items():
-        if client.is_configured():
-            if client_name.lower() == 'abs' and getattr(book, 'sync_mode', 'audiobook') == 'ebook_only':
-                logger.info(f"Skipping ABS mark-complete for ebook-only mapping '{book.abs_id}'")
-                continue
-            if client_name.lower() == 'abs':
-                client.abs_client.mark_finished(abs_id)
-            else:
-                client.update_progress(book, update_req)
+        if not client.is_configured():
+            continue
+        # Skip if this client does not handle the book's sync type.
+        if sync_type not in client.get_supported_sync_types():
+            continue
+        # Skip if the client cannot handle this book's specific source.
+        if not client.supports_book(book):
+            continue
 
+        success = False
+        result = None
+        updated_state = {}
+        if client_name.lower() == 'abs':
+            try:
+                success = bool(client.abs_client.mark_finished(abs_id))
+                if success:
+                    # ABS's isFinished flag does not necessarily move currentTime
+                    # to the exact duration. Persist audio-position seconds here,
+                    # never wall-clock epoch seconds, because ABSSyncClient uses
+                    # State.timestamp as its previous audio position.
+                    duration = getattr(book, 'duration', None)
+                    updated_state = {
+                        'pct': 1.0,
+                        'ts': float(duration) if duration and duration > 0 else 0.0,
+                    }
+            except Exception as e:
+                logger.error(f"❌ ABS mark_finished failed for '{abs_id}': {e}")
+        else:
+            try:
+                result = client.update_progress(book, update_req)
+                success = getattr(result, 'success', False) if result else False
+                if success:
+                    updated_state = getattr(result, 'updated_state', {}) or {}
+            except Exception as e:
+                logger.error(f"❌ '{client_name}' mark-complete failed for '{abs_id}': {e}")
+
+        # Only persist state when the write succeeded.
+        if success:
+            # Preserve locator/audio metadata returned by the client. Percentage
+            # clients historically use State.timestamp as an observation epoch;
+            # audio clients return a real position in updated_state['ts'].
+            now = int(time.time())
+            resolved_timestamp = updated_state.get('ts')
+            state_timestamp = resolved_timestamp if resolved_timestamp is not None else now
             state = State(
                 abs_id=abs_id,
                 client_name=client_name.lower(),
                 percentage=1.0,
-                timestamp=int(time.time()),
-                last_updated=int(time.time()),
+                timestamp=state_timestamp,
+                last_updated=now,
                 user_id=(user.id if user else None),
+                xpath=updated_state.get('xpath'),
+                cfi=updated_state.get('cfi'),
             )
             database_service.save_state(state)
 
@@ -6853,15 +7683,22 @@ def update_hash(abs_id):
             flash("❌ Could not recalculate hash (file not found?)", "error")
             return redirect(url_for('index'))
 
-    # Make the linked hash durable: register it as a linked KosyncDocument so the
-    # device-sync reconciler / re-match can never strand a hash the user just pinned,
-    # and so PUT/GET resolve it via the per-book sibling path independent of the
-    # single book.kosync_doc_id column.
-    if updated and book.kosync_doc_id:
+    # Keep both sides of a hash change resolvable. The selected hash remains the
+    # book's primary pointer, while the previous hash stays linked as a sibling so
+    # existing devices and progress rows are never stranded.
+    hashes_to_link = [book.kosync_doc_id]
+    if old_hash and old_hash != book.kosync_doc_id:
+        hashes_to_link.append(old_hash)
+    for doc_hash in hashes_to_link:
+        if not updated or not doc_hash:
+            continue
         try:
-            database_service.ensure_linked_kosync_document(book.kosync_doc_id, abs_id)
+            database_service.ensure_linked_kosync_document(doc_hash, abs_id)
         except Exception as e:
-            logger.warning(f"⚠️ Could not register linked KoSync document for '{sanitize_log_data(book.abs_title)}': {e}")
+            logger.warning(
+                f"⚠️ Could not register linked KoSync document '{sanitize_log_data(doc_hash)}' "
+                f"for '{sanitize_log_data(book.abs_title)}': {e}"
+            )
 
     # Trigger an instant sync cycle so the engine can reconcile progress
     # using 'furthest wins' logic. This avoids overwriting newer progress
@@ -8126,6 +8963,7 @@ def _extract_series_from_title(title: str) -> tuple:
     return None, None
 
 
+@admin_required
 def api_series_backfill():
     """Backfill series_name/series_sequence for all books that lack it.
 
@@ -8195,6 +9033,7 @@ def api_series_backfill():
     }), 200
 
 
+@admin_required
 def api_debug_abs_series():
     """Return the raw series metadata ABS sends for a given abs_id. For debugging only."""
     abs_id = request.args.get("abs_id", "").strip()
@@ -8232,6 +9071,9 @@ def api_debug_abs_series():
 
 def proxy_cover(abs_id):
     """Proxy cover access to allow loading covers from local network ABS instances."""
+    user = current_user()
+    if not _user_may_modify_book(user, abs_id):
+        return _forbidden_book_response(json_response=True)
     try:
         token = container.abs_client().token
         base_url = container.abs_client().base_url
@@ -8310,6 +9152,20 @@ def get_abs_libraries():
 
 def proxy_booklore_audiobook_cover(book_id):
     """Stream a Grimmory audiobook cover through the backend."""
+    user = current_user()
+    # The route id identifies the audiobook, which can be paired with an ebook
+    # from a different provider (or a different book id on the same provider).
+    book = (
+        database_service.get_book_by_audio_source('BookLore', str(book_id))
+        if database_service else None
+    )
+    if book and book.abs_id:
+        if not _user_may_modify_book(user, book.abs_id):
+            return _forbidden_book_response(json_response=True)
+    elif user is not None and not getattr(user, 'is_admin', False):
+        # Non-admin requesting a cover for an unknown Grimmory book — forbid
+        return _forbidden_book_response(json_response=True)
+
     client = container.booklore_client()
     if not client.is_configured():
         return "Grimmory not configured", 400
@@ -8328,6 +9184,19 @@ def proxy_booklore_audiobook_cover(book_id):
 
 def proxy_bookorbit_audiobook_cover(book_id):
     """Stream a BookOrbit book cover through the backend."""
+    user = current_user()
+    # The route id identifies the audiobook, not the linked ebook source.
+    book = (
+        database_service.get_book_by_audio_source('BookOrbit', str(book_id))
+        if database_service else None
+    )
+    if book and book.abs_id:
+        if not _user_may_modify_book(user, book.abs_id):
+            return _forbidden_book_response(json_response=True)
+    elif user is not None and not getattr(user, 'is_admin', False):
+        # Non-admin requesting a cover for an unknown BookOrbit book — forbid
+        return _forbidden_book_response(json_response=True)
+
     client = uc().bookorbit_client
     if not client or not client.is_configured():
         return "BookOrbit not configured", 400
@@ -8469,12 +9338,22 @@ def _run_test_connection(service: str, payload: dict):
             _coerce_test_str(data.get('BOOKORBIT_USER')),
             _coerce_test_str(data.get('BOOKORBIT_PASSWORD')),
         ),
+        'bookfusion': lambda data: _test_bookfusion(
+            _coerce_test_bool(data.get('BOOKFUSION_ENABLED')),
+            _normalize_test_url(data.get('BOOKFUSION_API_URL')),
+            _coerce_test_str(data.get('BOOKFUSION_ACCESS_TOKEN')),
+        ),
         'cwa': lambda data: _test_cwa(
             _coerce_test_bool(data.get('CWA_ENABLED')),
             _normalize_test_url(data.get('CWA_SERVER')),
             _coerce_test_str(data.get('CWA_USERNAME')),
             _coerce_test_str(data.get('CWA_PASSWORD')),
             _coerce_test_str(data.get('CWA_SYNC_TOKEN')),
+        ),
+        'readest': lambda data: _test_readest(
+            _coerce_test_str(data.get('READEST_EMAIL')),
+            _coerce_test_str(data.get('READEST_PASSWORD')),
+            _normalize_test_url(data.get('READEST_SUPABASE_URL')),
         ),
         'hardcover': lambda data: _test_hardcover(
             _coerce_test_bool(data.get('HARDCOVER_ENABLED')),
@@ -8510,9 +9389,338 @@ def _run_test_connection(service: str, payload: dict):
         return jsonify({"ok": False, "message": _test_conn_error(e)})
 
 
+@admin_required
 def test_connection(service: str):
     """Test connectivity with diagnostic error messages."""
     return _run_test_connection(service, request.get_json(silent=True) or {})
+
+
+def api_bookfusion_device_start() -> object:
+    """Start the BookFusion device-link flow for the current user."""
+    client = uc().bookfusion_client
+    data = client.start_device_link()
+    if not data:
+        return jsonify({"ok": False, "message": "Could not start BookFusion device link"}), 502
+    return jsonify({
+        "ok": True,
+        "device_code": data.get("device_code"),
+        "user_code": data.get("user_code"),
+        "verification_uri": data.get("verification_uri"),
+        "interval": data.get("interval", 5),
+        "expires_in": data.get("expires_in", 600),
+    })
+
+
+def api_bookfusion_device_poll() -> object:
+    """Poll BookFusion's device-link token endpoint for the current user."""
+    payload = request.get_json(silent=True) or {}
+    device_code = str(payload.get("device_code") or "").strip()
+    if not device_code:
+        return jsonify({"ok": False, "error": "missing_device_code"}), 400
+    result = uc().bookfusion_client.poll_token(device_code)
+    if result.get("ok"):
+        user = current_user()
+        if user is not None:
+            try:
+                container.user_client_registry().invalidate(user.id)
+            except Exception as e:
+                logger.debug("Could not invalidate BookFusion client bundle after link for user %s: %s", user.id, e)
+    status = 200 if result.get("ok") or result.get("error") in ("authorization_pending", "slow_down") else 400
+    return jsonify(result), status
+
+
+def _bookfusion_client_for_user(user_id):
+    """Build a BookFusion client bound to a specific user so a device-link token
+    persists to THAT user's credentials (used by the admin link-on-behalf flow)."""
+    from src.api.bookfusion_client import BookFusionClient
+    creds = database_service.get_user_credentials(user_id) or {}
+    return BookFusionClient(credentials=creds, database_service=database_service, user_id=user_id)
+
+
+@admin_required
+def admin_user_bookfusion_device_start(user_id) -> object:
+    """Start the BookFusion device-link flow on behalf of a specific user."""
+    target = database_service.get_user(user_id)
+    if not target:
+        return jsonify({"ok": False, "message": "User not found"}), 404
+    data = _bookfusion_client_for_user(target.id).start_device_link()
+    if not data:
+        return jsonify({"ok": False, "message": "Could not start BookFusion device link"}), 502
+    return jsonify({
+        "ok": True,
+        "device_code": data.get("device_code"),
+        "user_code": data.get("user_code"),
+        "verification_uri": data.get("verification_uri"),
+        "interval": data.get("interval", 5),
+        "expires_in": data.get("expires_in", 600),
+    })
+
+
+@admin_required
+def admin_user_bookfusion_device_poll(user_id) -> object:
+    """Poll the BookFusion device-link token endpoint on behalf of a specific
+    user, persisting the resulting access token to THAT user (not the admin)."""
+    target = database_service.get_user(user_id)
+    if not target:
+        return jsonify({"ok": False, "error": "user_not_found"}), 404
+    payload = request.get_json(silent=True) or {}
+    device_code = str(payload.get("device_code") or "").strip()
+    if not device_code:
+        return jsonify({"ok": False, "error": "missing_device_code"}), 400
+    result = _bookfusion_client_for_user(target.id).poll_token(device_code)
+    if result.get("ok"):
+        try:
+            container.user_client_registry().invalidate(target.id)
+        except Exception as e:
+            logger.debug("Could not invalidate BookFusion client bundle after admin link for user %s: %s", target.id, e)
+    status = 200 if result.get("ok") or result.get("error") in ("authorization_pending", "slow_down") else 400
+    return jsonify(result), status
+
+
+def _serialize_bookfusion_search_item(item: dict) -> dict:
+    """Normalize one BookFusion library search row for dashboard linking."""
+    book_id = item.get("id") or item.get("book_id")
+    return {
+        "id": str(book_id) if book_id not in (None, "") else "",
+        "title": str(item.get("title") or item.get("name") or "").strip(),
+        "author": _coerce_author_display(item.get("authors") or item.get("author")),
+    }
+
+
+def api_bookfusion_search() -> object:
+    """Search the current user's BookFusion library for link targets."""
+    query = (request.args.get("q") or "").strip()
+    if not query:
+        return jsonify({"books": []})
+    client = uc().bookfusion_client
+    if not client.is_configured():
+        return jsonify({"error": "BookFusion not configured"}), 400
+    books = client.search_books(page=1, per_page=50, q=query) or []
+    query_lower = query.lower()
+    normalized = []
+    for item in books:
+        row = _serialize_bookfusion_search_item(item)
+        if not row["id"]:
+            continue
+        haystack = f"{row['title']} {row['author']}".lower()
+        if query_lower and query_lower not in haystack:
+            continue
+        normalized.append(row)
+    return jsonify({"books": normalized})
+
+
+def api_bookfusion_link(abs_id: str) -> object:
+    """Link a shared BookBridge book to the current user's BookFusion book."""
+    book = database_service.get_book(abs_id)
+    if not book:
+        return jsonify({"success": False, "error": "Book not found"}), 404
+    user = current_user()
+    if not _user_may_modify_book(user, abs_id):
+        return _forbidden_book_response(json_response=True)
+    user_id = user.id if user is not None else database_service._default_user_id()
+    payload = request.get_json(silent=True) or {}
+    bookfusion_id = str(payload.get("bookfusion_id") or "").strip()
+    if not bookfusion_id:
+        return jsonify({"success": False, "error": "Missing BookFusion book id"}), 400
+    link = database_service.set_user_bookfusion_link(
+        user_id,
+        abs_id,
+        bookfusion_id,
+        title=str(payload.get("title") or "").strip() or None,
+        author=str(payload.get("author") or "").strip() or None,
+    )
+    return jsonify({
+        "success": bool(link),
+        "bookfusion_id": (link or {}).get("bookfusion_id"),
+        "title": (link or {}).get("title"),
+    })
+
+
+def api_bookfusion_unlink(abs_id: str) -> object:
+    """Remove the current user's BookFusion link for a BookBridge book."""
+    book = database_service.get_book(abs_id)
+    if not book:
+        return jsonify({"success": False, "error": "Book not found"}), 404
+    user = current_user()
+    if not _user_may_modify_book(user, abs_id):
+        return _forbidden_book_response(json_response=True)
+    user_id = user.id if user is not None else database_service._default_user_id()
+    return jsonify({"success": database_service.delete_user_bookfusion_link(user_id, abs_id)})
+
+
+def _cleanup_temp(path: Path) -> None:
+    """Remove *path* if it exists, swallowing any errors."""
+    try:
+        if path.exists():
+            path.unlink()
+    except Exception as exc:
+        logger.debug("Could not remove temp file %s: %s", path, exc)
+
+
+def api_bookfusion_upload(abs_id: str) -> object:
+    """Upload an EPUB to BookFusion and link it.
+
+    Accepts an optional JSON body ``{"variant": "standard" | "readaloud"}``.
+    ``"standard"`` (default) uploads the book's local EPUB file. ``"readaloud"``
+    fetches the full Storyteller ReadAloud EPUB3 with embedded narration audio
+    and uploads that instead; requires the book to have a ``storyteller_uuid``.
+    """
+    book = database_service.get_book(abs_id)
+    if not book:
+        return jsonify({"success": False, "error": "Book not found"}), 404
+    user = current_user()
+    if not _user_may_modify_book(user, abs_id):
+        return _forbidden_book_response(json_response=True)
+    user_id = user.id if user is not None else database_service._default_user_id()
+
+    # Parse variant from JSON body (default: standard)
+    payload = request.get_json(silent=True) or {}
+    variant = str(payload.get("variant") or "standard").strip().lower()
+
+    # ------------------------------------------------------------------
+    # ReadAloud variant: fetch full audio-intact EPUB from Storyteller
+    # ------------------------------------------------------------------
+    if variant == "readaloud":
+        if not book.storyteller_uuid:
+            return jsonify({"success": False, "error": "This book is not linked to Storyteller"}), 400
+
+        tmp_dir = Path(os.environ.get("DATA_DIR", "/data")) / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = tmp_dir / f"bf_readaloud_{abs_id}_{uuid.uuid4().hex}.epub"
+
+        storyteller_client = uc().storyteller_client
+        if not storyteller_client.is_configured():
+            return jsonify({"success": False, "error": "Storyteller is not configured for this user"}), 400
+
+        try:
+            ok = storyteller_client.download_book(book.storyteller_uuid, tmp_path, polling=False)
+        except Exception as exc:
+            logger.warning("Storyteller ReadAloud EPUB download failed for %s: %s", abs_id, exc)
+            ok = False
+        if not ok:
+            _cleanup_temp(tmp_path)
+            return jsonify({"success": False, "error": "Could not download the Storyteller ReadAloud EPUB (it may not be processed yet)"}), 502
+
+        upload_client = uc().bookfusion_upload_client
+        if not upload_client.is_configured():
+            _cleanup_temp(tmp_path)
+            return jsonify({"success": False, "error": "BookFusion Calibre API key not set"}), 400
+
+        metadata = extract_epub_metadata(str(tmp_path))
+        try:
+            result = upload_client.upload_epub(str(tmp_path), metadata, s3_timeout=_S3_TIMEOUT_LARGE)
+        finally:
+            _cleanup_temp(tmp_path)
+
+    # ------------------------------------------------------------------
+    # Standard variant: existing local-EPUB flow (unchanged behavior)
+    # ------------------------------------------------------------------
+    else:
+        filename = book.original_ebook_filename or book.ebook_filename
+        if not filename:
+            return jsonify({"success": False, "error": "No local ebook to upload"}), 400
+        try:
+            epub_path = container.ebook_parser().resolve_book_path(filename)
+        except Exception as exc:
+            logger.warning("Could not resolve ebook path for %s: %s", filename, exc)
+            return jsonify({"success": False, "error": "Local ebook file not found"}), 400
+        if not epub_path or not epub_path.exists():
+            return jsonify({"success": False, "error": "Local ebook file not found"}), 400
+
+        upload_client = uc().bookfusion_upload_client
+        if not upload_client.is_configured():
+            return jsonify({"success": False, "error": "BookFusion Calibre API key not set"}), 400
+
+        metadata = extract_epub_metadata(str(epub_path))
+        result = upload_client.upload_epub(str(epub_path), metadata)
+
+    # ------------------------------------------------------------------
+    # Shared result handling (both variants converge here)
+    # ------------------------------------------------------------------
+    if result.status == "created":
+        book_id = result.book_id
+        bookfusion_id_str = str(book_id) if book_id is not None else None
+        link = database_service.set_user_bookfusion_link(
+            user_id, abs_id, bookfusion_id_str,
+            title=str(metadata.get("title") or "").strip() or None,
+            author=str((metadata.get("authors") or [None])[0] or "").strip() or None,
+        )
+        if not link:
+            logger.warning("BookFusion upload succeeded but link creation failed for %s / id=%s", abs_id, book_id)
+        return jsonify({
+            "success": True,
+            "bookfusion_id": book_id,
+            "created": True,
+        })
+
+    if result.status == "duplicate":
+        title = metadata.get("title", "")
+        author = (metadata.get("authors") or [None])[0] or ""
+        search_id = _resolve_duplicate_bookfusion_id(upload_client, title, author)
+        if search_id is not None:
+            link = database_service.set_user_bookfusion_link(
+                user_id, abs_id, str(search_id),
+                title=str(metadata.get("title") or "").strip() or None,
+                author=str((metadata.get("authors") or [None])[0] or "").strip() or None,
+            )
+            return jsonify({
+                "success": True,
+                "bookfusion_id": search_id,
+                "created": False,
+            })
+        return jsonify({
+            "success": False,
+            "duplicate": True,
+            "error": "Already in your BookFusion library",
+        }), 409
+
+    # error
+    return jsonify({"success": False, "error": result.message}), 502
+
+
+def _resolve_duplicate_bookfusion_id(upload_client, title: str, author: str = "") -> int | None:
+    """Try to find a BookFusion book id for an already-uploaded duplicate.
+
+    Called when upload init returns 422 (file digest already known). Uses the
+    reader client (``uc().bookfusion_client``) to search by title and verifies
+    that the returned book's title (and first author, when available) match
+    the local metadata before linking.
+    """
+    if not title:
+        return None
+    reader_client = uc().bookfusion_client
+    if not reader_client.is_configured():
+        return None
+    try:
+        results = reader_client.search_books(page=1, per_page=5, q=title) or []
+    except Exception as exc:
+        logger.warning("BookFusion duplicate search failed: %s", exc)
+        return None
+    title_lower = title.strip().lower()
+    author_lower = author.strip().lower() if author else ""
+    for item in results:
+        item_id = item.get("id")
+        if item_id is None:
+            continue
+        # Verify title matches (case-insensitive)
+        item_title = (item.get("title") or "").strip().lower()
+        if item_title != title_lower:
+            continue
+        # Verify first author matches if we have one
+        if author_lower:
+            item_authors = item.get("authors") or item.get("author") or ""
+            first_author = ""
+            if isinstance(item_authors, list):
+                first_author = (item_authors[0] or "").strip().lower() if item_authors else ""
+            elif isinstance(item_authors, str):
+                first_author = item_authors.strip().lower()
+            if first_author != author_lower:
+                continue
+        try:
+            return int(item_id)
+        except (ValueError, TypeError):
+            continue
+    return None
 
 
 def _test_llm_provider(
@@ -8885,6 +10093,40 @@ def _test_hardcover(enabled: bool, token: str) -> dict:
     return {"ok": False, "message": f"API returned {r.status_code}"}
 
 
+def _test_readest(email: str, password: str, supabase_url: str) -> dict:
+    """Validate Readest credentials by logging in — without persisting tokens."""
+    from src.api.readest_client import ReadestClient
+    email = (email or "").strip()
+    if not email or not password:
+        return {"ok": False, "message": "Enter both email and password"}
+    creds = {"READEST_EMAIL": email, "READEST_PASSWORD": password}
+    if supabase_url:
+        creds["READEST_SUPABASE_URL"] = supabase_url
+    client = ReadestClient(credentials=creds)  # no db/user_id → no persistence
+    if client.login(email, password, persist=False):
+        return {"ok": True, "message": f"Signed in to Readest as {email}"}
+    return {"ok": False, "message": "Login rejected — check email/password (Google sign-in accounts have no password)"}
+
+
+def _test_bookfusion(enabled: bool, api_url: str, access_token: str) -> dict:
+    """Validate a BookFusion access token without persisting anything."""
+    if not enabled:
+        return {"ok": False, "message": "BookFusion is disabled"}
+    if not access_token:
+        return {"ok": False, "message": "Link BookFusion first"}
+    from src.api.bookfusion_client import BookFusionClient
+    creds = {
+        "BOOKFUSION_ENABLED": "true",
+        "BOOKFUSION_ACCESS_TOKEN": access_token,
+    }
+    if api_url:
+        creds["BOOKFUSION_API_URL"] = api_url
+    client = BookFusionClient(credentials=creds)
+    if client.check_connection():
+        return {"ok": True, "message": "Connected to BookFusion"}
+    return {"ok": False, "message": "BookFusion API rejected the token"}
+
+
 def _test_storygraph(enabled: bool, session_cookie: str, remember_user_token: str) -> dict:
     if not enabled:
         return {"ok": False, "message": "StoryGraph is disabled"}
@@ -9037,11 +10279,17 @@ def create_app(test_container=None):
     app.add_url_rule('/login', 'login', login, methods=['GET', 'POST'])
     app.add_url_rule('/logout', 'logout', logout, methods=['GET', 'POST'])
     app.add_url_rule('/account', 'account', account, methods=['GET', 'POST'])
+    app.add_url_rule('/account/integrations', 'account_integrations', account_integrations, methods=['GET', 'POST'])
+    app.add_url_rule('/api/account/test-connection/<service>', 'account_test_connection', account_test_connection, methods=['POST'])
+    app.add_url_rule('/api/account/abs-libraries', 'account_abs_libraries', account_abs_libraries, methods=['POST'])
+    app.add_url_rule('/api/account/booklore-libraries', 'account_booklore_libraries', account_booklore_libraries, methods=['POST'])
     app.add_url_rule('/admin/users', 'admin_users', admin_users, methods=['GET', 'POST'])
     app.add_url_rule('/admin/users/<int:user_id>/integrations', 'admin_user_integrations', admin_user_integrations, methods=['GET', 'POST'])
     app.add_url_rule('/api/admin/users/<int:user_id>/test-connection/<service>', 'admin_user_test_connection', admin_user_test_connection, methods=['POST'])
     app.add_url_rule('/api/admin/users/<int:user_id>/abs-libraries', 'admin_user_abs_libraries', admin_user_abs_libraries, methods=['POST'])
     app.add_url_rule('/api/admin/users/<int:user_id>/booklore-libraries', 'admin_user_booklore_libraries', admin_user_booklore_libraries, methods=['POST'])
+    app.add_url_rule('/api/admin/users/<int:user_id>/bookfusion/device/start', 'admin_user_bookfusion_device_start', admin_user_bookfusion_device_start, methods=['POST'])
+    app.add_url_rule('/api/admin/users/<int:user_id>/bookfusion/device/poll', 'admin_user_bookfusion_device_poll', admin_user_bookfusion_device_poll, methods=['POST'])
     app.add_url_rule('/', 'index', index)
     app.add_url_rule('/shelfmark', 'shelfmark', shelfmark)
     app.add_url_rule('/forge', 'forge', forge)
@@ -9091,6 +10339,12 @@ def create_app(test_container=None):
     app.add_url_rule('/api/booklore/shelves', 'get_booklore_shelves', get_booklore_shelves, methods=['GET'])
     app.add_url_rule('/api/abs/libraries', 'get_abs_libraries', get_abs_libraries, methods=['GET'])
     app.add_url_rule('/api/booklore/refresh', 'api_booklore_refresh', api_booklore_refresh, methods=['POST'])
+    app.add_url_rule('/api/bookfusion/device/start', 'api_bookfusion_device_start', api_bookfusion_device_start, methods=['POST'])
+    app.add_url_rule('/api/bookfusion/device/poll', 'api_bookfusion_device_poll', api_bookfusion_device_poll, methods=['POST'])
+    app.add_url_rule('/api/bookfusion/search', 'api_bookfusion_search', api_bookfusion_search, methods=['GET'])
+    app.add_url_rule('/api/bookfusion/link/<abs_id>', 'api_bookfusion_link', api_bookfusion_link, methods=['POST'])
+    app.add_url_rule('/api/bookfusion/link/<abs_id>', 'api_bookfusion_unlink', api_bookfusion_unlink, methods=['DELETE'])
+    app.add_url_rule('/api/bookfusion/upload/<abs_id>', 'api_bookfusion_upload', api_bookfusion_upload, methods=['POST'])
     app.add_url_rule('/api/test-connection/<service>', 'test_connection', test_connection, methods=['POST'])
 
     # Storyteller API routes
@@ -9109,14 +10363,27 @@ def create_app(test_container=None):
 
     @app.route('/api/forge/active', methods=['GET'])
     def forge_active_tasks():
+        """Return active forging tasks, scoped to the current user for non-admins."""
+        user = current_user()
+        is_admin = user is not None and getattr(user, 'is_admin', False)
+        is_authenticated = user is not None
+
         tasks = set()
-        try:
-            tasks.update(container.forge_service().active_tasks or set())
-        except Exception:
-            pass
+
+        # Unauthenticated or admin: show all forge_service internal tasks
+        if not is_authenticated or is_admin:
+            try:
+                tasks.update(container.forge_service().active_tasks or set())
+            except Exception:
+                pass
+
         try:
             forging_books = database_service.get_books_by_status('forging')
             if isinstance(forging_books, (list, tuple, set)):
+                if is_authenticated and not is_admin:
+                    # Non-admins only see forging books they have claimed
+                    linked_ids = database_service.get_linked_abs_ids(user.id)
+                    forging_books = [b for b in forging_books if getattr(b, 'abs_id', None) in linked_ids]
                 for book in forging_books:
                     title = getattr(book, 'abs_title', None) or getattr(book, 'audio_title', None) or getattr(book, 'abs_id', None)
                     if title:
@@ -9202,6 +10469,18 @@ if __name__ == '__main__':
                 booklore_interval = int(os.environ.get("BOOKLORE_ANNOTATION_SYNC_MINUTES", "15") or 0)
                 if booklore_interval > 0:
                     intervals.append(booklore_interval)
+            except (TypeError, ValueError):
+                pass
+            try:
+                readest_interval = int(os.environ.get("READEST_ANNOTATION_SYNC_MINUTES", "15") or 0)
+                if readest_interval > 0:
+                    intervals.append(readest_interval)
+            except (TypeError, ValueError):
+                pass
+            try:
+                hardcover_interval = int(os.environ.get("HARDCOVER_ANNOTATION_SYNC_MINUTES", "30") or 0)
+                if hardcover_interval > 0:
+                    intervals.append(hardcover_interval)
             except (TypeError, ValueError):
                 pass
             return min(intervals) if intervals else 0

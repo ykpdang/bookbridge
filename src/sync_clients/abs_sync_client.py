@@ -47,18 +47,24 @@ class ABSSyncClient(SyncClient):
             item_data = bulk_context[abs_id]
             abs_ts = item_data.get('currentTime', 0)
             abs_last_update = item_data.get('lastUpdate')
+            abs_finished = bool(item_data.get('isFinished'))
             # Note: Still need to convert to percentage using transcript
         else:
             response = self.abs_client.get_progress(abs_id)
             abs_ts = response.get('currentTime') if response is not None else None
             abs_last_update = response.get('lastUpdate') if response is not None else None
+            abs_finished = bool(response.get('isFinished')) if response is not None else False
 
         if abs_ts is None:
             logger.info("🔍 ABS timestamp is None, probably not started the book yet")
             abs_ts = 0.0
 
-        # Convert timestamp to percentage
-        abs_pct = self._abs_to_percentage(abs_ts, book)
+        # ABS can mark an item finished without moving currentTime to the exact
+        # duration. Treat the service's completion flag as authoritative so the
+        # next cycle does not reinterpret a completed book as a small rewind.
+        if abs_finished and book.duration and book.duration > 0:
+            abs_ts = float(book.duration)
+        abs_pct = 1.0 if abs_finished else self._abs_to_percentage(abs_ts, book)
         if abs_ts > 0 and abs_pct is None:
             # We lower this to debug to avoid spam if book is offline/unprocessed
             pass

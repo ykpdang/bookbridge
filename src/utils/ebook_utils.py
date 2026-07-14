@@ -96,9 +96,17 @@ class EbookParser:
         self.useXpathSegmentFallback = os.getenv("XPATH_FALLBACK_TO_PREVIOUS_SEGMENT", "false").lower() == "true"
         self.locator_roundtrip_tolerance = int(os.getenv("LOCATOR_ROUNDTRIP_TOLERANCE_CHARS", 2))
 
+        # Path-resolution cache: filename -> resolved Path. Avoids repeated 6-7s
+        # recursive rglob scans for frequently-looked-up files. Entries are
+        # validated on access (path must still exist). Cleared on invalidate call.
+        self._path_cache: OrderedDict[str, Path] = OrderedDict()
+        self._path_cache_max = max(0, int(os.getenv("EBOOK_PATH_CACHE_SIZE", "100")))
+        self._path_cache_lock = threading.Lock()
+
         logger.info(
             f"✅ EbookParser initialized (cache={cache_size}, hash={self.hash_method}, "
-            f"xpath_fallback={self.useXpathSegmentFallback}, extra_dirs={len(self.extra_book_dirs)})"
+            f"xpath_fallback={self.useXpathSegmentFallback}, extra_dirs={len(self.extra_book_dirs)}, "
+            f"path_cache={self._path_cache_max})"
         )
 
     @staticmethod
@@ -114,11 +122,35 @@ class EbookParser:
         return [self.books_dir, *self.extra_book_dirs]
 
     def resolve_book_path(self, filename):
+        # 1. Path-resolution cache: avoid repeated recursive scans for the same file.
+        with self._path_cache_lock:
+            cached = self._path_cache.get(filename)
+            if cached is not None:
+                if cached.exists():
+                    self._path_cache.move_to_end(filename)
+                    return cached
+                # Stale entry (file moved/deleted) — drop and re-resolve.
+                self._path_cache.pop(filename, None)
+
+        # 2. Managed cache files bypass recursive library scans. These are
+        #    provider-downloaded EPUBs (BookFusion, Storyteller) that live in
+        #    the cache directory, not in the library. Checking here avoids a
+        #    6-7s rglob against a 40 MB library tree for every hydration.
+        if filename.startswith("bookfusion_") or filename.startswith("storyteller_"):
+            if self.epub_cache_dir.exists():
+                cached_path = safe_cache_path(self.epub_cache_dir, filename)
+                if cached_path and cached_path.exists():
+                    self._remember_resolved_path(filename, cached_path)
+                    return cached_path
+
+        # 3. Recursive library scans (existing precedence: glob before rglob).
         safe_name = glob.escape(filename)
         for d in self.search_dirs():
             try:
                 if d.exists():
-                    return next(d.glob(f"**/{safe_name}"))
+                    result = next(d.glob(f"**/{safe_name}"))
+                    self._remember_resolved_path(filename, result)
+                    return result
             except StopIteration:
                 continue
 
@@ -130,14 +162,36 @@ class EbookParser:
                 continue
             for f in d.rglob("*"):
                 if f.name == filename:
+                    self._remember_resolved_path(filename, f)
                     return f
 
+        # 4. Fall back to cache directory for ordinary filenames too.
         if self.epub_cache_dir.exists():
             cached_path = safe_cache_path(self.epub_cache_dir, filename)
             if cached_path and cached_path.exists():
+                self._remember_resolved_path(filename, cached_path)
                 return cached_path
 
         raise FileNotFoundError(f"Could not locate {filename}")
+
+    def _remember_resolved_path(self, filename: str, path: Path) -> None:
+        """Store a resolved path and evict least-recently-used entries."""
+        if self._path_cache_max <= 0:
+            return
+        with self._path_cache_lock:
+            self._path_cache.pop(filename, None)
+            self._path_cache[filename] = path
+            while len(self._path_cache) > self._path_cache_max:
+                self._path_cache.popitem(last=False)
+
+    def invalidate_path_cache(self, filename: str | None = None) -> None:
+        """Drop path-resolution cache entries. Used when files are known to have
+        been added, removed, or renamed so stale entries are not reused."""
+        with self._path_cache_lock:
+            if filename:
+                self._path_cache.pop(filename, None)
+            else:
+                self._path_cache.clear()
 
     def get_book_identifiers(self, filepath) -> set:
         """Return the set of normalized DC identifiers embedded in an EPUB.
@@ -464,6 +518,57 @@ class EbookParser:
         except Exception as e:
             logger.error(f"❌ Error getting text at percentage: {e}")
             return None
+
+    def bookfusion_reading_anchor(self, filename, percentage) -> Optional[dict]:
+        """Map a whole-book fraction to a BookFusion reading-position anchor.
+
+        BookFusion restores a reflowable EPUB from ``cfi`` (primary) and
+        ``chapter_index`` + a spine-normalized ``page_position_in_book``; a bare
+        ``percentage`` is only a coarse fallback. ``page_position_in_book`` is
+        ``(spine_index + fraction_within_chapter) / spine_count`` — each spine
+        item weighted equally — not the whole-book fraction.
+
+        Anchors are computed against ``filename`` (BookFusion's own cached copy),
+        because a book's chapter/spine structure is not portable across its
+        different source EPUBs. Returns ``{'chapter_index',
+        'page_position_in_book', 'cfi'}`` or ``None`` when the EPUB can't be
+        mapped.
+        """
+        try:
+            pct = max(0.0, min(1.0, float(percentage)))
+        except (TypeError, ValueError):
+            return None
+        try:
+            book_path = self.resolve_book_path(filename)
+            full_text, spine_map = self.extract_text_and_map(book_path)
+        except Exception as e:
+            logger.debug("BookFusion anchor: could not parse '%s': %s", filename, e)
+            return None
+        if not full_text or not spine_map:
+            return None
+
+        total = len(full_text)
+        target_pos = max(0, min(int(total * pct), total))
+        chosen = next((item for item in spine_map if target_pos < item["end"]), spine_map[-1])
+
+        char_len = int(chosen.get("char_len") or 0)
+        local_index = max(0, min(target_pos - int(chosen["start"]), char_len))
+        chapter_index = int(chosen["spine_index"]) - 1
+        frac = (local_index / char_len) if char_len > 0 else 0.0
+        spine_count = len(spine_map)
+        page_position = (chapter_index + frac) / spine_count if spine_count else pct
+
+        try:
+            cfi = self._generate_cfi(chapter_index, chosen["content"], local_index)
+        except Exception as e:
+            logger.debug("BookFusion anchor: CFI generation failed for '%s': %s", filename, e)
+            cfi = None
+
+        return {
+            "chapter_index": chapter_index,
+            "page_position_in_book": round(max(0.0, min(1.0, page_position)), 10),
+            "cfi": cfi,
+        }
 
     def get_character_delta(self, filename, percentage_prev, percentage_new):
         """Calculate character difference between two percentages."""
@@ -894,6 +999,40 @@ class EbookParser:
             curr_tag = curr_tag.parent
         return fragment_id
 
+    def _resolve_spine_item_for_position(self, spine_map, target_index):
+        """Resolve the spine item containing a character position.
+        Handles synthetic separator gaps between spine items and trailing
+        positions past the last real character. For gaps between items, snaps
+        to the following non-empty spine item. For positions past the last
+        item, clamps to the last real character position and returns its item.
+        Returns (spine_item, clamped_index) or (None, None) when the spine
+        map is empty or the position is unrecoverable.
+        """
+        if not spine_map:
+            return None, None
+
+        non_empty_items = [
+            item for item in spine_map
+            if item['end'] > item['start']
+        ]
+        if not non_empty_items:
+            return None, None
+
+        # 1. Exact match — position falls inside a spine item's range.
+        for item in non_empty_items:
+            if item['start'] <= target_index < item['end']:
+                return item, target_index
+        # 2. Gap between spine items: snap to the start of the following item
+        # that contains real text, skipping empty cover/navigation documents.
+        for item in non_empty_items:
+            if target_index < item['start']:
+                return item, item['start']
+        # 3. Trailing position past the last spine item: clamp to the last
+        #    real character, never an empty trailing item.
+        last = non_empty_items[-1]
+        clamped = min(target_index, last['end'] - 1)
+        return last, max(last['start'], clamped)
+
     def get_locator_from_char_offset(self, filename, char_offset: int) -> Optional[LocatorResult]:
         """
         Resolve a rich locator directly from a global character offset.
@@ -912,12 +1051,18 @@ class EbookParser:
             target_index = max(0, min(int(char_offset), total_len - 1))
             percentage = target_index / total_len
 
-            target_item = next((item for item in spine_map if item['start'] <= target_index < item['end']), None)
+            target_item, clamped_index = self._resolve_spine_item_for_position(spine_map, target_index)
             if not target_item:
-                target_item = spine_map[-1]
+                return None
 
-            local_index = max(0, target_index - target_item['start'])
-            perfect_ko = self.get_perfect_ko_xpath(filename, target_index)
+            local_index = max(0, clamped_index - target_item['start'])
+            # Use pre-resolved data to avoid a second resolve_book_path + extract_text_and_map
+            # inside get_perfect_ko_xpath. xpath and perfect_ko_xpath are identical here
+            # (both are the KOReader XPath), so compute once via the shared implementation.
+            perfect_ko = self._compute_xpath_at_position(
+                filename, clamped_index,
+                book_path=book_path, full_text=full_text, spine_map=spine_map,
+            )
             cfi = self._generate_cfi(target_item['spine_index'] - 1, target_item['content'], local_index)
             spine_item_len = max(1, target_item['end'] - target_item['start'])
             chapter_progress = local_index / spine_item_len
@@ -1181,14 +1326,43 @@ class EbookParser:
             if not full_text or not spine_map:
                 return None
 
+            # Delegate to the shared implementation that accepts pre-resolved data.
+            return self._compute_xpath_at_position(
+                filename, position,
+                book_path=book_path, full_text=full_text, spine_map=spine_map,
+            )
+        except Exception as e:
+            logger.error(f"❌ Error generating KOReader XPath: {e}")
+            return None
+
+    def _compute_xpath_at_position(self, filename, position,
+                                    book_path=None, full_text=None, spine_map=None) -> Optional[str]:
+        """Core xpath computation shared by get_perfect_ko_xpath and
+        get_locator_from_char_offset.
+
+        When book_path/full_text/spine_map are provided (already resolved by the
+        caller), this skips the redundant resolve_book_path + extract_text_and_map
+        that would otherwise add 6-7s for a 40 MB EPUB. Uses the path-resolution
+        cache that resolve_book_path now populates so even a direct call with the
+        same filename returns instantly.
+        """
+        try:
+            if book_path is None or full_text is None or spine_map is None:
+                book_path = self.resolve_book_path(filename)
+                full_text, spine_map = self.extract_text_and_map(book_path)
+
+            if not full_text or not spine_map:
+                return None
+
             # Clamp position to valid range
             position = max(0, min(position, len(full_text) - 1))
 
-            # Find which spine item contains this position
-            target_item = next((item for item in spine_map
-                              if item['start'] <= position < item['end']), spine_map[-1])
+            # Find which spine item contains this position (or snap to nearest valid)
+            target_item, clamped_pos = self._resolve_spine_item_for_position(spine_map, position)
+            if not target_item:
+                return None
 
-            local_pos = position - target_item['start']
+            local_pos = clamped_pos - target_item['start']
 
             # Parse HTML content with BeautifulSoup
             soup = BeautifulSoup(target_item['content'], 'html.parser')
@@ -1206,7 +1380,7 @@ class EbookParser:
                 clean_text = string.strip()
                 text_len = len(clean_text)
                 
-                if text_len == 0: 
+                if text_len == 0:
                     continue
 
                 if first_non_empty_string is None:
@@ -1222,7 +1396,7 @@ class EbookParser:
                     # Find where the clean text starts inside the raw string to determine true offset
                     raw_text = str(string)
                     raw_start = raw_text.find(clean_text)
-                    if raw_start == -1: 
+                    if raw_start == -1:
                         raw_start = 0
                     
                     target_offset = raw_start + clean_offset

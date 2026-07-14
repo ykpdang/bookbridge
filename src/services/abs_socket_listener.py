@@ -20,6 +20,9 @@ from src.services.write_tracker import record_write, is_own_write as _tracker_is
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_DEBOUNCE_SECONDS = 30
+_SELF_WRITE_SLACK_SECONDS = 60
+
 # ---------------------------------------------------------------------------
 # Write-suppression tracker — delegates to the shared write_tracker module.
 # Backward-compatible wrappers kept so abs_sync_client import still works.
@@ -34,6 +37,20 @@ def record_abs_write(abs_id: str, user_id=None) -> None:
 def is_own_write(abs_id: str, suppression_window: int = 60, user_id=None) -> bool:
     """Return True if a recent ABS progress event was caused by our own write."""
     return _tracker_is_own_write('ABS', abs_id, suppression_window, user_id=user_id)
+
+
+def _get_debounce_window() -> int:
+    """Return the current ABS Socket.IO debounce interval in seconds."""
+    try:
+        value = int(
+            os.environ.get(
+                "ABS_SOCKET_DEBOUNCE_SECONDS",
+                str(_DEFAULT_DEBOUNCE_SECONDS),
+            )
+        )
+        return max(0, value)
+    except ValueError:
+        return _DEFAULT_DEBOUNCE_SECONDS
 
 
 class ABSSocketListener:
@@ -58,15 +75,12 @@ class ABSSocketListener:
         self._user_id = user_id
         self._scope_suffix = f" [user {user_id}]" if user_id is not None else ""
 
-        self._debounce_window = int(
-            os.environ.get("ABS_SOCKET_DEBOUNCE_SECONDS", "30")
-        )
-
         # {abs_id: last_event_timestamp}
         self._pending: dict[str, float] = {}
         # Track which abs_ids already had a sync fired for the current event
         self._fired: set[str] = set()
         self._lock = threading.Lock()
+        self._debounce_stop_event = threading.Event()
         self._auth_failed_event = threading.Event()
         self._auth_ok_event = threading.Event()
 
@@ -305,9 +319,8 @@ class ABSSocketListener:
     def _debounce_loop(self) -> None:
         """Check pending events every 10s and fire sync after debounce window."""
         logger.debug("ABS Socket.IO: Debounce loop started")
-        while self._sio.connected or True:
+        while not self._debounce_stop_event.wait(10):
             try:
-                time.sleep(10)
                 self._check_and_fire()
             except Exception as e:
                 logger.debug(f"ABS Socket.IO: Debounce loop error: {e}")
@@ -315,13 +328,14 @@ class ABSSocketListener:
     def _check_and_fire(self) -> None:
         """Fire sync for any books whose debounce window has elapsed."""
         now = time.time()
+        debounce_window = _get_debounce_window()
         to_fire: list[str] = []
 
         with self._lock:
             for abs_id, last_event in list(self._pending.items()):
                 if abs_id in self._fired:
                     continue
-                if now - last_event > self._debounce_window:
+                if now - last_event > debounce_window:
                     to_fire.append(abs_id)
 
             for abs_id in to_fire:
@@ -346,7 +360,15 @@ class ABSSocketListener:
                 target_user_ids = self._resolve_claimant_user_ids(book)
 
             for target_user_id in target_user_ids:
-                if is_own_write(abs_id, user_id=target_user_id):
+                self_write_window = max(
+                    debounce_window + _SELF_WRITE_SLACK_SECONDS,
+                    _SELF_WRITE_SLACK_SECONDS,
+                )
+                if is_own_write(
+                    abs_id,
+                    suppression_window=self_write_window,
+                    user_id=target_user_id,
+                ):
                     logger.debug(f"ABS Socket.IO: Ignoring self-triggered event for '{title}'{self._scope_suffix}")
                     continue
                 logger.info(f"⚡ Socket.IO: ABS progress changed for '{title}'{self._scope_suffix} — triggering sync")
@@ -443,6 +465,7 @@ class ABSSocketListener:
 
     def stop(self) -> None:
         """Disconnect cleanly."""
+        self._debounce_stop_event.set()
         try:
             if self._sio.connected:
                 self._sio.disconnect()

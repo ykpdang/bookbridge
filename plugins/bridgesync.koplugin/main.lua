@@ -19,6 +19,11 @@ local json = require("json")
 local APIClient = require("bridge_api_client")
 local BridgeAnnotations = require("bridge_annotations")
 local BridgeSweep = require("bridge_sweep")
+local BridgeSyncCoordinator = require("bridge_sync_coordinator")
+local BridgeStatsBatches = require("bridge_stats_batches")
+local BridgeVersion = require("bridge_version")
+local BridgeSqliteState = require("bridge_sqlite_state")
+local BridgeSessions = require("bridge_sessions")
 local SQ3
 do
     local ok, mod = pcall(require, "lua-ljsqlite3/init")
@@ -41,10 +46,11 @@ do
     end
 end
 
-local function _(text)
-    return text
-end
+local _ = require("gettext")
 local T = require("ffi/util").template
+local STATS_UPLOAD_BATCH = 3000
+local SETTINGS_VERSION = 1
+local DEVICE_LOG_UPLOAD_MAX_BYTES = 24 * 1024
 
 local BridgeSync = WidgetContainer:extend{
     name = "bridgesync",
@@ -82,52 +88,114 @@ function BridgeSync:init()
     self:onDispatcherRegisterActions()
     self.settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/bridge_sync.lua")
     self.state = LuaSettings:open(DataStorage:getSettingsDir() .. "/bridge_sync_state.lua")
+    self.log_path = DataStorage:getSettingsDir() .. "/bridge_sync.log"
 
-    self.server_url = self.settings:readSetting("server_url") or ""
-    self.username = self.settings:readSetting("username") or ""
-    self.key = self.settings:readSetting("key") or ""
-    self.download_dir = self.settings:readSetting("download_dir") or self:_detectDefaultDownloadDir()
-    self.is_enabled = self.settings:readSetting("is_enabled") or false
-    self.auto_sync_on_resume = self.settings:readSetting("auto_sync_on_resume") or false
-    self.auto_sync_on_network = self.settings:readSetting("auto_sync_on_network") or false
-    local auto_sync_on_close = self.settings:readSetting("auto_sync_on_close")
+    -- Initialize SQLite state manager
+    self.sqlite_state = BridgeSqliteState:new()
+    local sqlite_available = false
+    if self.sqlite_state:is_available() then
+        local ok, err = self.sqlite_state:init()
+        if ok then
+            sqlite_available = true
+            self:logInfo("SQLite state manager initialized")
+
+            -- Migrate from LuaSettings if first run. A failed migration must
+            -- not leave us reading an empty database, so fall back to
+            -- LuaSettings for this run instead.
+            local migration_done = self.sqlite_state:get_setting("migration_done", false)
+            if not migration_done then
+                self:logInfo("Migrating data from LuaSettings to SQLite...")
+                local migrate_ok, migrate_err = self.sqlite_state:migrate_from_luasettings(self.state, self.settings)
+                if migrate_ok then
+                    self.sqlite_state:set_setting("migration_done", true)
+                    self:logInfo("Migration completed successfully")
+                else
+                    self:logWarn("Migration failed, staying on LuaSettings:", tostring(migrate_err))
+                    self.sqlite_state:close()
+                    sqlite_available = false
+                end
+            end
+        else
+            self:logWarn("SQLite initialization failed:", tostring(err))
+        end
+    else
+        self:logInfo("SQLite not available, falling back to LuaSettings")
+    end
+
+    self.sqlite_available = sqlite_available
+    if self.sqlite_available then
+        self.sqlite_state:prune_uploaded_sessions(os.time() - 7 * 24 * 3600)
+    end
+
+    -- Unified getter for settings (SQLite first, fallback to LuaSettings).
+    -- Must preserve stored `false` values - never collapse them into default.
+    local function get_setting(key, default)
+        if self.sqlite_available then
+            return self.sqlite_state:get_setting(key, default)
+        end
+        local value = self.settings:readSetting(key)
+        if value == nil then
+            return default
+        end
+        return value
+    end
+
+    self.server_url = get_setting("server_url") or ""
+    self.username = get_setting("username") or ""
+    self.key = get_setting("key") or ""
+    self.download_dir = get_setting("download_dir") or self:_detectDefaultDownloadDir()
+    self.is_enabled = get_setting("is_enabled") or false
+    self.auto_sync_on_resume = get_setting("auto_sync_on_resume") or false
+    self.auto_sync_on_network = get_setting("auto_sync_on_network") or false
+    local auto_sync_on_close = get_setting("auto_sync_on_close")
     if auto_sync_on_close == nil then
         self.auto_sync_on_close = true
     else
         self.auto_sync_on_close = auto_sync_on_close
     end
-    self.delete_removed_books = self.settings:readSetting("delete_removed_books") or false
-    self.manual_only = self.settings:readSetting("manual_only") or false
-    local do_not_sync_while_book_open = self.settings:readSetting("do_not_sync_while_book_open")
+    self.delete_removed_books = get_setting("delete_removed_books") or false
+    self.manual_only = get_setting("manual_only") or false
+    local do_not_sync_while_book_open = get_setting("do_not_sync_while_book_open")
     if do_not_sync_while_book_open == nil then
         self.do_not_sync_while_book_open = true
     else
         self.do_not_sync_while_book_open = do_not_sync_while_book_open
     end
-    self.wake_sync_delay_seconds = tonumber(self.settings:readSetting("wake_sync_delay_seconds")) or 30
+    self.wake_sync_delay_seconds = tonumber(get_setting("wake_sync_delay_seconds")) or 30
 
     -- Reading session tracking
-    local session_tracking = self.settings:readSetting("session_tracking_enabled")
+    local session_tracking = get_setting("session_tracking_enabled")
     if session_tracking == nil then
         self.session_tracking_enabled = true
     else
         self.session_tracking_enabled = session_tracking
     end
-    self.min_session_duration = tonumber(self.settings:readSetting("min_session_duration")) or 30
-    local auto_sync_stats = self.settings:readSetting("auto_sync_stats")
+    self.min_session_duration = tonumber(get_setting("min_session_duration")) or 30
+    self.session_merge_threshold = tonumber(get_setting("session_merge_threshold")) or 300
+    local auto_sync_stats = get_setting("auto_sync_stats")
     if auto_sync_stats == nil then
         self.auto_sync_stats = true
     else
         self.auto_sync_stats = auto_sync_stats
     end
-    local annotation_sync = self.settings:readSetting("annotation_sync_enabled")
+    local annotation_sync = get_setting("annotation_sync_enabled")
     if annotation_sync == nil then
         self.annotation_sync_enabled = true
     else
-        self.annotation_sync_enabled = annotation_sync
+    self.annotation_sync_enabled = annotation_sync
+    local settings_version = tonumber(get_setting("settings_version")) or 0
+    if settings_version < SETTINGS_VERSION then
+        self:_saveSetting("settings_version", SETTINGS_VERSION)
+    end
     end
     self.current_session = nil
-    self.pending_sessions = self.state:readSetting("pending_sessions") or {}
+    
+    -- Load pending sessions (SQLite first, fallback to LuaSettings)
+    if self.sqlite_available then
+        self.pending_sessions = self.sqlite_state:get_pending_sessions(nil, false) or {}
+    else
+        self.pending_sessions = self.state:readSetting("pending_sessions") or {}
+    end
 
     self.sync_in_progress = false
     self.last_auto_sync_time = 0
@@ -138,14 +206,137 @@ function BridgeSync:init()
     self.needs_wake_sync = false
     self.sync_scheduled = false
     self.close_book_sync_scheduled = false
-    self.log_path = DataStorage:getSettingsDir() .. "/bridge_sync.log"
-
     self.api = APIClient:new()
     self.api:init(self.server_url, self.username, self.key, function(level, message)
         self:_appendLog(level, message)
     end)
+    self.sync_coordinator = BridgeSyncCoordinator:new()
 
     self.ui.menu:registerToMainMenu(self)
+    UIManager:scheduleIn(10, function()
+        self:_maybeCheckForPluginUpdate()
+    end)
+end
+
+-- Helper method to save a setting (SQLite first, fallback to LuaSettings)
+function BridgeSync:_saveSetting(key, value)
+    if self.sqlite_available then
+        return self.sqlite_state:set_setting(key, value)
+    else
+        self.settings:saveSetting(key, value)
+        self.settings:flush()
+        return true
+    end
+end
+
+-- Generic scalar state accessor (wraps a single key-value in plugin_settings for SQLite,
+-- or the flat LuaSettings file for legacy mode)
+function BridgeSync:_getStateScalar(key, default)
+    if self.sqlite_available then
+        return self.sqlite_state:get_setting(key, default)
+    end
+    local value = self.state:readSetting(key)
+    if value == nil then
+        return default
+    end
+    return value
+end
+
+function BridgeSync:_saveStateScalar(key, value)
+    if self.sqlite_available then
+        return self.sqlite_state:set_setting(key, value)
+    else
+        self.state:saveSetting(key, value)
+        self.state:flush()
+        return true
+    end
+end
+
+-- JSON scalar state helpers (for storing/reading table values as JSON strings in SQLite)
+function BridgeSync:_saveStateScalarJSON(key, value)
+    if self.sqlite_available then
+        return self.sqlite_state:set_setting(key, json.encode(value))
+    else
+        self.state:saveSetting(key, value)
+        self.state:flush()
+        return true
+    end
+end
+
+function BridgeSync:_getStateScalarJSON(key, default)
+    if self.sqlite_available then
+        local raw = self.sqlite_state:get_setting(key, nil)
+        if raw then
+            local ok, result = pcall(json.decode, raw)
+            if ok then
+                return result
+            end
+        end
+        return default
+    else
+        return self.state:readSetting(key) or default
+    end
+end
+
+-- ============================================================
+-- Differential sync fingerprint helpers
+-- These track when data was last synced and with what
+-- fingerprint, so we can skip redundant syncs for unchanged
+-- data.  Wraps plugin_sync_timestamps (SQLite) with a
+-- LuaSettings fallback.
+-- ============================================================
+
+-- Record a sync fingerprint for a (service, sync_type, abs_id) tuple.
+-- @string service  e.g. "bridge", "abs", "grimmory"
+-- @string sync_type e.g. "statistics", "annotations", "manifest"
+-- @string abs_id    book identifer or "*" for global
+-- @string fingerprint opaque string that changes when data does
+function BridgeSync:_recordSyncFingerprint(service, sync_type, abs_id, fingerprint)
+    if self.sqlite_available then
+        self.sqlite_state:set_sync_timestamp(abs_id or "*", service, sync_type, fingerprint)
+    else
+        local key = "sync_fp:" .. tostring(service) .. ":" .. tostring(sync_type) .. ":" .. tostring(abs_id or "*")
+        self:_saveStateScalarJSON(key, { fp = fingerprint, at = os.time() })
+    end
+end
+
+-- Retrieve the last stored sync fingerprint.
+-- @return string|nil
+function BridgeSync:_getSyncFingerprint(service, sync_type, abs_id)
+    if self.sqlite_available then
+        local ts = self.sqlite_state:get_sync_timestamp(abs_id or "*", service, sync_type)
+        if ts then
+            return ts.sync_hash
+        end
+        return nil
+    else
+        local key = "sync_fp:" .. tostring(service) .. ":" .. tostring(sync_type) .. ":" .. tostring(abs_id or "*")
+        local stored = self:_getStateScalarJSON(key)
+        if stored then
+            return stored.fp
+        end
+        return nil
+    end
+end
+
+-- True when the current fingerprint differs from the stored one
+-- (or nothing has ever been stored).  Callers skip the sync when
+-- this returns false.
+-- @return boolean  true = data changed, sync needed
+function BridgeSync:_fingerprintChanged(service, sync_type, abs_id, current_fingerprint)
+    local stored = self:_getSyncFingerprint(service, sync_type, abs_id)
+    return stored == nil or stored ~= current_fingerprint
+end
+
+-- Persist the pending-session list. In SQLite mode rows are written
+-- individually as sessions are created/merged/uploaded, so this is a no-op
+-- there; the LuaSettings backend stores the whole list in one key.
+function BridgeSync:_savePendingSessions(sessions)
+    if not self.sqlite_available then
+        self.state:saveSetting("pending_sessions", sessions)
+        self.state:flush()
+    end
+    return true
 end
 
 function BridgeSync:_appendLog(level, message)
@@ -172,6 +363,77 @@ function BridgeSync:logErr(...)
     self:_appendLog("error", table.concat({...}, " "))
 end
 
+function BridgeSync:_pluginVersion()
+    if not self.path or self.path == "" then return "unknown" end
+    local chunk = loadfile(self.path .. "/_meta.lua")
+    if not chunk then return "unknown" end
+    local ok, meta = pcall(chunk)
+    if ok and type(meta) == "table" and meta.version then
+        return tostring(meta.version)
+    end
+    return "unknown"
+end
+
+function BridgeSync:_readDeviceLogChunk()
+    local handle = io.open(self.log_path, "rb")
+    if not handle then return {}, nil end
+
+    local size = handle:seek("end") or 0
+    local saved_offset = tonumber(self:_getStateScalar("device_log_upload_offset"))
+    local offset = saved_offset
+    if offset == nil or offset < 0 or offset > size then
+        offset = math.max(0, size - DEVICE_LOG_UPLOAD_MAX_BYTES)
+    end
+
+    handle:seek("set", offset)
+    local chunk = handle:read(DEVICE_LOG_UPLOAD_MAX_BYTES) or ""
+    local next_offset = handle:seek() or (offset + #chunk)
+    handle:close()
+
+    local lines = {}
+    for line in chunk:gmatch("[^\r\n]+") do
+        lines[#lines + 1] = line
+    end
+    return lines, next_offset
+end
+
+-- Best-effort telemetry: ship only the unread, bounded BridgeSync log tail.
+-- The saved byte offset advances only after a successful bridge acknowledgement,
+-- so network/server failures are retried after the next book or session sync.
+function BridgeSync:_uploadDeviceLogTail(operation, status)
+    if not self.api or not self.api.uploadClientLogs then return false end
+    if not self.server_url or self.server_url == "" then return false end
+
+    local lines, next_offset = self:_readDeviceLogChunk()
+    local device, device_id = self:_currentDeviceIdentity()
+    local payload = {
+        operation = tostring(operation or "unknown"),
+        status = tostring(status or "unknown"),
+        plugin_version = self:_pluginVersion(),
+        device = device,
+        device_id = device_id,
+        lines = lines,
+    }
+
+    -- Do not append the telemetry POST itself to bridge_sync.log, which would
+    -- otherwise create one new line to upload after every successful upload.
+    local original_callback = self.api.log_callback
+    self.api.log_callback = nil
+    local call_ok, ok, code, body = pcall(self.api.uploadClientLogs, self.api, payload)
+    self.api.log_callback = original_callback
+
+    if call_ok and ok then
+        if next_offset ~= nil then
+            self:_saveStateScalar("device_log_upload_offset", next_offset)
+        end
+        return true
+    end
+
+    local reason = call_ok and (body or code or "request failed") or ok
+    self:_appendLog("warn", "Device log telemetry upload failed: " .. tostring(reason or "unknown error"))
+    return false
+end
+
 function BridgeSync:_detectDefaultDownloadDir()
     if lfs.attributes("/mnt/onboard", "mode") == "directory" then
         return "/mnt/onboard/Books/BridgeManaged"
@@ -182,23 +444,29 @@ function BridgeSync:_detectDefaultDownloadDir()
 end
 
 function BridgeSync:_saveSettings()
-    self.settings:saveSetting("server_url", self.server_url)
-    self.settings:saveSetting("username", self.username)
-    self.settings:saveSetting("key", self.key)
-    self.settings:saveSetting("download_dir", self.download_dir)
-    self.settings:saveSetting("is_enabled", self.is_enabled)
-    self.settings:saveSetting("auto_sync_on_resume", self.auto_sync_on_resume)
-    self.settings:saveSetting("auto_sync_on_network", self.auto_sync_on_network)
-    self.settings:saveSetting("auto_sync_on_close", self.auto_sync_on_close)
-    self.settings:saveSetting("delete_removed_books", self.delete_removed_books)
-    self.settings:saveSetting("manual_only", self.manual_only)
-    self.settings:saveSetting("do_not_sync_while_book_open", self.do_not_sync_while_book_open)
-    self.settings:saveSetting("wake_sync_delay_seconds", self.wake_sync_delay_seconds)
-    self.settings:saveSetting("session_tracking_enabled", self.session_tracking_enabled)
-    self.settings:saveSetting("min_session_duration", self.min_session_duration)
-    self.settings:saveSetting("auto_sync_stats", self.auto_sync_stats)
-    self.settings:saveSetting("annotation_sync_enabled", self.annotation_sync_enabled)
-    self.settings:flush()
+    self:_saveSetting("settings_version", SETTINGS_VERSION)
+    self:_saveSetting("server_url", self.server_url)
+    self:_saveSetting("username", self.username)
+    self:_saveSetting("key", self.key)
+    self:_saveSetting("download_dir", self.download_dir)
+    self:_saveSetting("is_enabled", self.is_enabled)
+    self:_saveSetting("auto_sync_on_resume", self.auto_sync_on_resume)
+    self:_saveSetting("auto_sync_on_network", self.auto_sync_on_network)
+    self:_saveSetting("auto_sync_on_close", self.auto_sync_on_close)
+    self:_saveSetting("delete_removed_books", self.delete_removed_books)
+    self:_saveSetting("manual_only", self.manual_only)
+    self:_saveSetting("do_not_sync_while_book_open", self.do_not_sync_while_book_open)
+    self:_saveSetting("wake_sync_delay_seconds", self.wake_sync_delay_seconds)
+    self:_saveSetting("session_tracking_enabled", self.session_tracking_enabled)
+    self:_saveSetting("min_session_duration", self.min_session_duration)
+    self:_saveSetting("auto_sync_stats", self.auto_sync_stats)
+    self:_saveSetting("annotation_sync_enabled", self.annotation_sync_enabled)
+    
+    -- If using LuaSettings, flush both settings and state files
+    if not self.sqlite_available then
+        self.settings:flush()
+    end
+    
     self.api:init(self.server_url, self.username, self.key, function(level, message)
         self:_appendLog(level, message)
     end)
@@ -233,13 +501,32 @@ function BridgeSync:_preflightNetwork(allow_dns_retry)
 end
 
 function BridgeSync:_loadStateItems()
-    return self.state:readSetting("items") or {}
+    if self.sqlite_available then
+        -- Load all state items from SQLite and convert to the legacy format
+        local all_items = {}
+        local books = self.sqlite_state:get_all_books()
+        for _, abs_id in ipairs(books) do
+            local book_items = self.sqlite_state:get_all_state_items_for_book(abs_id)
+            if book_items and next(book_items) then
+                all_items[abs_id] = book_items
+            end
+        end
+        return all_items
+    else
+        return self.state:readSetting("items") or {}
+    end
 end
 
 function BridgeSync:_saveState(items, revision)
-    self.state:saveSetting("items", items or {})
-    self.state:saveSetting("revision", revision or "")
-    self.state:flush()
+    if self.sqlite_available then
+        -- Full replace, matching the LuaSettings semantics: books that left
+        -- the manifest must not linger as stale state rows.
+        self.sqlite_state:replace_state(items or {}, revision or "")
+    else
+        self.state:saveSetting("items", items or {})
+        self.state:saveSetting("revision", revision or "")
+        self.state:flush()
+    end
 end
 
 function BridgeSync:_showMessage(text, timeout)
@@ -389,6 +676,14 @@ function BridgeSync:_runInSubprocess(task)
     end
 
     local pid, parent_read_fd = FFIUtil.runInSubProcess(function(_, child_write_fd)
+        if self.sqlite_available then
+            -- Forked child: a SQLite handle must never be shared across a
+            -- fork, so replace the inherited one with the child's own.
+            self.sqlite_state = BridgeSqliteState:new()
+            if not self.sqlite_state:init() then
+                self.sqlite_available = false
+            end
+        end
         local output_str = ""
         local results = table.pack(task())
         local ok, serialized = pcall(buffer.encode, results)
@@ -566,6 +861,60 @@ function BridgeSync:_runScheduledWork(silent)
     self:_scheduleAutoBookSync("wake", 1, silent == nil and true or silent)
 end
 
+function BridgeSync:_submitSyncJob(family, label, source, priority, silent, action)
+    local result = self.sync_coordinator:submit({
+        family = family,
+        label = label,
+        source = source,
+        priority = priority,
+        run = function(done)
+            Trapper:wrap(function()
+                local ok, outcome = pcall(action)
+                if not ok then
+                    self:logErr(label, "failed:", tostring(outcome))
+                end
+                self:_saveStateScalarJSON("last_sync_job", {
+                    family = family,
+                    label = label,
+                    source = source,
+                    at = os.time(),
+                    success = ok and outcome ~= false,
+                    error = not ok and tostring(outcome) or nil,
+                })
+                done()
+            end)
+        end,
+        on_error = function(err)
+            self:logErr(label, "could not start:", tostring(err))
+        end,
+    })
+    if not silent and (result == "queued" or result == "replaced" or result == "kept") then
+        self:_showMessage(T(_("%1 queued"), label), 2)
+    end
+    return result
+end
+
+function BridgeSync:_syncStatusSummary()
+    local status = self.sync_coordinator:status()
+    local last = self:_getStateScalarJSON("last_sync_job", {})
+    local current = status.current and status.current.label or _("Idle")
+    local last_text = _("None")
+    if last.label then
+        last_text = T(
+            _("%1 at %2 (%3)"),
+            tostring(last.label),
+            os.date("%Y-%m-%d %H:%M", tonumber(last.at) or 0),
+            last.success and _("success") or _("failed")
+        )
+    end
+    return T(
+        _("Current: %1\nQueued: %2\nLast: %3"),
+        current,
+        tonumber(status.pending_count) or 0,
+        last_text
+    )
+end
+
 function BridgeSync:_scheduleSync(delay_seconds, silent, retries_left)
     if self.sync_scheduled then
         return
@@ -626,33 +975,25 @@ function BridgeSync:_scheduleAutoBookSync(reason, delay_seconds, silent, retries
             self:logInfo("Deferring book sync after", tostring(reason or "auto"), "while a document is open")
             return
         end
-        if self.sync_in_progress or self.stats_sync_in_flight or self.annotation_sync_in_flight then
-            local remaining = retries_left
-            if remaining == nil then remaining = 3 end
-            if remaining > 0 then
-                self.needs_wake_sync = true
-                self:logInfo(
-                    "Book sync after",
-                    tostring(reason or "auto"),
-                    "busy; retrying",
-                    tostring(remaining)
-                )
-                self:_scheduleAutoBookSync(reason, 10, silent, remaining - 1)
-            else
-                self:logWarn("Book sync after", tostring(reason or "auto"), "gave up because Bridge Sync stayed busy")
-            end
-            return
-        end
-
         self.needs_wake_sync = false
-        self.last_auto_sync_time = os.time()  -- cooldown only once we actually attempt sync
-        Trapper:wrap(function()
+        self:_submitSyncJob(
+            "books",
+            _("Book sync"),
+            reason or "auto",
+            reason == "close"
+                and BridgeSyncCoordinator.PRIORITY.lifecycle
+                or BridgeSyncCoordinator.PRIORITY.automatic,
+            true,
+            function()
+            self.last_auto_sync_time = os.time()
             local ok = self:syncFromBridge(silent == nil and true or silent)
             if not ok then
                 self.needs_wake_sync = true
                 self:logWarn("Book sync after", tostring(reason or "auto"), "did not complete")
             end
-        end)
+            return ok
+            end
+        )
     end)
 end
 
@@ -677,7 +1018,13 @@ function BridgeSync:_maybeUploadPendingSessions(reason)
     if reason then
         self:logInfo("Uploading pending sessions after", reason)
     end
-    self:_uploadSessions()
+    self:_submitSyncJob(
+        "sessions", _("Reading session upload"), reason or "automatic",
+        BridgeSyncCoordinator.PRIORITY.automatic, true,
+        function()
+            return self:_uploadSessions()
+        end
+    )
     return true
 end
 
@@ -700,34 +1047,20 @@ function BridgeSync:_scheduleAutoAnnotationSync(reason, delay_seconds, silent, r
             self:logInfo("Highlight sync after", tostring(reason or "auto"), "waiting for WiFi")
             return
         end
-        if self.annotation_sync_in_flight or self.stats_sync_in_flight or self.sync_in_progress then
-            local remaining = retries_left
-            if remaining == nil then remaining = 3 end
-            if remaining > 0 then
-                self:logInfo(
-                    "Highlight sync after",
-                    tostring(reason or "auto"),
-                    "busy; retrying",
-                    tostring(remaining)
-                )
-                self:_scheduleAutoAnnotationSync(reason, 10, silent, remaining - 1)
-            else
-                self:logWarn("Highlight sync after", tostring(reason or "auto"), "gave up because Bridge Sync stayed busy")
+        self:_submitSyncJob(
+            "annotations",
+            _("Highlight sync"),
+            reason or "auto",
+            BridgeSyncCoordinator.PRIORITY.automatic,
+            true,
+            function()
+                local ok = self:syncAnnotations(silent == nil and true or silent)
+                if not ok then
+                    self:logWarn("Highlight sync after", tostring(reason or "auto"), "did not complete")
+                end
+                return ok
             end
-            return
-        end
-
-        local ok = self:syncAnnotations(silent == nil and true or silent)
-        if not ok then
-            local remaining = retries_left
-            if remaining == nil then remaining = 2 end
-            if remaining > 0 then
-                self:logInfo("Highlight sync after", tostring(reason or "auto"), "did not complete; retrying", tostring(remaining))
-                self:_scheduleAutoAnnotationSync(reason, 10, silent, remaining - 1)
-            else
-                self:logWarn("Highlight sync after", tostring(reason or "auto"), "did not complete")
-            end
-        end
+        )
     end)
     return true
 end
@@ -757,28 +1090,17 @@ function BridgeSync:_scheduleAutoStatsSync(reason, delay_seconds, silent, retrie
         if (os.time() - (self.last_stats_sync_time or 0)) < 300 then
             return
         end
-        if self.sync_in_progress or self.stats_sync_in_flight then
-            local remaining = retries_left
-            if remaining == nil then remaining = 3 end
-            if remaining > 0 then
-                self:logInfo(
-                    "Reading stats sync after",
-                    tostring(reason or "auto"),
-                    "busy; retrying",
-                    tostring(remaining)
-                )
-                self:_scheduleAutoStatsSync(reason, 10, silent, remaining - 1)
-            else
-                self:logWarn("Reading stats sync after", tostring(reason or "auto"), "gave up because Bridge Sync stayed busy")
-            end
-            return
-        end
-
         if reason then
             self:logInfo("Auto-syncing reading stats after", reason)
         end
-        self.stats_sync_in_flight = true
-        Trapper:wrap(function()
+        self:_submitSyncJob(
+            "statistics",
+            _("Reading stats sync"),
+            reason or "auto",
+            BridgeSyncCoordinator.PRIORITY.automatic,
+            true,
+            function()
+            self.stats_sync_in_flight = true
             local ok = self:syncReadingStats(silent == nil and true or silent)
             self.stats_sync_in_flight = false
             -- Only start the 5-minute cooldown once a sync actually succeeds, so a failed attempt
@@ -786,19 +1108,12 @@ function BridgeSync:_scheduleAutoStatsSync(reason, delay_seconds, silent, retrie
             if ok then
                 self.last_stats_sync_time = os.time()
             end
-            if not ok then
-                local remaining = retries_left
-                if remaining == nil then remaining = 2 end
-                if remaining > 0 then
-                    self:logInfo("Reading stats sync after", tostring(reason or "auto"), "did not complete; retrying", tostring(remaining))
-                    self:_scheduleAutoStatsSync(reason, 10, silent, remaining - 1)
-                else
-                    self:logWarn("Reading stats sync after", tostring(reason or "auto"), "did not complete")
-                end
-            end
+            if not ok then self:logWarn("Reading stats sync after", tostring(reason or "auto"), "did not complete") end
             -- Highlights ride the same cadence: exchange after each stats round.
             self:_scheduleAutoAnnotationSync("stats", 1, true)
-        end)
+            return ok
+            end
+        )
     end)
     return true
 end
@@ -879,29 +1194,35 @@ function BridgeSync:syncAnnotations(silent)
 end
 
 function BridgeSync:onBridgeSyncSyncAnnotations()
-    Trapper:wrap(function()
-        self:syncAnnotations(false)
-    end)
+    self:_submitSyncJob(
+        "annotations", _("Highlight sync"), "manual",
+        BridgeSyncCoordinator.PRIORITY.manual, false,
+        function() return self:syncAnnotations(false) end
+    )
     return true
 end
 
-function BridgeSync:startAnnotationSweep()
+function BridgeSync:_startAnnotationSweepNow(coordinator_done)
     if not self.is_enabled or not self.annotation_sync_enabled then
         self:_showMessage(_("Highlight sync is disabled"), 3)
+        if coordinator_done then coordinator_done() end
         return
     end
     if not self.server_url or self.server_url == "" or
        not self.username or self.username == "" or
        not self.key or self.key == "" then
         self:_showMessage(_("Bridge Sync is not configured"), 3)
+        if coordinator_done then coordinator_done() end
         return
     end
     if BridgeSweep.isRunning() then
         self:_showMessage(_("Highlight sweep is already running"), 3)
+        if coordinator_done then coordinator_done() end
         return
     end
     if not NetworkMgr:isConnected() then
         self:_showMessage(_("No network connection"), 3)
+        if coordinator_done then coordinator_done() end
         return
     end
 
@@ -924,13 +1245,31 @@ function BridgeSync:startAnnotationSweep()
             end
             self:logInfo("Highlight sweep done:", tostring(message or "completed"))
             self:_showMessage(summary, 8)
+            if coordinator_done then coordinator_done() end
         end
     )
     if started then
         self:_showMessage(_("Highlight sweep started in the background."), 3)
     else
         self:_showMessage(T(_("Highlight sweep not started: %1"), tostring(err)), 4)
+        if coordinator_done then coordinator_done() end
     end
+end
+
+function BridgeSync:startAnnotationSweep()
+    local result = self.sync_coordinator:submit({
+        family = "annotation_sweep",
+        label = _("Highlight sweep"),
+        source = "manual",
+        priority = BridgeSyncCoordinator.PRIORITY.manual,
+        run = function(done)
+            self:_startAnnotationSweepNow(done)
+        end,
+        on_error = function(err)
+            self:logErr("Highlight sweep could not start:", tostring(err))
+        end,
+    })
+    if result ~= "started" then self:_showMessage(_("Highlight sweep queued"), 2) end
 end
 
 function BridgeSync:onBridgeSyncSweepAnnotations()
@@ -974,6 +1313,9 @@ function BridgeSync:onNetworkConnected()
     if self:_hasWakeWork() then
         self:_scheduleSync(10, true)
     end
+    UIManager:scheduleIn(2, function()
+        self:_maybeCheckForPluginUpdate()
+    end)
     return false
 end
 
@@ -1015,7 +1357,7 @@ function BridgeSync:_buildHashIndex()
         return index
     end
 
-    local hash_cache = self.state:readSetting("hash_cache") or {}
+    local hash_cache = self:_getStateScalarJSON("hash_cache", {})
     local new_cache = {}
 
     for entry in lfs.dir(self.download_dir) do
@@ -1038,14 +1380,34 @@ function BridgeSync:_buildHashIndex()
         end
     end
 
-    self.state:saveSetting("hash_cache", new_cache)
-    self.state:flush()
+    self:_saveStateScalarJSON("hash_cache", new_cache)
     return index
+end
+
+function BridgeSync:_normalizeManagedPath(path)
+    if not path then
+        return nil
+    end
+    local normalized = tostring(path):gsub("\\", "/"):gsub("/+", "/")
+    if #normalized > 1 then
+        normalized = normalized:gsub("/$", "")
+    end
+    local lower = normalized:lower()
+    if lower:match("^/mnt/onboard/") or lower:match("^/mnt/us/") then
+        return lower
+    end
+    return normalized
+end
+
+function BridgeSync:_managedPathsEqual(left, right)
+    local normalized_left = self:_normalizeManagedPath(left)
+    local normalized_right = self:_normalizeManagedPath(right)
+    return normalized_left ~= nil and normalized_left == normalized_right
 end
 
 function BridgeSync:_findTrackedAbsIdByPath(items, path)
     for abs_id, entry in pairs(items) do
-        if entry.local_path == path then
+        if self:_managedPathsEqual(entry.local_path, path) then
             return abs_id
         end
     end
@@ -1053,41 +1415,50 @@ function BridgeSync:_findTrackedAbsIdByPath(items, path)
 end
 
 function BridgeSync:_safeRemove(path)
-    if path and self:_fileExists(path) then
-        os.remove(path)
+    if not path or not self:_fileExists(path) then
+        return true
     end
+    local ok, err = os.remove(path)
+    return ok == true, err
 end
 
 function BridgeSync:_removeTree(path)
     local mode = lfs.attributes(path, "mode")
     if mode == "file" then
-        os.remove(path)
-        return true
+        local ok, err = os.remove(path)
+        return ok == true, err
     end
     if mode ~= "directory" then
-        return false
+        return true
     end
 
     for entry in lfs.dir(path) do
         if entry ~= "." and entry ~= ".." then
             local child = path .. "/" .. entry
-            self:_removeTree(child)
+            local child_ok, child_err = self:_removeTree(child)
+            if not child_ok then
+                return false, child_err
+            end
         end
     end
-    lfs.rmdir(path)
-    return true
+    local ok, err = lfs.rmdir(path)
+    return ok == true, err
 end
 
 function BridgeSync:_deleteManagedFile(path)
     if not path or path == "" then
-        return
+        return true
     end
-    self:_safeRemove(path)
-    self:_removeTree(path .. ".sdr")
+    local file_ok, file_err = self:_safeRemove(path)
+    local sidecar_ok, sidecar_err = self:_removeTree(path .. ".sdr")
+    if not file_ok or not sidecar_ok then
+        return false, file_err or sidecar_err or "managed file deletion failed"
+    end
+    return true
 end
 
 function BridgeSync:_moveFile(source_path, target_path)
-    if source_path == target_path then
+    if self:_managedPathsEqual(source_path, target_path) then
         return true
     end
 
@@ -1116,7 +1487,7 @@ end
 
 function BridgeSync:_isCurrentDocument(path)
     local current = self:_currentDocumentPath()
-    return current and path and current == path
+    return self:_managedPathsEqual(current, path)
 end
 
 function BridgeSync:_runSync()
@@ -1124,7 +1495,7 @@ function BridgeSync:_runSync()
         error("Failed to create managed folder")
     end
 
-    local local_revision = tostring(self.state:readSetting("revision") or "")
+    local local_revision = tostring(self:_getStateScalar("revision") or "")
     local ok, manifest_or_error = self.api:getManifest()
     if not ok then
         error(manifest_or_error or "Failed to fetch manifest")
@@ -1190,7 +1561,7 @@ function BridgeSync:_runSync()
         end
 
         if reused_path then
-            if reused_path ~= target_path then
+            if not self:_managedPathsEqual(reused_path, target_path) then
                 local move_ok = self:_moveFile(reused_path, target_path)
                 if move_ok then
                     renamed = renamed + 1
@@ -1234,7 +1605,7 @@ function BridgeSync:_runSync()
                     else
                         downloaded = downloaded + 1
                         if previous_entry
-                            and previous_entry.local_path == target_path
+                            and self:_managedPathsEqual(previous_entry.local_path, target_path)
                             and previous_entry.content_hash
                             and previous_entry.content_hash ~= book.content_hash
                         then
@@ -1261,9 +1632,15 @@ function BridgeSync:_runSync()
                     items[abs_id] = entry
                     deferred = deferred + 1
                 else
-                    self:_deleteManagedFile(entry.local_path)
-                    items[abs_id] = nil
-                    deleted = deleted + 1
+                    local delete_ok, delete_err = self:_deleteManagedFile(entry.local_path)
+                    if delete_ok then
+                        items[abs_id] = nil
+                        deleted = deleted + 1
+                    else
+                        errors = errors + 1
+                        self:logWarn("Managed file deletion failed for", abs_id,
+                            entry.local_path or "", delete_err or "")
+                    end
                 end
             elseif entry.pending_delete then
                 entry.pending_delete = nil
@@ -1420,6 +1797,7 @@ function BridgeSync:syncFromBridge(silent)
         if not silent then
             self:_showMessage(T(_("Bridge Sync failed: %1"), tostring(success or "Subprocess failed")), 5)
         end
+        self:_uploadDeviceLogTail("book_sync", "failure")
         return false
     end
 
@@ -1428,6 +1806,7 @@ function BridgeSync:syncFromBridge(silent)
         if not silent then
             self:_showMessage(T(_("Bridge Sync failed: %1"), tostring(result or "Unknown error")), 5)
         end
+        self:_uploadDeviceLogTail("book_sync", "failure")
         return false
     end
 
@@ -1461,6 +1840,9 @@ function BridgeSync:syncFromBridge(silent)
     end
 
     self:_maybeAutoSyncStats("manifest sync")
+
+    local sync_status = (tonumber(result.errors) or 0) > 0 and "partial" or "success"
+    self:_uploadDeviceLogTail("book_sync", sync_status)
 
     return true
 end
@@ -1557,7 +1939,7 @@ end
 function BridgeSync:_resolveAbsId(file_path)
     local items = self:_loadStateItems()
     for abs_id, entry in pairs(items) do
-        if entry.local_path and entry.local_path == file_path then
+        if entry.local_path and self:_managedPathsEqual(entry.local_path, file_path) then
             return abs_id
         end
     end
@@ -1635,37 +2017,140 @@ function BridgeSync:endSession(options)
         duration_seconds = duration_seconds,
         start_progress = self.current_session.start_progress,
         end_progress = end_progress,
+        start_page = start_loc,
+        end_page = end_loc,
     }
 
-    table.insert(self.pending_sessions, session)
-    self.state:saveSetting("pending_sessions", self.pending_sessions)
-    self.state:flush()
+    -- Session collapsing: merge into an existing un-uploaded session for the
+    -- same book within the merge threshold, or store as a new session.
+    local merged = false
+    if self.sqlite_available then
+        local existing = nil
+        if session.abs_id then
+            existing = self.sqlite_state:find_mergeable_pending_session(
+                session.abs_id, session.start_time, self.session_merge_threshold or 300)
+        end
+        if existing and self.sqlite_state:merge_pending_session_end(
+                existing.session_id, session.end_time,
+                session.end_page, session.end_progress, session.duration_seconds) then
+            merged = true
+            -- Mirror the merge onto the in-memory entry
+            for _, s in ipairs(self.pending_sessions) do
+                if s.session_id == existing.session_id then
+                    BridgeSessions.applyMerge(s, session)
+                    break
+                end
+            end
+            self:logInfo("Session merged into existing", existing.session_id,
+                "for", session.abs_id or session.document_hash or "unknown")
+        else
+            session.session_id = self.sqlite_state:add_pending_session(session)
+            table.insert(self.pending_sessions, session)
+        end
+    else
+        -- LuaSettings fallback: in-memory merge, then persist the list
+        merged = self:_mergeOrAppendSession(session)
+    end
 
     self:logInfo("Session ended:", duration_seconds, "s,", pages_read, "pages,",
-        self.current_session.start_progress, "% ->", end_progress, "%")
+        self.current_session.start_progress, "% ->", end_progress, "%", merged and "(merged)" or "")
 
     self.current_session = nil
 
     if not force_queue and NetworkMgr:isConnected() then
-        self:_uploadSessions()
+        self:_maybeUploadPendingSessions("close")
     end
+end
+
+-- LuaSettings fallback: merge `session` into the in-memory pending list when
+-- possible (see bridge_sessions.lua), append otherwise, then persist the
+-- list. Returns true if merged, false if appended.
+function BridgeSync:_mergeOrAppendSession(session)
+    local merged = BridgeSessions.mergeIntoPending(
+        self.pending_sessions, session, self.session_merge_threshold or 300)
+    if not merged then
+        table.insert(self.pending_sessions, session)
+    end
+    self:_savePendingSessions(self.pending_sessions)
+    return merged
 end
 
 function BridgeSync:_uploadSessions()
     if #self.pending_sessions == 0 then
-        return
+        return true
     end
 
     self:logInfo("Uploading", #self.pending_sessions, "pending sessions")
 
-    local ok, code, body = self.api:uploadSessions(self.pending_sessions)
+    local submitted_sessions = self.pending_sessions
+    local ok, code, body = self.api:uploadSessions(submitted_sessions)
     if ok then
+        local response = nil
+        local parsed, decoded = pcall(json.decode, body or "{}")
+        if parsed and type(decoded) == "table" then
+            response = decoded
+        end
+
+        local accepted_sessions = submitted_sessions
+        local retained_sessions = {}
+        local has_per_session_results = response and type(response.results) == "table"
+        if has_per_session_results then
+            accepted_sessions = {}
+            local results_by_index = {}
+            for _, result in ipairs(response.results) do
+                if type(result) == "table" and tonumber(result.index) then
+                    results_by_index[tonumber(result.index)] = result
+                end
+            end
+            for index, session in ipairs(submitted_sessions) do
+                local result = results_by_index[index]
+                if result and result.accepted == true then
+                    table.insert(accepted_sessions, session)
+                else
+                    table.insert(retained_sessions, session)
+                end
+            end
+        elseif response and tonumber(response.rejected or 0) > 0 then
+            accepted_sessions = {}
+            retained_sessions = submitted_sessions
+        end
+
+        -- Mark SQLite rows as uploaded so they aren't reloaded on restart
+        if self.sqlite_available then
+            local uploaded_ids = {}
+            for _, s in ipairs(accepted_sessions) do
+                if s.session_id then
+                    table.insert(uploaded_ids, s.session_id)
+                end
+            end
+            if #uploaded_ids > 0 then
+                local marked = self.sqlite_state:mark_sessions_uploaded(uploaded_ids)
+                if not marked then
+                    self:logWarn(
+                        "Session upload reached the bridge but local SQLite acknowledgement failed; retaining queue for retry"
+                    )
+                    self:_uploadDeviceLogTail("session_upload", "failure")
+                    return false
+                end
+            end
+        end
+
+        self.pending_sessions = retained_sessions
+        self:_savePendingSessions(self.pending_sessions)
+        if #retained_sessions > 0 then
+            self:logWarn("Session upload partially accepted:", #accepted_sessions,
+                "accepted,", #retained_sessions, "retained for retry")
+            self:_uploadDeviceLogTail("session_upload", "partial")
+            return false
+        end
+
         self:logInfo("Sessions uploaded successfully")
-        self.pending_sessions = {}
-        self.state:saveSetting("pending_sessions", self.pending_sessions)
-        self.state:flush()
+        self:_uploadDeviceLogTail("session_upload", "success")
+        return true
     else
         self:logWarn("Session upload failed:", code or "", body or "", "- will retry later")
+        self:_uploadDeviceLogTail("session_upload", "failure")
+        return false
     end
 end
 
@@ -1718,7 +2203,19 @@ function BridgeSync:_currentDeviceIdentity()
     return device, device_id
 end
 
-function BridgeSync:_collectStatisticsPayload()
+-- Read every piece of persisted state the statistics sync needs, in the
+-- parent process, so the forked sync child never touches the state backend.
+function BridgeSync:_snapshotStatsSyncState()
+    return {
+        last_uploaded_device_key = tostring(self:_getStateScalar("stats_last_uploaded_device_key") or ""),
+        last_uploaded_start_time = tonumber(self:_getStateScalar("stats_last_uploaded_start_time")) or 0,
+        last_merged_watermark = tonumber(self:_getStateScalar("stats_last_merged_watermark")) or 0,
+        merge_backfill_done = self:_getStateScalar("stats_merge_backfill_done") and true or false,
+        stats_fingerprint = self:_getSyncFingerprint("bridge", "statistics", "*"),
+    }
+end
+
+function BridgeSync:_collectStatisticsPayload(stats_state)
     if not SQ3 then
         return nil, _("SQLite support is unavailable in this KOReader build")
     end
@@ -1732,12 +2229,33 @@ function BridgeSync:_collectStatisticsPayload()
 
     local device, device_id = self:_currentDeviceIdentity()
     local device_key = device_id ~= "" and device_id or device
-    local last_uploaded_device_key = tostring(self.state:readSetting("stats_last_uploaded_device_key") or "")
-    local last_uploaded_start_time = tonumber(self.state:readSetting("stats_last_uploaded_start_time")) or 0
+    local last_uploaded_device_key = stats_state.last_uploaded_device_key
+    local last_uploaded_start_time = stats_state.last_uploaded_start_time
     if last_uploaded_device_key ~= "" and last_uploaded_device_key ~= device_key then
         last_uploaded_start_time = 0
     end
     local replay_from = math.max(0, math.floor(last_uploaded_start_time - 300))
+
+    -- Differential sync: skip the collection query when the DB file hasn't
+    -- been modified since our last successful sync. The fingerprint combines
+    -- device identity and file mtime; either changing triggers a full
+    -- re-collection. It is captured BEFORE collection so stats written while
+    -- a sync is in flight always dirty the next cycle.
+    local db_mtime = lfs.attributes(db_path, "modification")
+    local db_fingerprint = tostring(device_key) .. ":" .. tostring(db_mtime or "")
+    if stats_state.stats_fingerprint ~= nil and stats_state.stats_fingerprint == db_fingerprint then
+        self:logInfo("Statistics DB unchanged since last sync, skipping payload collection")
+        return {
+            device = device,
+            device_id = device_id,
+            device_key = device_key,
+            replay_from = replay_from,
+            watermark = last_uploaded_start_time,
+            books = {},
+            page_stats = {},
+            db_fingerprint = db_fingerprint,
+        }
+    end
 
     local conn = SQ3.open(db_path)
     if not conn then
@@ -1821,6 +2339,7 @@ function BridgeSync:_collectStatisticsPayload()
             watermark = max_start_time,
             books = books,
             page_stats = page_stats,
+            db_fingerprint = db_fingerprint,
         }
     end)
 
@@ -1835,7 +2354,7 @@ function BridgeSync:_collectStatisticsPayload()
     return payload_or_err, nil
 end
 
-function BridgeSync:_mergeForeignStatistics(payload)
+function BridgeSync:_mergeForeignStatistics(payload, stats_state)
     local result = { merged = 0, fetched = 0, watermark = nil, err = nil }
 
     if not SQ3 then
@@ -1849,8 +2368,8 @@ function BridgeSync:_mergeForeignStatistics(payload)
         return result
     end
 
-    local since = tonumber(self.state:readSetting("stats_last_merged_watermark")) or 0
-    if not self.state:readSetting("stats_merge_backfill_done") then
+    local since = stats_state.last_merged_watermark
+    if not stats_state.merge_backfill_done then
         -- One-time full re-pull: books never opened here were silently skipped by older
         -- plugin versions, which still advanced the watermark past their events. Fetch
         -- everything once to backfill them; INSERT OR IGNORE keeps the re-merge idempotent.
@@ -2001,8 +2520,8 @@ function BridgeSync:_mergeForeignStatistics(payload)
     return result
 end
 
-function BridgeSync:_runStatisticsSync()
-    local payload, payload_err = self:_collectStatisticsPayload()
+function BridgeSync:_runStatisticsSync(stats_state)
+    local payload, payload_err = self:_collectStatisticsPayload(stats_state)
     if not payload then
         error(payload_err or "Failed to build statistics payload")
     end
@@ -2011,6 +2530,7 @@ function BridgeSync:_runStatisticsSync()
         skipped = #payload.page_stats == 0,
         device_key = payload.device_key,
         watermark = payload.watermark,
+        db_fingerprint = payload.db_fingerprint,
         accepted_books = 0,
         accepted_page_stats = 0,
         duplicate_page_stats = 0,
@@ -2023,35 +2543,37 @@ function BridgeSync:_runStatisticsSync()
         self:logInfo(
             "Uploading",
             #payload.page_stats,
-            "reading stat rows and",
-            #payload.books,
-            "book metadata rows"
+            "reading stat rows in bounded batches"
         )
 
-        local ok, code, body = self.api:uploadStatistics({
-            device = payload.device,
-            device_id = payload.device_id,
-            books = payload.books,
-            page_stats = payload.page_stats,
-        })
-        if not ok then
-            error(body or ("HTTP " .. tostring(code or "unknown")))
-        end
-
-        local parsed = {}
-        if body and body ~= "" then
-            local ok_json, decoded = pcall(json.decode, body)
-            if ok_json and type(decoded) == "table" then
-                parsed = decoded
+        for _, batch in ipairs(BridgeStatsBatches.build(
+            payload.page_stats, payload.books, STATS_UPLOAD_BATCH
+        )) do
+            local ok, code, body = self.api:uploadStatistics({
+                device = payload.device,
+                device_id = payload.device_id,
+                books = batch.books,
+                page_stats = batch.page_stats,
+            })
+            if not ok then
+                error(body or ("HTTP " .. tostring(code or "unknown")))
             end
-        end
 
-        result.accepted_books = tonumber(parsed.accepted_books) or #payload.books
-        result.accepted_page_stats = tonumber(parsed.accepted_page_stats) or #payload.page_stats
-        result.duplicate_page_stats = tonumber(parsed.duplicate_page_stats) or 0
+            local parsed = {}
+            if body and body ~= "" then
+                local ok_json, decoded = pcall(json.decode, body)
+                if ok_json and type(decoded) == "table" then parsed = decoded end
+            end
+            result.accepted_books = result.accepted_books
+                + (tonumber(parsed.accepted_books) or #batch.books)
+            result.accepted_page_stats = result.accepted_page_stats
+                + (tonumber(parsed.accepted_page_stats) or #batch.page_stats)
+            result.duplicate_page_stats = result.duplicate_page_stats
+                + (tonumber(parsed.duplicate_page_stats) or 0)
+        end
     end
 
-    local merge = self:_mergeForeignStatistics(payload)
+    local merge = self:_mergeForeignStatistics(payload, stats_state)
     result.merged_page_stats = merge.merged or 0
     result.merge_watermark = merge.watermark
     result.merge_error = merge.err
@@ -2106,9 +2628,14 @@ function BridgeSync:syncReadingStats(silent)
         UIManager:forceRePaint()
     end
 
+    -- Snapshot persisted state in the parent: the sync runs in a forked
+    -- child, and the SQLite state connection must never be used across a
+    -- fork (inherited fd + POSIX locks).
+    local stats_state = self:_snapshotStatsSyncState()
+
     local subprocess_ok, success, result = self:_runInSubprocess(function()
         return pcall(function()
-            return self:_runStatisticsSync()
+            return self:_runStatisticsSync(stats_state)
         end)
     end)
 
@@ -2134,18 +2661,25 @@ function BridgeSync:syncReadingStats(silent)
     end
 
     if result.device_key and result.device_key ~= "" then
-        self.state:saveSetting("stats_last_uploaded_device_key", result.device_key)
+        self:_saveStateScalar("stats_last_uploaded_device_key", result.device_key)
     end
     if result.watermark and tonumber(result.watermark) then
-        self.state:saveSetting("stats_last_uploaded_start_time", tonumber(result.watermark))
+        self:_saveStateScalar("stats_last_uploaded_start_time", tonumber(result.watermark))
     end
     if result.merge_watermark and tonumber(result.merge_watermark) then
-        self.state:saveSetting("stats_last_merged_watermark", tonumber(result.merge_watermark))
+        self:_saveStateScalar("stats_last_merged_watermark", tonumber(result.merge_watermark))
     end
     if result.merge_backfill_pending and not result.merge_error then
-        self.state:saveSetting("stats_merge_backfill_done", true)
+        self:_saveStateScalar("stats_merge_backfill_done", true)
     end
-    self.state:flush()
+
+    -- Record the pre-collection fingerprint for differential tracking.
+    -- Deliberately NOT re-read here: the foreign-stats merge above touches
+    -- statistics.sqlite, and fingerprinting that post-merge mtime would mark
+    -- sessions written during the sync as already uploaded.
+    if result.db_fingerprint then
+        self:_recordSyncFingerprint("bridge", "statistics", "*", result.db_fingerprint)
+    end
 
     local message
     if result.skipped and (result.merged_page_stats or 0) == 0 then
@@ -2202,7 +2736,7 @@ function BridgeSync:_captureAnnotationSnapshot()
     return captured
 end
 
-function BridgeSync:_syncAnnotationsAfterClose(closed_file, captured, retries_left)
+function BridgeSync:_syncAnnotationsAfterClose(closed_file, captured)
     if not self.is_enabled or not self.annotation_sync_enabled then
         return
     end
@@ -2210,24 +2744,18 @@ function BridgeSync:_syncAnnotationsAfterClose(closed_file, captured, retries_le
         return
     end
     UIManager:scheduleIn(2, function()
-        if self.annotation_close_sync_in_flight or self.annotation_sync_in_flight
-            or self.stats_sync_in_flight or self.sync_in_progress then
-            local remaining = retries_left
-            if remaining == nil then remaining = 3 end
-            if remaining > 0 then
-                self:logInfo("Close-sync highlights busy; retrying", tostring(remaining))
-                self:_syncAnnotationsAfterClose(closed_file, captured, remaining - 1)
-            else
-                self:logWarn("Close-sync highlights gave up because Bridge Sync stayed busy")
-            end
-            return
-        end
         if not NetworkMgr:isConnected() then
             self:logInfo("Close-sync highlights waiting for WiFi; periodic sync will retry later")
             return
         end
-        self.annotation_close_sync_in_flight = true
-        Trapper:wrap(function()
+        self:_submitSyncJob(
+            "close_annotations",
+            _("Close highlight sync"),
+            "close",
+            BridgeSyncCoordinator.PRIORITY.lifecycle,
+            true,
+            function()
+            self.annotation_close_sync_in_flight = true
             local run_ok, result, err = pcall(function()
                 local book = nil
                 if closed_file then
@@ -2264,7 +2792,9 @@ function BridgeSync:_syncAnnotationsAfterClose(closed_file, captured, retries_le
             elseif not run_ok then
                 self:logWarn("Close-sync highlights crashed:", tostring(result))
             end
-        end)
+            return run_ok and (result ~= nil or err == "no hash")
+            end
+        )
     end)
 end
 
@@ -2274,60 +2804,75 @@ function BridgeSync:onSuspend()
 end
 
 function BridgeSync:onBridgeSyncSyncBooks()
-    Trapper:wrap(function()
-        self:syncFromBridge(false)
-    end)
+    self:_submitSyncJob(
+        "books", _("Book sync"), "manual",
+        BridgeSyncCoordinator.PRIORITY.manual, false,
+        function() return self:syncFromBridge(false) end
+    )
     return true
 end
 
 function BridgeSync:onBridgeSyncSyncStats()
-    Trapper:wrap(function()
-        self:syncReadingStats(false)
-    end)
+    self:_submitSyncJob(
+        "statistics", _("Reading stats sync"), "manual",
+        BridgeSyncCoordinator.PRIORITY.manual, false,
+        function() return self:syncReadingStats(false) end
+    )
     return true
 end
 
-function BridgeSync:checkForPluginUpdate()
+function BridgeSync:_maybeCheckForPluginUpdate()
+    if self.server_url == "" or self.username == "" or self.key == "" then return end
+    local last_check = tonumber(self:_getStateScalar("plugin_update_checked_at")) or 0
+    if os.time() - last_check < 24 * 60 * 60 then return end
+    self:_submitSyncJob(
+        "plugin_update", _("Plugin update check"), "automatic",
+        BridgeSyncCoordinator.PRIORITY.automatic, true,
+        function() return self:checkForPluginUpdate(true) end
+    )
+end
+
+function BridgeSync:checkForPluginUpdate(silent)
     if not self.server_url or self.server_url == "" then
-        self:_showMessage(_("Server URL is not configured"), 2)
-        return
+        if not silent then self:_showMessage(_("Server URL is not configured"), 2) end
+        return false
     end
     local network_ok, network_err = self:_preflightNetwork()
     if not network_ok then
         self:logWarn(network_err)
-        self:_showMessage(network_err, 4)
-        return
+        if not silent then self:_showMessage(network_err, 4) end
+        return false
     end
 
-    local info_msg = InfoMessage:new{
-        text = _("Checking for plugin update..."),
-        timeout = 0,
-    }
-    UIManager:show(info_msg)
-    UIManager:forceRePaint()
+    local info_msg = nil
+    if not silent then
+        info_msg = InfoMessage:new{ text = _("Checking for plugin update..."), timeout = 0 }
+        UIManager:show(info_msg)
+        UIManager:forceRePaint()
+    end
 
     local subprocess_ok, ok, result = self:_runInSubprocess(function()
         return self.api:getPluginVersion()
     end)
 
-    UIManager:close(info_msg)
+    if info_msg then UIManager:close(info_msg) end
 
     if not subprocess_ok then
         self:logErr("Plugin version check subprocess failed", ok or "")
-        self:_showMessage(T(_("Plugin version check failed: %1"), tostring(ok or "Subprocess failed")), 5)
-        return
+        if not silent then self:_showMessage(T(_("Plugin version check failed: %1"), tostring(ok or "Subprocess failed")), 5) end
+        return false
     end
 
     if not ok then
         self:logWarn(result or "Version check failed")
-        self:_showMessage(result or _("Version check failed"), 4)
-        return
+        if not silent then self:_showMessage(result or _("Version check failed"), 4) end
+        return false
     end
 
     local remote_version = type(result) == "table" and result.version or nil
     if not remote_version then
-        self:_showMessage(_("Invalid version response from server"), 4)
-        return
+        if not silent then self:_showMessage(_("Invalid version response from server"), 4) end
+        return false
     end
 
     local local_version = "unknown"
@@ -2339,9 +2884,17 @@ function BridgeSync:checkForPluginUpdate()
         end
     end
 
-    if local_version == remote_version then
-        self:_showMessage(T(_("Plugin is up to date (v%1)"), local_version), 3)
-        return
+    self:_saveStateScalar("plugin_update_checked_at", os.time())
+    self:_saveStateScalar("plugin_update_latest_version", remote_version)
+
+    if not BridgeVersion.isNewer(remote_version, local_version) then
+        if not silent then self:_showMessage(T(_("Plugin is up to date (v%1)"), local_version), 3) end
+        return true
+    end
+
+    if silent then
+        self:logInfo("Plugin update available:", local_version, "to", remote_version)
+        return true
     end
 
     UIManager:show(ConfirmBox:new{
@@ -2358,6 +2911,7 @@ function BridgeSync:checkForPluginUpdate()
             end)
         end,
     })
+    return true
 end
 
 -- Wraps a path in POSIX single quotes, escaping embedded single quotes.
@@ -2408,7 +2962,14 @@ function BridgeSync:_downloadAndInstallPlugin(version)
         return
     end
 
-    self:_showMessage(T(_("Plugin updated to v%1. Please restart KOReader."), version), 8)
+    UIManager:show(ConfirmBox:new{
+        text = T(_("Plugin updated to v%1. Restart KOReader now?"), version),
+        ok_text = _("Restart Now"),
+        cancel_text = _("Later"),
+        ok_callback = function()
+            UIManager:quit(UIManager.RETURN_CODE_REBOOT or 85)
+        end,
+    })
 end
 
 function BridgeSync:_installPluginZip(zip_path)
@@ -2515,25 +3076,31 @@ function BridgeSync:addToMainMenu(menu_items)
             {
                 text = _("Sync Now"),
                 callback = function()
-                    Trapper:wrap(function()
-                        self:syncFromBridge(false)
-                    end)
+                    self:onBridgeSyncSyncBooks()
                 end,
             },
             {
                 text = _("Sync Reading Stats"),
                 callback = function()
-                    Trapper:wrap(function()
-                        self:syncReadingStats(false)
-                    end)
+                    self:onBridgeSyncSyncStats()
                 end,
             },
             {
                 text = _("Sync Highlights"),
                 callback = function()
-                    Trapper:wrap(function()
-                        self:syncAnnotations(false)
-                    end)
+                    self:onBridgeSyncSyncAnnotations()
+                end,
+            },
+            {
+                text_func = function()
+                    local status = self.sync_coordinator:status()
+                    if status.current then
+                        return T(_("Sync Status: %1 (%2 queued)"), status.current.label, status.pending_count)
+                    end
+                    return T(_("Sync Status: Idle (%1 queued)"), status.pending_count)
+                end,
+                callback = function()
+                    self:_showMessage(self:_syncStatusSummary(), 6)
                 end,
             },
             {
@@ -2673,8 +3240,16 @@ function BridgeSync:addToMainMenu(menu_items)
                 end,
                 callback = function()
                     if #self.pending_sessions > 0 and NetworkMgr:isConnected() then
-                        self:_uploadSessions()
-                        self:_showMessage(T(_("Uploaded %1 session(s)"), #self.pending_sessions), 2)
+                        self:_submitSyncJob(
+                            "sessions", _("Reading session upload"), "manual",
+                            BridgeSyncCoordinator.PRIORITY.manual, false,
+                            function()
+                                local pending_count = #self.pending_sessions
+                                local ok = self:_uploadSessions()
+                                if ok then self:_showMessage(T(_("Uploaded %1 session(s)"), pending_count), 2) end
+                                return ok
+                            end
+                        )
                     elseif #self.pending_sessions > 0 then
                         self:_showMessage(_("No network connection"), 2)
                     end
@@ -2785,11 +3360,19 @@ function BridgeSync:addToMainMenu(menu_items)
                 end,
             },
             {
-                text = _("Check for Plugin Update"),
+                text_func = function()
+                    local latest = self:_getStateScalar("plugin_update_latest_version")
+                    if latest then
+                        return T(_("Check for Plugin Update (latest: v%1)"), tostring(latest))
+                    end
+                    return _("Check for Plugin Update")
+                end,
                 callback = function()
-                    Trapper:wrap(function()
-                        self:checkForPluginUpdate()
-                    end)
+                    self:_submitSyncJob(
+                        "plugin_update", _("Plugin update check"), "manual",
+                        BridgeSyncCoordinator.PRIORITY.manual, false,
+                        function() return self:checkForPluginUpdate(false) end
+                    )
                 end,
             },
         },

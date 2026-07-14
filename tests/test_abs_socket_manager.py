@@ -145,6 +145,7 @@ class TestABSSocketManagerStart(unittest.TestCase):
         mgr._restart_max_secs = 0
         mgr._healthy_session_secs = 0
         starts = {"n": 0}
+        stops = {"n": 0}
         built = []
 
         class _FakeListener:
@@ -157,12 +158,13 @@ class TestABSSocketManagerStart(unittest.TestCase):
                     mgr._stop_event.set()  # stop after the 3rd (re)start
 
             def stop(self_inner):
-                pass
+                stops["n"] += 1
 
         with patch("src.services.abs_socket_manager.ABSSocketListener", _FakeListener):
             mgr._supervise(None, "http://abs.local", "admin-token", "global")
 
         self.assertEqual(starts["n"], 3)   # initial + 2 restarts
+        self.assertEqual(stops["n"], 3)    # every old debounce loop is stopped
         self.assertEqual(len(built), 3)    # a fresh listener each iteration
         self.assertTrue(all(b["user_id"] is None for b in built))
 

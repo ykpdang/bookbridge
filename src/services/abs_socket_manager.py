@@ -149,6 +149,8 @@ class ABSSocketManager:
                 listener.start()  # blocks until the socket session ends
             except Exception as e:
                 logger.warning("🔌 ABS Socket.IO: %s listener crashed: %s", scope, e)
+            finally:
+                listener.stop()
 
             if self._stop_event.is_set():
                 break

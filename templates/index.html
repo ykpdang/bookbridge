@@ -231,6 +231,28 @@
                 </a>
                 {% endif %}
 
+                {% if integrations.bookfusion %}
+                <div class="service-item progress-item-hc" title="{% if mapping.bookfusion_linked %}BookFusion linked{% else %}Link to BookFusion{% endif %}">
+                    <span class="service-icon-emoji {% if not mapping.bookfusion_linked %}grayscale-muted{% endif %}">BF</span>
+                    <span class="service-name">BookFusion</span>
+                    <span class="service-value cursor-pointer color-inherit" title="Click to edit BookFusion link"
+                        data-abs-id="{{ mapping.abs_id }}" data-title="{{ mapping.display_title|default(mapping.abs_title)|escape }}"
+                        data-has-local-epub="{% if mapping.has_local_epub %}true{% else %}false{% endif %}"
+                        data-has-storyteller="{% if mapping.storyteller_uuid %}true{% else %}false{% endif %}"
+                        onclick="linkBookFusion(event)">
+                        {% if mapping.bookfusion_linked %}
+                        {% if mapping.states.bookfusion is defined %}
+                        {{ '%.0f' | format(mapping.states.bookfusion.percentage|default(0)) }}%
+                        {% else %}
+                        0%
+                        {% endif %}
+                        {% else %}
+                        <span class="link-icon">+</span>
+                        {% endif %}
+                    </span>
+                </div>
+                {% endif %}
+
                 {% if integrations.hardcover %}
                 <div class="service-item progress-item-hc">
                     <a href="{{ mapping.hardcover_url|default('https://hardcover.app') }}" target="_blank"
@@ -2570,6 +2592,64 @@
                 }
             }
 
+            async function linkBookFusion(event) {
+                event.stopPropagation();
+                const item = event.currentTarget;
+                const absId = item.dataset.absId;
+                const title = item.dataset.title || '';
+                const hasStoryteller = item.dataset.hasStoryteller === 'true';
+                const query = prompt('Search your BookFusion library:', title);
+                if (query === null || !query.trim()) return;
+
+                let data;
+                try {
+                    const resp = await fetch('/api/bookfusion/search?q=' + encodeURIComponent(query.trim()));
+                    data = await resp.json();
+                    if (!resp.ok) throw new Error(data.error || 'Search failed');
+                } catch (err) {
+                    alert(err.message || 'BookFusion search failed');
+                    return;
+                }
+
+                const books = (data.books || []).slice(0, 8);
+                if (!books.length) {
+                    const hasLocal = item.dataset.hasLocalEpub === 'true';
+                    if (hasLocal) {
+                        openBookFusionUploadModal(absId, title, hasStoryteller);
+                    } else {
+                        alert('No BookFusion books found.');
+                    }
+                    return;
+                }
+
+                const choices = books.map((book, idx) => `${idx + 1}. ${book.title || book.id}${book.author ? ' - ' + book.author : ''}`).join('\n');
+                const selected = prompt('Choose a BookFusion book:\n\n' + choices, '1');
+                if (selected === null) return;
+                const index = parseInt(selected, 10) - 1;
+                const book = books[index];
+                if (!book) {
+                    alert('Invalid selection.');
+                    return;
+                }
+
+                try {
+                    const resp = await fetch('/api/bookfusion/link/' + encodeURIComponent(absId), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            bookfusion_id: book.id,
+                            title: book.title || '',
+                            author: book.author || ''
+                        })
+                    });
+                    const payload = await resp.json().catch(() => ({}));
+                    if (!resp.ok) throw new Error(payload.error || 'Link failed');
+                    location.reload();
+                } catch (err) {
+                    alert(err.message || 'BookFusion link failed');
+                }
+            }
+
             // Initial Sort Defaults
             let sortState = {
                 title: 'asc',      // A-Z default
@@ -3156,6 +3236,62 @@
 
             function _dmYesDelete() { _dmExecuteFetch(window._mcAbsId, true); }
             function _dmNoKeepMapping() { _dmExecuteFetch(window._mcAbsId, false); }
+
+            function openBookFusionUploadModal(absId, title, hasStoryteller) {
+                window._bfUploadAbsId = absId;
+                document.getElementById('bf-upload-title').textContent = title || 'this book';
+                const status = document.getElementById('bf-upload-status');
+                status.textContent = '';
+                const btn = document.getElementById('bf-upload-confirm-btn');
+                btn.disabled = false;
+                // Show/hide variant radio options
+                const radioGroup = document.getElementById('bf-upload-variant-group');
+                if (radioGroup) {
+                    radioGroup.style.display = hasStoryteller ? 'block' : 'none';
+                    // Reset to standard when opening
+                    const standardRadio = document.querySelector('input[name="bf-upload-variant"][value="standard"]');
+                    if (standardRadio) standardRadio.checked = true;
+                }
+                document.getElementById('bf-upload-modal').style.display = 'flex';
+            }
+
+            function closeBookFusionUploadModal() {
+                document.getElementById('bf-upload-modal').style.display = 'none';
+                window._bfUploadAbsId = null;
+            }
+
+            async function _bfConfirmUpload() {
+                const absId = window._bfUploadAbsId;
+                if (!absId) return;
+                const status = document.getElementById('bf-upload-status');
+                const btn = document.getElementById('bf-upload-confirm-btn');
+                btn.disabled = true;
+                const variantInput = document.querySelector('input[name="bf-upload-variant"]:checked');
+                const variant = variantInput ? variantInput.value : 'standard';
+                status.textContent = variant === 'readaloud'
+                    ? 'Downloading and uploading ReadAloud EPUB — this can take a few minutes…'
+                    : 'Uploading…';
+                try {
+                    const resp = await fetch('/api/bookfusion/upload/' + encodeURIComponent(absId), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ variant })
+                    });
+                    const payload = await resp.json().catch(() => ({}));
+                    if (payload.success) {
+                        status.textContent = 'Uploaded. Reloading…';
+                        location.reload();
+                        return;
+                    }
+                    status.textContent = payload.duplicate
+                        ? 'Already in your BookFusion library. Use Search to link it.'
+                        : (payload.error || 'Upload failed');
+                    btn.disabled = false;
+                } catch (err) {
+                    status.textContent = err.message || 'BookFusion upload failed';
+                    btn.disabled = false;
+                }
+            }
         </script>
 
         <!-- Delete Mapping Confirmation Modal -->
@@ -3182,6 +3318,47 @@
                     <button onclick="_dmYesDelete()"
                         style="padding:10px 20px; border:none; border-radius:8px; cursor:pointer; font-weight:600; font-size:0.9rem; background:linear-gradient(135deg,#e53e3e,#c53030); color:#fff;">Yes,
                         Delete</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Upload to BookFusion Confirmation Modal -->
+        <div id="bf-upload-modal" class="hc-modal" style="display:none;">
+            <div class="hc-modal-backdrop" onclick="closeBookFusionUploadModal()"></div>
+            <div class="hc-modal-content" style="max-width:420px;">
+                <div class="hc-modal-header">
+                    <h3>Upload to BookFusion?</h3>
+                    <button class="hc-modal-close" onclick="closeBookFusionUploadModal()" aria-label="Close">
+                        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round">
+                            <path d="M1 1l12 12M13 1L1 13" />
+                        </svg>
+                    </button>
+                </div>
+                <div class="hc-modal-body">
+                    <p style="color:rgba(255,255,255,0.75); margin:0; line-height:1.6;">
+                        No match found in your BookFusion library. Upload
+                        <strong id="bf-upload-title">this book</strong>'s linked EPUB to your BookFusion library?
+                    </p>
+                    <div id="bf-upload-variant-group" style="display:none;">
+                        <label style="display:block; margin:10px 0 6px; color:rgba(255,255,255,0.85); font-size:0.9rem;">
+                            <input type="radio" name="bf-upload-variant" value="standard" checked> Standard EPUB
+                        </label>
+                        <label style="display:block; margin:0 0 6px; color:rgba(255,255,255,0.85); font-size:0.9rem;">
+                            <input type="radio" name="bf-upload-variant" value="readaloud"> Storyteller ReadAloud EPUB (with narration audio)
+                        </label>
+                        <p style="color:rgba(255,255,255,0.5); font-size:0.78rem; margin:4px 0 0;">
+                            The ReadAloud EPUB is large (~100MB) and may take a few minutes to upload.
+                        </p>
+                    </div>
+                    <p id="bf-upload-status"
+                        style="color:rgba(255,255,255,0.55); margin:12px 0 0; min-height:18px; font-size:0.85rem;"></p>
+                </div>
+                <div class="hc-modal-footer">
+                    <button class="hc-btn-cancel" onclick="closeBookFusionUploadModal()">No, Cancel</button>
+                    <button id="bf-upload-confirm-btn" onclick="_bfConfirmUpload()"
+                        style="padding:10px 20px; border:none; border-radius:8px; cursor:pointer; font-weight:600; font-size:0.9rem; background:linear-gradient(135deg,#667eea,#764ba2); color:#fff;">Yes,
+                        Upload</button>
                 </div>
             </div>
         </div>

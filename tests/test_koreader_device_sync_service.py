@@ -79,6 +79,36 @@ class TestKOReaderDeviceSyncService(unittest.TestCase):
         self.assertEqual(item["download_path"], "/koreader/device-sync/books/abs-1/download")
         self.assertEqual(item["filename"], "Dragon's Justice.epub")
 
+    def test_manifest_excludes_audiobook_only_book_without_warning(self):
+        """Audiobook-only mappings have no ebook file by design and must not be
+        pulled into the ebook device-sync manifest -- previously every cycle
+        logged a spurious "no original ebook filename" warning for them,
+        forever, since such a book can never satisfy that check.
+        """
+        self._write_book_file("kavita_187.epub")
+        ebook_book = Book(
+            abs_id="abs-ebook-1",
+            abs_title="Dragon's Justice",
+            ebook_filename="kavita_187.epub",
+            kosync_doc_id="hash-1",
+            status="active",
+        )
+        audio_only_book = Book(
+            abs_id="abs-audio-only-1",
+            abs_title="Exiles",
+            sync_mode="audiobook_only",
+            kosync_doc_id="forging_abs-audio-only-1",
+            status="active",
+        )
+        self.db.save_book(ebook_book)
+        self.db.save_book(audio_only_book)
+
+        with self.assertNoLogs("src.services.koreader_device_sync_service", level="WARNING"):
+            manifest = self.service.build_manifest()
+
+        self.assertEqual(len(manifest["books"]), 1)
+        self.assertEqual(manifest["books"][0]["abs_id"], "abs-ebook-1")
+
     def test_manifest_adds_suffix_for_filename_collisions(self):
         self._write_book_file("kavita_1.epub")
         self._write_book_file("kavita_2.epub")
@@ -147,6 +177,21 @@ class TestKOReaderDeviceSyncService(unittest.TestCase):
         self.assertEqual(len(manifest["books"]), 1)
         item = manifest["books"][0]
         self.assertEqual(item["shelves"], ["Sci-fi Horror", "Dark Fiction"])
+
+    def test_manifest_revision_changes_when_shelves_change(self):
+        base_item = {
+            "abs_id": "abs-1",
+            "filename": "Book.epub",
+            "content_hash": "hash-1",
+            "size": 123,
+        }
+
+        without_shelves = self.service._compute_revision([dict(base_item)])
+        with_shelves = self.service._compute_revision([
+            {**base_item, "shelves": ["Owned", "Sci-Fi"]}
+        ])
+
+        self.assertNotEqual(without_shelves, with_shelves)
 
     def test_manifest_no_shelves_when_disabled(self):
         self._write_book_file("plain.epub")
@@ -222,9 +267,12 @@ class TestKOReaderDeviceSyncService(unittest.TestCase):
         self.assertEqual(len(manifest["books"]), 1)
         self.assertEqual(manifest["books"][0]["content_hash"], "hash-remote")
 
-        # The drifted stored hash should be reconciled to the served file's hash,
-        # so the mismatch does not recur on every poll cycle.
-        self.assertEqual(self.db.get_book("abs-1").kosync_doc_id, "hash-remote")
+        # A primary may intentionally identify another EPUB build. Keep it stable
+        # while linking the hash of the bytes actually served by the manifest.
+        self.assertEqual(self.db.get_book("abs-1").kosync_doc_id, "stale-hash")
+        served_doc = self.db.get_kosync_document("hash-remote")
+        self.assertIsNotNone(served_doc)
+        self.assertEqual(served_doc.linked_abs_id, "abs-1")
 
         resolved = self.service.resolve_download("abs-1")
         self.assertIsNotNone(resolved)
@@ -243,15 +291,8 @@ class TestKOReaderDeviceSyncService(unittest.TestCase):
             )
         )
 
-        original_update = self.db.update_book_kosync_doc_id
-        calls = []
-        self.db.update_book_kosync_doc_id = lambda *a, **k: (calls.append(a) or original_update(*a, **k))
-        try:
-            self.service.build_manifest()
-        finally:
-            self.db.update_book_kosync_doc_id = original_update
+        self.service.build_manifest()
 
-        self.assertEqual(calls, [])
         self.assertEqual(self.db.get_book("abs-1").kosync_doc_id, "hash-kavita_187")
 
     def test_served_hash_linked_as_sibling_even_when_matching(self):
@@ -274,7 +315,7 @@ class TestKOReaderDeviceSyncService(unittest.TestCase):
         self.assertIsNotNone(served_doc)
         self.assertEqual(served_doc.linked_abs_id, "abs-1")
 
-    def test_drifted_hash_reconciled_but_displaced_hash_kept_as_sibling(self):
+    def test_drifted_primary_hash_preserved_with_served_hash_as_sibling(self):
         self._write_book_file("kavita_187.epub")
         self.db.save_book(
             Book(
@@ -288,15 +329,15 @@ class TestKOReaderDeviceSyncService(unittest.TestCase):
 
         self.service.build_manifest()
 
-        # No device was using the stale hash, so the primary pointer converges to the
-        # served file's hash...
-        self.assertEqual(self.db.get_book("abs-1").kosync_doc_id, "hash-kavita_187")
-        # ...but the displaced hash is preserved as a linked sibling rather than lost.
+        self.assertEqual(self.db.get_book("abs-1").kosync_doc_id, "stale-hash")
         stale_doc = self.db.get_kosync_document("stale-hash")
         self.assertIsNotNone(stale_doc)
         self.assertEqual(stale_doc.linked_abs_id, "abs-1")
+        served_doc = self.db.get_kosync_document("hash-kavita_187")
+        self.assertIsNotNone(served_doc)
+        self.assertEqual(served_doc.linked_abs_id, "abs-1")
 
-    def test_active_device_hash_is_not_demoted_by_reconcile(self):
+    def test_active_device_hash_remains_primary(self):
         self._write_book_file("kavita_187.epub")
         self.db.save_book(
             Book(
@@ -320,15 +361,14 @@ class TestKOReaderDeviceSyncService(unittest.TestCase):
 
         self.service.build_manifest()
 
-        # The reconciler must NOT change the primary back to the served-file hash —
-        # that is the "manual hash keeps changing back every cycle" bug (#285).
+        # Device activity is not needed to protect the selected primary hash.
         self.assertEqual(self.db.get_book("abs-1").kosync_doc_id, "device-forged-hash")
         # The served-file hash is still linked as a sibling for BridgeSync devices.
         served_doc = self.db.get_kosync_document("hash-kavita_187")
         self.assertIsNotNone(served_doc)
         self.assertEqual(served_doc.linked_abs_id, "abs-1")
 
-    def test_internal_bot_progress_does_not_protect_stale_hash(self):
+    def test_internal_bot_hash_remains_primary(self):
         self._write_book_file("kavita_187.epub")
         self.db.save_book(
             Book(
@@ -339,8 +379,7 @@ class TestKOReaderDeviceSyncService(unittest.TestCase):
                 status="active",
             )
         )
-        # Only the sync bot has written this hash — not a real device, so it must not
-        # block reconciliation.
+        # Internal activity does not make the primary hash eligible for replacement.
         self.db.save_kosync_document(
             KosyncDocument(
                 document_hash="stale-hash",
@@ -353,26 +392,50 @@ class TestKOReaderDeviceSyncService(unittest.TestCase):
 
         self.service.build_manifest()
 
-        self.assertEqual(self.db.get_book("abs-1").kosync_doc_id, "hash-kavita_187")
+        self.assertEqual(self.db.get_book("abs-1").kosync_doc_id, "stale-hash")
+        served_doc = self.db.get_kosync_document("hash-kavita_187")
+        self.assertIsNotNone(served_doc)
+        self.assertEqual(served_doc.linked_abs_id, "abs-1")
 
-    def test_zero_percent_device_counts_as_active(self):
-        # A real device freshly opened at exactly 0% is still actively syncing —
-        # it must protect its hash from being demoted (falsy-zero regression: a
-        # bare `percentage > 0` test treated the 0% device as idle).
-        self.db.save_kosync_document(
-            KosyncDocument(
-                document_hash="fresh-device-hash",
-                percentage=0.0,
-                device="kobo",
-                device_id="kobo-1",
+    def test_manifest_rebuild_is_idempotent_for_drifted_primary(self):
+        self._write_book_file("kavita_187.epub")
+        self.db.save_book(
+            Book(
+                abs_id="abs-1",
+                abs_title="Pinned",
+                original_ebook_filename="kavita_187.epub",
+                kosync_doc_id="pinned-hash",
+                status="active",
             )
         )
-        self.assertTrue(self.service._hash_actively_used_by_device("fresh-device-hash"))
 
-    def test_bare_stub_without_device_not_active(self):
-        # A bare stub (no device, no progress) is not in active use.
-        self.db.save_kosync_document(KosyncDocument(document_hash="bare-stub-hash"))
-        self.assertFalse(self.service._hash_actively_used_by_device("bare-stub-hash"))
+        self.service.build_manifest()
+        self.service.build_manifest()
+
+        self.assertEqual(self.db.get_book("abs-1").kosync_doc_id, "pinned-hash")
+        linked_hashes = {
+            doc.document_hash
+            for doc in self.db.get_kosync_documents_for_book("abs-1")
+        }
+        self.assertEqual(linked_hashes, {"pinned-hash", "hash-kavita_187"})
+
+    def test_bare_primary_hash_is_linked_during_manifest_build(self):
+        self._write_book_file("kavita_187.epub")
+        self.db.save_book(
+            Book(
+                abs_id="abs-1",
+                abs_title="Bare Primary",
+                original_ebook_filename="kavita_187.epub",
+                kosync_doc_id="bare-primary-hash",
+                status="active",
+            )
+        )
+
+        self.service.build_manifest()
+
+        primary_doc = self.db.get_kosync_document("bare-primary-hash")
+        self.assertIsNotNone(primary_doc)
+        self.assertEqual(primary_doc.linked_abs_id, "abs-1")
 
     def test_ensure_linked_kosync_document_upserts_and_relinks(self):
         # Creates a row when missing.

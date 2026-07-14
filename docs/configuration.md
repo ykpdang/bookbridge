@@ -6,7 +6,19 @@
 
 ## Web UI Settings
 
-The **Settings** page is the easiest way to manage the bridge. Each service section includes a **Test** button so you can check a service before saving. Saving settings restarts the app automatically and brings you back to the dashboard when it is ready.
+The **Settings** page is the easiest way to manage the bridge. Saving settings restarts the app automatically and brings you back to the dashboard when it is ready.
+
+The Settings sidebar is organized into:
+
+- **Integrations** — one card per service, in the same order and with the same names as each reader's **My Integrations** page
+- **Sync** — sync behavior, instant sync, and alignment health
+- **Features** — Telegram notifications, Shelfmark, and Suggestions
+- **AI** — the optional LLM assist provider and its feature toggles
+- **System** — timezone and logging, paths, and advanced maintenance tools (transcription, cache cleanup, backfills)
+- **Users** — reader accounts and their per-reader integrations
+- **Logs** — the embedded live log viewer
+
+Everything in **Settings** is **server-wide**: connections and engine behavior shared by all readers. Reader-specific accounts, tokens, API keys, and sync toggles live under **Account -> My Integrations** for the signed-in reader — the same service cards, same order — with **Test** buttons to check each login. Admins can manage those same per-reader fields from **Settings -> Users -> Integrations** when they are helping another reader.
 
 ### Split-Port Security (Optional)
 
@@ -31,8 +43,8 @@ Audiobookshelf remains the default audiobook source when a mapping is not explic
 
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |
-| Server URL | `ABS_SERVER` | empty | Required. |
-| API Token | `ABS_KEY` | empty | Required. |
+| Server URL | `ABS_SERVER` | empty | Required (or `disabled` for an ebook-only install). Server-wide. |
+| API Token | `ABS_KEY` | empty | Per-user (set in **Account -> My Integrations**). The admin's token also powers global library scans. |
 | Library ID | `ABS_LIBRARY_ID` | empty | Per-user (set in user Integrations). Used by the matcher and search scoping. |
 | Auto-add Collection | `ABS_COLLECTION_NAME` | `Synced with KOReader` | Per-user (set in user Integrations). Collection matched audiobooks are added to. The value here is the global default; the admin's value seeds from it on first startup. |
 | Progress Offset | `ABS_PROGRESS_OFFSET_SECONDS` | `0` | Rewinds progress written back to ABS by this many seconds. |
@@ -43,29 +55,73 @@ Audiobookshelf notes:
 - Use **Find IDs** next to **Library ID** in Settings to load your available ABS libraries and fill the field from a dropdown.
 - If you want to run without Audiobookshelf for a while, enter `disabled` in the ABS URL or token field to intentionally turn ABS off.
 
-#### KOSync / KOReader
+#### KOReader / KoSync
 
-Use this when you want KOReader devices to sync directly with the bridge.
+The bridge **is** a KoSync server — KOReader devices sync directly with it. Device onboarding
+(the sync-server address to enter in KOReader, plus the Bridge Sync plugin download) lives on
+**My Account -> Connect a KOReader device**.
 
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |
 | Enable | `KOSYNC_ENABLED` | `false` | Turns on KOSync support. |
-| Target KOSync URL | `KOSYNC_SERVER` | empty | External server URL, or the built-in bridge URL if you use the internal server. |
-| Username | `KOSYNC_USER` | empty | KOReader username. |
-| Password | `KOSYNC_KEY` | empty | KOReader password. |
 | Hash Method | `KOSYNC_HASH_METHOD` | `content` | `content` is safest. `filename` is faster but less reliable. |
+| PUT Debounce | `KOSYNC_PUT_DEBOUNCE_SECONDS` | `300` | Wait this long after KOReader stops pushing before running the sync cycle. |
 | Use Percentage from Server | `KOSYNC_USE_PERCENTAGE_FROM_SERVER` | `false` | Uses raw percentage instead of text matching. |
 | Highlight Sync | `KOREADER_ANNOTATION_SYNC` | `true` | Enables bridge-side annotation exchange for the Bridge Sync KOReader plugin. Requires the current Bridge Sync plugin on each device. |
+| Target KOSync URL | `KOSYNC_SERVER` | empty | Under **Advanced** on the card. Leave on the built-in server; only set this to relay through a separate external KoSync instance. |
 | Split-Port Listener | `KOSYNC_PORT` | empty | Optional dedicated KOSync port for internet-safe exposure. |
 
 KOSync notes:
 
-- If you use the built-in KOSync bridge, the **Test** button checks the values currently typed into the form before you save them.
+- Each reader's KoSync **username and password** are per-reader — set them under **Account -> My Integrations -> KOReader / KoSync** (with a **Test** button), or as an admin under **Settings -> Users -> Integrations**.
 - Plain KOReader/KOSync progress sync does not need the Bridge Sync plugin. Highlight and note sync does.
+
+#### BookFusion
+
+BookFusion is a supported ebook progress and highlight source. BookBridge can also upload a book's local EPUB into your BookFusion bookshelf when a link search finds no match.
+
+| Setting | Env Var | Default | Notes |
+| --- | --- | --- | --- |
+| Enable | `BOOKFUSION_ENABLED` | `false` | Per-reader. Turns on BookFusion progress sync for that reader. |
+| API URL | `BOOKFUSION_API_URL` | `https://www.bookfusion.com` | Usually leave this at the default. |
+| Access Token | `BOOKFUSION_ACCESS_TOKEN` | empty | Per-reader. Device linking from **Account -> My Integrations** is preferred (Link BookFusion button). |
+| Calibre API Key | `BOOKFUSION_API_KEY` | empty | Per-reader. Only needed to **upload** books to BookFusion; get it from the [BookFusion Calibre integration page](https://www.bookfusion.com/integrations/calibre). |
+| Highlight Sync | `BOOKFUSION_ANNOTATION_SYNC` | `false` | Per-reader. Enables BookFusion highlight relay for linked books. |
+| Poll Mode | `BOOKFUSION_POLL_MODE` | `global` | `global` uses the main sync cycle. `custom` polls BookFusion separately. |
+| Poll Interval | `BOOKFUSION_POLL_SECONDS` | `300` | Used when Poll Mode is `custom`. |
+
+BookFusion notes:
+
+- Link BookFusion from **Account -> My Integrations**. Admins can also enter a reader's token under **Settings -> Users -> Integrations**.
+- The access token (progress and highlights) and the Calibre API key (uploads) are **two separate credentials**.
+- BookFusion reports percentages as 0-100; BookBridge handles the conversion internally.
+- BookFusion matching uses linked BookFusion IDs. When a book is not linked, the dashboard link flow offers **Upload to BookFusion** if the book has a local EPUB and the reader has a Calibre API key configured.
+
+#### Readest
+
+Readest can participate in highlight and note relay through Readest cloud sync. It is not a progress sync source.
+
+| Setting | Env Var | Default | Notes |
+| --- | --- | --- | --- |
+| Highlight Sync | `READEST_ANNOTATION_SYNC` | `false` | Per-reader. Enables Readest annotation relay for that reader. |
+| Highlight Sync Interval | `READEST_ANNOTATION_SYNC_MINUTES` | `15` | Minutes between background Readest annotation relay cycles. |
+| Account Email | `READEST_EMAIL` | empty | Per-reader. The Readest account email. |
+| Account Password | `READEST_PASSWORD` | empty | Per-reader. Used to refresh cloud-sync tokens. |
+| Supabase URL | `READEST_SUPABASE_URL` | `https://readest.supabase.co` | Leave as default unless you self-host Readest. |
+| Supabase Anon Key | `READEST_SUPABASE_ANON_KEY` | empty | Optional override for self-hosted Readest. |
+
+Readest notes:
+
+- Enter the Readest email and password under **Account -> My Integrations** for each reader that wants Readest highlights.
+- Tokens are cached and refreshed by the bridge after login.
+- Readest sync depends on the same book identity being available to Readest and the bridge.
 
 #### Storyteller
 
-The bridge talks to Storyteller through the REST API only.
+Storyteller is **optional** — the bridge does its own audio ↔ text alignment with built-in
+Whisper transcription and EPUB SMIL data. Add this integration only if you use the
+Storyteller read-along app; the bridge then syncs its position and prefers its transcripts
+as an alignment source. The bridge talks to Storyteller through the REST API only.
 
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |
@@ -85,7 +141,7 @@ Storyteller notes:
 - Forge imports use the Storyteller REST/TUS API directly. A Storyteller library mount is optional unless you want local fallback access to generated artifacts.
 - If you mount `/path/to/storyteller/assets:/storyteller/assets`, set **Storyteller Assets Path** to `/storyteller`.
 - Storyteller timing data stays the preferred alignment source whenever valid transcript assets are available.
-- **Settings -> Storyteller Backfill** rechecks existing Storyteller-linked books and rebuilds their alignment data without rerunning Whisper.
+- **Settings -> System -> Advanced -> Storyteller Backfill** rechecks existing Storyteller-linked books and rebuilds their alignment data without rerunning Whisper.
 
 #### Grimmory
 
@@ -102,8 +158,6 @@ Grimmory is a supported ebook and audiobook source. You can use it for ebook syn
 | Record Reading Sessions | `GRIMMORY_READING_SESSIONS` | `true` | Sends reading or listening session updates back to Grimmory. |
 | Highlight Sync | `BOOKLORE_ANNOTATION_SYNC` | `false` | Enables Grimmory web-reader highlight/note relay for this reader. Requires the current Bridge Sync plugin for KOReader device annotations. |
 | Highlight Sync Interval | `BOOKLORE_ANNOTATION_SYNC_MINUTES` | `15` | Minutes between background Grimmory annotation relay cycles. |
-| Collection Syncing | `DEVICE_SYNC_COLLECTIONS` | `off` | Optional Bridge Sync plugin feature for turning Grimmory shelves into KOReader collections. |
-| Excluded Shelves | `DEVICE_SYNC_EXCLUDED_SHELVES` | empty | Optional Bridge Sync plugin setting for shelves that should be skipped. |
 | Poll Mode | `BOOKLORE_POLL_MODE` | `global` | `global` uses the main sync cycle. `custom` polls Grimmory separately. |
 | Poll Interval | `BOOKLORE_POLL_SECONDS` | `300` | Used when Poll Mode is `custom`. |
 
@@ -112,14 +166,25 @@ Grimmory notes:
 - Match, Batch Match, Suggestions, and Forge can now use **Grimmory audiobooks** as the audio source.
 - The dashboard shows **BL Audio** progress when a mapping is driven by Grimmory audio.
 - When **Record Reading Sessions** is enabled, Grimmory gets session updates as you make progress.
-- Enable **Highlight Sync** in each reader's Grimmory / BookLore Integrations if you want Grimmory web-reader highlights and notes to round-trip through the bridge.
-- **Settings -> Refresh Grimmory Cache** forces a fresh cache rebuild after imports, removals, or large metadata changes.
+- Enable **Highlight Sync** in each reader's Grimmory integration if you want Grimmory web-reader highlights and notes to round-trip through the bridge.
+- **Settings -> System -> Advanced -> Refresh Grimmory Cache** forces a fresh cache rebuild after imports, removals, or large metadata changes.
 - Use **Find IDs** next to **Library ID** in Settings to load your available Grimmory libraries and fill the field from a dropdown.
-- The **Device Sync Collections** settings only matter if you use the optional **Bridge Sync** KOReader plugin.
-- **Collection Syncing** controls whether Bridge Sync should turn Grimmory shelves into KOReader collections.
-- **Magic Shelves Only** means Bridge Sync uses shelves in Grimmory that fill themselves based on rules.
-- **Excluded Shelves** lets you list shelf names you do not want turned into KOReader collections.
+- The **KOReader Collections** settings only matter if you use the optional **Bridge Sync** KOReader plugin.
+- KOReader collections are configured per reader under **Account -> My Integrations -> KOReader Collections**.
+- **Collection Source** chooses whether Bridge Sync should use Grimmory shelves or Hardcover lists.
+- When the source is Grimmory, **Collection Syncing** controls which Grimmory shelves become KOReader collections. **Magic Shelves Only** means Bridge Sync uses shelves in Grimmory that fill themselves based on rules.
+- **Excluded Shelves** lets you list Grimmory shelf names you do not want turned into KOReader collections.
 - **Find Shelves** helps you pick shelf names from Grimmory instead of typing them by hand.
+
+KOReader Collections per-reader settings:
+
+| Setting | Env Var | Default | Notes |
+| --- | --- | --- | --- |
+| Collection Source | `DEVICE_SYNC_COLLECTION_SOURCE` | `grimmory` | `off`, `grimmory`, or `hardcover`. Choose one source to avoid collection-name collisions. |
+| Grimmory Shelf Mode | `DEVICE_SYNC_COLLECTIONS` | `off` | `off`, `all`, `magic`, or `shelf`. Used when Collection Source is `grimmory`. |
+| Excluded Grimmory Shelves | `DEVICE_SYNC_EXCLUDED_SHELVES` | empty | Comma-separated shelf names to skip. |
+| Hardcover List Mode | `DEVICE_SYNC_HARDCOVER_LISTS` | `all` | `all` or `selected`. Used when Collection Source is `hardcover`. |
+| Hardcover List Names | `DEVICE_SYNC_HARDCOVER_LIST_NAMES` | empty | Comma-separated list names when Hardcover List Mode is `selected`. |
 
 Advanced Grimmory cache tuning:
 
@@ -178,10 +243,10 @@ CWA is a supported ebook source and optional Kobo-sync progress source. Use it t
 | --- | --- | --- | --- |
 | Enable | `CWA_ENABLED` | `false` | Turns on OPDS / CWA ebook search and download. |
 | Server URL | `CWA_SERVER` | empty | CWA base URL. |
-| Username | `CWA_USERNAME` | empty | Optional username. |
-| Password | `CWA_PASSWORD` | empty | Optional password. |
+| Username | `CWA_USERNAME` | empty | Per-reader (set in **Account -> My Integrations**). |
+| Password | `CWA_PASSWORD` | empty | Per-reader. |
 | Kobo Sync Enabled | `CWA_SYNC_ENABLED` | `false` | Turns on reading-progress sync through CWA's Kobo sync protocol. |
-| Kobo Sync Token | `CWA_SYNC_TOKEN` | empty | Token used for CWA Kobo sync requests. |
+| Kobo Sync Token | `CWA_SYNC_TOKEN` | empty | Per-reader token used for CWA Kobo sync requests. |
 | Kobo Sync Poll Mode | `CWA_SYNC_POLL_MODE` | `global` | `global` uses the main sync cycle. `custom` polls CWA separately. |
 | Kobo Sync Poll Interval | `CWA_SYNC_POLL_SECONDS` | `300` | Used when Kobo Sync Poll Mode is `custom`. |
 | Use Calibre ABS Identifier | `CALIBRE_USE_ABS_IDENTIFIER` | `false` | Uses Calibre's `audiobookshelf_id` identifier to make suggestion matching authoritative when available. |
@@ -194,23 +259,31 @@ CWA notes:
 - The CWA username/password and Kobo sync token are per-reader integration credentials.
 - If you use the Audiobookshelf Calibre plugin, the bridge can read the `audiobookshelf_id` identifier from Calibre metadata or CWA as a fallback to avoid fuzzy matching already-linked books.
 
-#### Hardcover.app
+#### Hardcover
 
-Hardcover provides modern reading tracking with a beautiful UI.
+Hardcover provides modern reading tracking with a beautiful UI. BookBridge can post reading progress to Hardcover, push selected highlights, and optionally project Grimmory shelves into Hardcover lists. It is a **write-only tracker**: it receives progress but never leads a sync.
 
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |
 | Enable | `HARDCOVER_ENABLED` | `false` | Turns on Hardcover updates. |
-| API Token | `HARDCOVER_TOKEN` | empty | Personal API token from Hardcover. |
+| API Token | `HARDCOVER_TOKEN` | empty | Per-reader personal API token from Hardcover. |
+| Highlight Sync | `HARDCOVER_ANNOTATION_SYNC` | `false` | Per-reader. Pushes supported KOReader highlights to Hardcover. |
+| Highlight Sync Interval | `HARDCOVER_ANNOTATION_SYNC_MINUTES` | `30` | Minutes between background Hardcover annotation relay cycles. |
+| Grimmory Shelves to Hardcover Lists | `HARDCOVER_GRIMMORY_LIST_SYNC` | `off` | Per-reader. `off`, `all`, `magic`, or `shelf`. |
+| Hardcover List Name Prefix | `HARDCOVER_GRIMMORY_LIST_PREFIX` | `Grimmory: ` | Prefix for lists created from Grimmory shelves. |
+| Excluded Grimmory Shelves | `HARDCOVER_GRIMMORY_LIST_EXCLUDED_SHELVES` | empty | Comma-separated shelf names to skip during list projection. |
 
 Hardcover notes:
 
-- When enabled, progress is synced from KOReader/Audiobookshelf to Hardcover.
+- When enabled, progress is synced from KOReader/Audiobookshelf and other bridge leaders to Hardcover.
 - Use the **Edition Picker** on the dashboard to select which specific edition to track.
+- Each reader supplies their own Hardcover token under **Account -> My Integrations**.
+- Hardcover lists can also be used as KOReader collections when **KOReader Collections -> Collection Source** is set to **Hardcover Lists**.
+- Grimmory shelf projection creates or updates Hardcover lists for books already matched to Hardcover. It is per-reader, so one reader's shelves are not projected into another reader's account.
 
 #### StoryGraph
 
-StoryGraph is a popular alternative to Goodreads that focuses on reading data and moods.
+StoryGraph is a popular alternative to Goodreads that focuses on reading data and moods. Like Hardcover, it is a **write-only tracker**: it receives progress but never leads a sync.
 
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |
@@ -226,11 +299,14 @@ StoryGraph notes:
 
 #### Progress Trackers
 
-Hardcover and StoryGraph are independent — enable either or both with their `*_ENABLED`
-toggles in Settings → Trackers. Each user then picks which they use, and supplies their own
-token/cookies, under Settings → Users → (user) → Integrations.
+Hardcover and StoryGraph are independent - enable either or both on their cards in
+**Settings -> Integrations**. Each reader then picks which they use, and supplies their own
+token/cookies, under **Account -> My Integrations**. Admins can also manage those values under
+**Settings -> Users -> Integrations**.
 
 #### Telegram Notifications
+
+Found under **Settings -> Features**.
 
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |
@@ -241,13 +317,15 @@ token/cookies, under Settings → Users → (user) → Integrations.
 
 #### Shelfmark
 
+Found under **Settings -> Features**.
+
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |
 | Shelfmark URL | `SHELFMARK_URL` | empty | Adds the Shelfmark shortcut when configured. |
 
 #### AI / LLM Providers (Optional)
 
-The bridge can use Ollama, OpenAI, or an OpenAI-compatible local endpoint such as llama-server or llama-swap. The local OpenAI-compatible option expects standard `/v1/models`, `/v1/embeddings`, and `/v1/chat/completions` endpoints.
+Found under **Settings -> AI**. The bridge can use Ollama, OpenAI, or an OpenAI-compatible local endpoint such as llama-server or llama-swap. The local OpenAI-compatible option expects standard `/v1/models`, `/v1/embeddings`, and `/v1/chat/completions` endpoints.
 
 This is an advanced, opt-in feature. If you run a local [Ollama](https://ollama.com) server, the bridge can use it to make smarter book-match suggestions and to rescue audio↔text alignments that plain text matching misses. Everything here is **off until you enable it**, and every feature falls back to the normal behavior if Ollama is unreachable — so it never blocks a sync.
 
@@ -291,7 +369,7 @@ Ollama notes:
 
 ### Suggestions
 
-The Suggestions page is a review workspace, not an auto-linker. It always waits for your approval before creating mappings.
+Enabled under **Settings -> Features**. The Suggestions page is a review workspace, not an auto-linker. It always waits for your approval before creating mappings.
 
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |
@@ -308,8 +386,11 @@ Suggestions notes:
 
 ### Transcription Settings
 
+Found under **Settings -> System -> Advanced Options**. Transcription powers the bridge's own
+audio ↔ text alignment; it runs locally by default and needs no external services.
+
 > [!TIP]
-> Storyteller transcript assets are preferred over SMIL and Whisper whenever they are available and valid.
+> If you use Storyteller, its transcript assets are preferred over SMIL and Whisper whenever they are available and valid — so those books skip transcription entirely.
 
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |
@@ -327,6 +408,8 @@ Transcription notes:
 - The **Whisper Model** field in Settings is a text box with common suggestions. You can use a normal preset like `tiny` or enter a custom model name directly.
 
 ### Sync Tuning
+
+Found under **Settings -> Sync**, alongside instant-sync options and Alignment Health.
 
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |
@@ -353,6 +436,8 @@ Transcription notes:
 | ABS Socket Debounce | `ABS_SOCKET_DEBOUNCE_SECONDS` | `30` | Wait time after ABS playback activity before syncing. |
 
 ### Paths and System
+
+Found under **Settings -> System**.
 
 | Setting | Env Var | Default | Notes |
 | --- | --- | --- | --- |

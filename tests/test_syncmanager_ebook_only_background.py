@@ -50,7 +50,7 @@ def test_ebook_only_background_skips_transcript_pipeline_and_activates(tmp_path)
     manager.alignment_service.align_and_store.assert_not_called()
 
     assert book.status == "active"
-    manager.database_service.save_book.assert_called()
+    manager.database_service.update_book_if_exists.assert_called()
     manager.database_service.save_job.assert_called()
     assert job.progress == 1.0
     assert job.last_error is None

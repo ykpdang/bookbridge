@@ -21,6 +21,9 @@ PER_USER_CREDENTIAL_KEYS = frozenset({
     "ABS_KEY", "ABS_LIBRARY_ID", "ABS_COLLECTION_NAME",
     # KOReader / KoSync (server URL global; account is per-user)
     "KOSYNC_USER", "KOSYNC_KEY", "KOSYNC_ENABLED",
+    "DEVICE_SYNC_COLLECTION_SOURCE", "DEVICE_SYNC_COLLECTIONS",
+    "DEVICE_SYNC_EXCLUDED_SHELVES", "DEVICE_SYNC_HARDCOVER_LISTS",
+    "DEVICE_SYNC_HARDCOVER_LIST_NAMES",
     # Storyteller
     "STORYTELLER_USER", "STORYTELLER_PASSWORD", "STORYTELLER_ENABLED",
     # Calibre-Web (Automated)
@@ -34,8 +37,17 @@ PER_USER_CREDENTIAL_KEYS = frozenset({
     # Grimmory / BookLore (account + the user's own shelf/library)
     "BOOKLORE_USER", "BOOKLORE_PASSWORD", "BOOKLORE_ENABLED",
     "BOOKLORE_SHELF_NAME", "BOOKLORE_LIBRARY_ID", "BOOKLORE_ANNOTATION_SYNC",
+    # Readest (Supabase cloud sync; the account is per-user and the rotating
+    # access/refresh tokens are cached per-user — the user never pastes a JWT)
+    "READEST_ANNOTATION_SYNC", "READEST_EMAIL", "READEST_PASSWORD",
+    "READEST_ACCESS_TOKEN", "READEST_REFRESH_TOKEN", "READEST_TOKEN_EXPIRES_AT",
+    # BookFusion
+    "BOOKFUSION_ENABLED", "BOOKFUSION_ACCESS_TOKEN", "BOOKFUSION_API_KEY",
+    "BOOKFUSION_ANNOTATION_SYNC",
     # Trackers (write targets are per-user accounts)
     "HARDCOVER_TOKEN", "HARDCOVER_ENABLED",
+    "HARDCOVER_GRIMMORY_LIST_SYNC", "HARDCOVER_GRIMMORY_LIST_PREFIX",
+    "HARDCOVER_GRIMMORY_LIST_EXCLUDED_SHELVES",
     "STORYGRAPH_SESSION_COOKIE", "STORYGRAPH_REMEMBER_USER_TOKEN", "STORYGRAPH_ENABLED",
 })
 
@@ -53,17 +65,43 @@ PER_USER_FIELD_GROUPS = [
         ("KOSYNC_USER", "Sync username", "text"),
         ("KOSYNC_KEY", "Sync password", "secret"),
     ]),
+    ("KOReader Collections", [
+        (
+            "DEVICE_SYNC_COLLECTION_SOURCE",
+            "Collection source",
+            "select:off=Off / Disabled|grimmory=Grimmory Shelves|hardcover=Hardcover Lists",
+        ),
+        (
+            "DEVICE_SYNC_COLLECTIONS",
+            "Grimmory shelf mode",
+            "select:off=Off / Disabled|all=All Shelves|magic=Magic Shelves Only|shelf=Regular Shelves Only",
+        ),
+        ("DEVICE_SYNC_EXCLUDED_SHELVES", "Grimmory shelves to exclude", "text"),
+        (
+            "DEVICE_SYNC_HARDCOVER_LISTS",
+            "Hardcover list mode",
+            "select:all=All Lists|selected=Selected Lists Only",
+        ),
+        ("DEVICE_SYNC_HARDCOVER_LIST_NAMES", "Hardcover list names", "text"),
+    ]),
     ("Storyteller", [
         ("STORYTELLER_ENABLED", "Enabled", "bool"),
         ("STORYTELLER_USER", "Username", "text"),
         ("STORYTELLER_PASSWORD", "Password", "secret"),
     ]),
-    ("Calibre-Web (Automated)", [
-        ("CWA_ENABLED", "Enabled", "bool"),
-        ("CWA_USERNAME", "Username", "text"),
-        ("CWA_PASSWORD", "Password", "secret"),
-        ("CWA_SYNC_ENABLED", "Kobo sync enabled", "bool"),
-        ("CWA_SYNC_TOKEN", "Kobo sync token", "secret"),
+    ("Grimmory", [
+        ("BOOKLORE_ENABLED", "Enabled", "bool"),
+        ("BOOKLORE_USER", "Username", "text"),
+        ("BOOKLORE_PASSWORD", "Password", "secret"),
+        ("BOOKLORE_SHELF_NAME", "Shelf name (synced books moved here)", "text"),
+        ("BOOKLORE_LIBRARY_ID", "Library ID (optional)", "text"),
+        ("BOOKLORE_ANNOTATION_SYNC", "Highlight sync", "bool"),
+    ]),
+    ("BookFusion", [
+        ("BOOKFUSION_ENABLED", "Enabled", "bool"),
+        ("BOOKFUSION_ACCESS_TOKEN", "Access token", "secret"),
+        ("BOOKFUSION_API_KEY", "Calibre API key (for uploads)", "secret"),
+        ("BOOKFUSION_ANNOTATION_SYNC", "Highlight sync", "bool"),
     ]),
     ("BookOrbit", [
         ("BOOKORBIT_ENABLED", "Enabled", "bool"),
@@ -74,17 +112,28 @@ PER_USER_FIELD_GROUPS = [
         ("BOOKORBIT_KOSYNC_KEY", "KOReader sync password (highlight sync)", "secret"),
         ("BOOKORBIT_KOSYNC_OWNER", "KOReader sync owner (must match BookOrbit username)", "text"),
     ]),
-    ("Grimmory / BookLore", [
-        ("BOOKLORE_ENABLED", "Enabled", "bool"),
-        ("BOOKLORE_USER", "Username", "text"),
-        ("BOOKLORE_PASSWORD", "Password", "secret"),
-        ("BOOKLORE_SHELF_NAME", "Shelf name (synced books moved here)", "text"),
-        ("BOOKLORE_LIBRARY_ID", "Library ID (optional)", "text"),
-        ("BOOKLORE_ANNOTATION_SYNC", "Highlight sync", "bool"),
+    ("Readest", [
+        ("READEST_ANNOTATION_SYNC", "Highlight sync", "bool"),
+        ("READEST_EMAIL", "Account email", "text"),
+        ("READEST_PASSWORD", "Account password", "secret"),
+    ]),
+    ("Calibre-Web Automated", [
+        ("CWA_ENABLED", "Enabled", "bool"),
+        ("CWA_USERNAME", "Username", "text"),
+        ("CWA_PASSWORD", "Password", "secret"),
+        ("CWA_SYNC_ENABLED", "Kobo sync enabled", "bool"),
+        ("CWA_SYNC_TOKEN", "Kobo sync token", "secret"),
     ]),
     ("Hardcover", [
         ("HARDCOVER_ENABLED", "Enabled", "bool"),
         ("HARDCOVER_TOKEN", "API token", "secret"),
+        (
+            "HARDCOVER_GRIMMORY_LIST_SYNC",
+            "Grimmory shelves to Hardcover lists",
+            "select:off=Off / Disabled|all=All Shelves|magic=Magic Shelves Only|shelf=Regular Shelves Only",
+        ),
+        ("HARDCOVER_GRIMMORY_LIST_PREFIX", "Hardcover list name prefix", "text"),
+        ("HARDCOVER_GRIMMORY_LIST_EXCLUDED_SHELVES", "Grimmory shelves to exclude", "text"),
     ]),
     ("StoryGraph", [
         ("STORYGRAPH_ENABLED", "Enabled", "bool"),

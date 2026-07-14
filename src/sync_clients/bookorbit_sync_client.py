@@ -19,9 +19,12 @@ logger = logging.getLogger(__name__)
 class BookOrbitSyncClient(SyncClient):
     """Ebook sync client for BookOrbit (mirrors BookloreSyncClient)."""
 
-    def __init__(self, bookorbit_client: BookOrbitClient, ebook_parser: EbookParser):
+    def __init__(self, bookorbit_client: BookOrbitClient, ebook_parser: EbookParser,
+                 database_service=None, user_id: int = None):
         super().__init__(ebook_parser)
         self.client = bookorbit_client
+        self._database_service = database_service
+        self._user_id = user_id
         self.delta_thresh = float(os.getenv("SYNC_DELTA_KOSYNC_PERCENT", 1)) / 100.0
 
     def is_configured(self) -> bool:
@@ -51,9 +54,22 @@ class BookOrbitSyncClient(SyncClient):
     def _resolve_book_info(self, book: Book) -> Optional[dict]:
         """Resolve the BookOrbit book row for a mapping.
 
-        Fast path: a stored ebook_source_id (the BookOrbit book id). Fallback:
-        best-effort filename resolution against the library.
+        Fast path: per-user UserBookOrbitLink ebook_id, then shared legacy
+        ebook_source_id.  Fallback: best-effort filename resolution against
+        the library.
         """
+        # Per-user resolution first
+        if self._database_service is not None and self._user_id is not None:
+            resolved = self._database_service.resolve_bookorbit_ebook_id(self._user_id, book)
+            if resolved:
+                bid = self._coerce_id(resolved)
+                if bid is not None:
+                    return self.client.get_book_by_id(bid) or {"id": bid}
+            if self._database_service.get_user_bookorbit_link(
+                self._user_id, getattr(book, "abs_id", None)
+            ) is not None:
+                return None
+        # Legacy fallback: shared Book fields
         if getattr(book, "ebook_source", None) == "BookOrbit":
             bid = self._coerce_id(getattr(book, "ebook_source_id", None))
             if bid is not None:
@@ -69,6 +85,8 @@ class BookOrbitSyncClient(SyncClient):
         # same file (both libraries can point at the same /books disk).
         src = (getattr(book, "ebook_source", None) or "").strip().lower()
         if src:
+            if src == "bookorbit" and self._database_service is not None and self._user_id is not None:
+                return bool(self._database_service.resolve_bookorbit_ebook_id(self._user_id, book))
             return src == "bookorbit"
         epub = self._resolve_epub_filename(book)
         if not epub:

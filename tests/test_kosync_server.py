@@ -23,7 +23,7 @@ if os.path.exists(TEST_DIR):
     shutil.rmtree(TEST_DIR)
 os.makedirs(TEST_DIR, exist_ok=True)
 
-from src.db.models import KosyncDocument, Book, ReadingSession, Setting, State
+from src.db.models import KosyncDocument, Book, ReadingSession, Setting, State, HardcoverDetails, UserCredential
 # Initialize DB service with test path
 from src.db.database_service import DatabaseService
 
@@ -243,10 +243,16 @@ class TestKosyncEndpoints(unittest.TestCase):
              session.query(KosyncDocument).delete()
              session.query(Setting).delete()
              session.query(State).delete()
+             session.query(HardcoverDetails).delete()
+             session.query(UserCredential).delete()
              session.query(Book).delete()
         if web_server.database_service.count_users() == 0:
             web_server.database_service.create_user("admin", "secret", role="admin")
         kosync_server._kosync_device_session_registry = None
+        with kosync_server._booklore_shelf_mapping_cache_lock:
+            kosync_server._booklore_shelf_mapping_cache.clear()
+        with kosync_server._hardcover_list_mapping_cache_lock:
+            kosync_server._hardcover_list_mapping_cache.clear()
         with kosync_server._kosync_open_sessions_lock:
             kosync_server._kosync_open_sessions.clear()
         with kosync_server._kosync_debounce_lock:
@@ -793,6 +799,326 @@ class TestKosyncEndpoints(unittest.TestCase):
         ids = [b["abs_id"] for b in response.get_json()["books"]]
         self.assertEqual(ids, ["mine"])
 
+    def test_device_sync_manifest_uses_grimmory_shelves_for_user_collections(self):
+        from src.api import kosync_server
+        from src import web_server
+
+        svc = web_server.database_service
+        admin_id = svc._default_user_id()
+        svc.save_book(Book(abs_id="bl-mine", abs_title="Mine", ebook_filename="m.epub",
+                           ebook_source="BookLore", ebook_source_id="42",
+                           status="active", user_id=admin_id))
+        svc.save_book(Book(abs_id="bo-collision", abs_title="Collision", ebook_filename="c.epub",
+                           ebook_source="BookOrbit", ebook_source_id="42",
+                           status="active", user_id=admin_id))
+        svc.set_user_credential(admin_id, "BOOKLORE_ENABLED", "true")
+        svc.set_user_credential(admin_id, "BOOKLORE_USER", "reader")
+        svc.set_user_credential(admin_id, "BOOKLORE_PASSWORD", "secret")
+        svc.set_user_credential(admin_id, "BOOKLORE_SHELF_NAME", "Kobo")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_COLLECTION_SOURCE", "grimmory")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_COLLECTIONS", "all")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_EXCLUDED_SHELVES", "Read")
+
+        fake_client = MagicMock()
+        fake_client.is_configured.return_value = True
+        fake_client.get_book_shelf_mapping.return_value = {"42": ["Fantasy"]}
+
+        manifest = {
+            "generated_at": 1,
+            "revision": "abc",
+            "delete_mode": "mirror",
+            "books": [
+                {"abs_id": "bl-mine", "title": "Mine", "filename": "m.epub",
+                 "content_hash": "h1", "download_path": "/x", "size": 1},
+                {"abs_id": "bo-collision", "title": "Collision", "filename": "c.epub",
+                 "content_hash": "h2", "download_path": "/y", "size": 1,
+                 "shelves": ["Old Source"]},
+            ],
+        }
+
+        with patch.dict(os.environ, {
+            "BOOKLORE_SERVER": "http://grimmory.test",
+        }, clear=False), \
+             patch.object(kosync_server, "BookloreClient", return_value=fake_client):
+            scoped = kosync_server._scope_manifest_to_user(manifest, admin_id)
+            scoped_again = kosync_server._scope_manifest_to_user(manifest, admin_id)
+
+        by_id = {item["abs_id"]: item for item in scoped["books"]}
+        self.assertEqual(by_id["bl-mine"]["shelves"], ["Fantasy"])
+        self.assertNotIn("shelves", by_id["bo-collision"])
+        self.assertNotEqual(scoped["revision"], "abc")
+        fake_client.get_book_shelf_mapping.assert_called_once_with(
+            mode="all",
+            excludes=["Read", "Kobo"],
+            target_book_ids=["42"],
+        )
+        self.assertEqual(scoped_again["books"][0]["shelves"], ["Fantasy"])
+
+    def test_device_sync_manifest_uses_unsorted_for_grimmory_match_outside_selected_shelves(self):
+        from src.api import kosync_server
+        from src import web_server
+
+        svc = web_server.database_service
+        admin_id = svc._default_user_id()
+        svc.save_book(Book(abs_id="bl-unsorted", abs_title="Unsorted", ebook_filename="u.epub",
+                           ebook_source="BookLore", ebook_source_id="99",
+                           status="active", user_id=admin_id))
+        svc.set_user_credential(admin_id, "BOOKLORE_ENABLED", "true")
+        svc.set_user_credential(admin_id, "BOOKLORE_USER", "reader")
+        svc.set_user_credential(admin_id, "BOOKLORE_PASSWORD", "secret")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_COLLECTION_SOURCE", "grimmory")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_COLLECTIONS", "all")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_EXCLUDED_SHELVES", "")
+
+        fake_client = MagicMock()
+        fake_client.is_configured.return_value = True
+        fake_client.get_book_shelf_mapping.return_value = {}
+        manifest = {
+            "generated_at": 1,
+            "revision": "abc",
+            "delete_mode": "mirror",
+            "books": [
+                {"abs_id": "bl-unsorted", "title": "Unsorted", "filename": "u.epub",
+                 "content_hash": "h1", "download_path": "/x", "size": 1},
+            ],
+        }
+
+        with patch.dict(os.environ, {
+            "BOOKLORE_SERVER": "http://grimmory.test",
+        }, clear=False), \
+             patch.object(kosync_server, "BookloreClient", return_value=fake_client):
+            scoped = kosync_server._scope_manifest_to_user(manifest, admin_id)
+
+        self.assertEqual(scoped["books"][0]["shelves"], ["Unsorted"])
+
+    def test_device_sync_manifest_grimmory_falls_back_to_global_for_admin(self):
+        """An admin whose Grimmory collection config lives only in the global
+        settings (os.environ) — the pre-per-user layout — still gets collections.
+        Regular users are isolated, but admins inherit the shared config."""
+        from src.api import kosync_server
+        from src import web_server
+
+        svc = web_server.database_service
+        admin_id = svc._default_user_id()
+        self.assertTrue(getattr(svc.get_user(admin_id), "is_admin", False))
+        svc.save_book(Book(abs_id="bl-admin", abs_title="Admin Book", ebook_filename="a.epub",
+                           ebook_source="BookLore", ebook_source_id="42",
+                           status="active", user_id=admin_id))
+
+        fake_client = MagicMock()
+        fake_client.is_configured.return_value = True
+        fake_client.get_book_shelf_mapping.return_value = {"42": ["Fantasy"]}
+
+        manifest = {
+            "generated_at": 1,
+            "revision": "abc",
+            "delete_mode": "mirror",
+            "books": [
+                {"abs_id": "bl-admin", "title": "Admin Book", "filename": "a.epub",
+                 "content_hash": "h1", "download_path": "/x", "size": 1},
+            ],
+        }
+
+        with patch.dict(os.environ, {
+            "DEVICE_SYNC_COLLECTION_SOURCE": "grimmory",
+            "DEVICE_SYNC_COLLECTIONS": "all",
+            "DEVICE_SYNC_EXCLUDED_SHELVES": "",
+            "BOOKLORE_SHELF_NAME": "",
+            "BOOKLORE_SERVER": "http://grimmory.test",
+        }, clear=False), \
+             patch.object(kosync_server, "BookloreClient", return_value=fake_client):
+            scoped = kosync_server._scope_manifest_to_user(manifest, admin_id)
+
+        self.assertEqual(scoped["books"][0]["shelves"], ["Fantasy"])
+        fake_client.get_book_shelf_mapping.assert_called_once_with(
+            mode="all", excludes=[], target_book_ids=["42"],
+        )
+
+    def test_device_sync_manifest_hardcover_falls_back_to_global_for_admin(self):
+        """The Hardcover-list collection source also honors admin global fallback."""
+        from src.api import kosync_server
+        from src import web_server
+
+        svc = web_server.database_service
+        admin_id = svc._default_user_id()
+        svc.save_book(Book(abs_id="hc-admin", abs_title="Admin HC", ebook_filename="a.epub",
+                           status="active", user_id=admin_id))
+        svc.save_hardcover_details(HardcoverDetails(
+            abs_id="hc-admin",
+            hardcover_book_id="101",
+            hardcover_edition_id="201",
+            matched_by="test",
+        ))
+
+        fake_client = MagicMock()
+        fake_client.is_configured.return_value = True
+        fake_client.get_user_lists.return_value = [{"id": 1, "name": "Owned"}]
+        fake_client.get_list_book_memberships.return_value = [
+            {"list_id": 1, "book_id": 101},
+        ]
+
+        manifest = {
+            "generated_at": 1,
+            "revision": "abc",
+            "delete_mode": "mirror",
+            "books": [
+                {"abs_id": "hc-admin", "title": "Admin HC", "filename": "a.epub",
+                 "content_hash": "h1", "download_path": "/x", "size": 1},
+            ],
+        }
+
+        with patch.dict(os.environ, {
+            "DEVICE_SYNC_COLLECTION_SOURCE": "hardcover",
+            "DEVICE_SYNC_HARDCOVER_LISTS": "all",
+            "DEVICE_SYNC_HARDCOVER_LIST_NAMES": "",
+            "HARDCOVER_TOKEN": "global-token",
+        }, clear=False), \
+             patch.object(kosync_server, "HardcoverClient", return_value=fake_client):
+            scoped = kosync_server._scope_manifest_to_user(manifest, admin_id)
+
+        self.assertEqual(scoped["books"][0]["shelves"], ["Owned"])
+
+    def test_device_sync_manifest_grimmory_isolated_for_regular_user(self):
+        """A regular user with no per-user Grimmory config must NOT inherit the
+        admin's global collection settings (per-user isolation)."""
+        from src.api import kosync_server
+        from src import web_server
+
+        svc = web_server.database_service
+        member = svc.create_user(f"iso_reader_{time.time_ns()}", "pw", role="user")
+        svc.save_book(Book(abs_id="bl-reader", abs_title="Reader Book", ebook_filename="r.epub",
+                           ebook_source="BookLore", ebook_source_id="55",
+                           status="active", user_id=member.id))
+
+        fake_client = MagicMock()
+        fake_client.is_configured.return_value = True
+        fake_client.get_book_shelf_mapping.return_value = {"55": ["Fantasy"]}
+
+        manifest = {
+            "generated_at": 1,
+            "revision": "abc",
+            "delete_mode": "mirror",
+            "books": [
+                {"abs_id": "bl-reader", "title": "Reader Book", "filename": "r.epub",
+                 "content_hash": "h1", "download_path": "/x", "size": 1},
+            ],
+        }
+
+        with patch.dict(os.environ, {
+            "DEVICE_SYNC_COLLECTION_SOURCE": "grimmory",
+            "DEVICE_SYNC_COLLECTIONS": "all",
+            "BOOKLORE_SERVER": "http://grimmory.test",
+        }, clear=False), \
+             patch.object(kosync_server, "BookloreClient", return_value=fake_client):
+            scoped = kosync_server._scope_manifest_to_user(manifest, member.id)
+
+        self.assertNotIn("shelves", scoped["books"][0])
+        fake_client.get_book_shelf_mapping.assert_not_called()
+
+    def test_device_sync_manifest_uses_hardcover_lists_for_user_collections(self):
+        from src.api import kosync_server
+        from src import web_server
+
+        svc = web_server.database_service
+        admin_id = svc._default_user_id()
+        svc.save_book(Book(abs_id="hc-mine", abs_title="Mine", ebook_filename="m.epub",
+                           status="active", user_id=admin_id))
+        svc.save_book(Book(abs_id="hc-unmatched", abs_title="Unmatched", ebook_filename="u.epub",
+                           status="active", user_id=admin_id))
+        svc.save_hardcover_details(HardcoverDetails(
+            abs_id="hc-mine",
+            hardcover_book_id="101",
+            hardcover_edition_id="201",
+            hardcover_pages=300,
+            matched_by="test",
+        ))
+        svc.set_user_credential(admin_id, "HARDCOVER_ENABLED", "true")
+        svc.set_user_credential(admin_id, "HARDCOVER_TOKEN", "user-token")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_COLLECTION_SOURCE", "hardcover")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_HARDCOVER_LISTS", "all")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_HARDCOVER_LIST_NAMES", "")
+
+        fake_client = MagicMock()
+        fake_client.is_configured.return_value = True
+        fake_client.get_user_lists.return_value = [
+            {"id": 1, "name": "Owned"},
+            {"id": 2, "name": "Sci-Fi"},
+        ]
+        fake_client.get_list_book_memberships.return_value = [
+            {"list_id": "1", "book_id": 101},
+            {"list_id": 2, "book_id": 101},
+        ]
+
+        manifest = {
+            "generated_at": 1,
+            "revision": "abc",
+            "delete_mode": "mirror",
+            "books": [
+                {"abs_id": "hc-mine", "title": "Mine", "filename": "m.epub",
+                 "content_hash": "h1", "download_path": "/x", "size": 1},
+                {"abs_id": "hc-unmatched", "title": "Unmatched", "filename": "u.epub",
+                 "content_hash": "h2", "download_path": "/y", "size": 1,
+                 "shelves": ["Old Source"]},
+            ],
+        }
+
+        with patch.object(kosync_server, "HardcoverClient", return_value=fake_client):
+            scoped = kosync_server._scope_manifest_to_user(manifest, admin_id)
+            scoped_again = kosync_server._scope_manifest_to_user(manifest, admin_id)
+
+        by_id = {item["abs_id"]: item for item in scoped["books"]}
+        self.assertEqual(by_id["hc-mine"]["shelves"], ["Owned", "Sci-Fi"])
+        self.assertNotIn("shelves", by_id["hc-unmatched"])
+        self.assertNotEqual(scoped["revision"], "abc")
+        fake_client.get_user_lists.assert_called_once()
+        fake_client.get_list_book_memberships.assert_called_once_with([1, 2])
+        self.assertEqual(scoped_again["books"][0]["shelves"], ["Owned", "Sci-Fi"])
+
+    def test_device_sync_manifest_can_limit_hardcover_lists_by_name(self):
+        from src.api import kosync_server
+        from src import web_server
+
+        svc = web_server.database_service
+        admin_id = svc._default_user_id()
+        svc.save_book(Book(abs_id="hc-selected", abs_title="Selected", ebook_filename="s.epub",
+                           status="active", user_id=admin_id))
+        svc.save_hardcover_details(HardcoverDetails(
+            abs_id="hc-selected",
+            hardcover_book_id="101",
+            hardcover_edition_id="201",
+            matched_by="test",
+        ))
+        svc.set_user_credential(admin_id, "HARDCOVER_ENABLED", "true")
+        svc.set_user_credential(admin_id, "HARDCOVER_TOKEN", "user-token")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_COLLECTION_SOURCE", "hardcover")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_HARDCOVER_LISTS", "selected")
+        svc.set_user_credential(admin_id, "DEVICE_SYNC_HARDCOVER_LIST_NAMES", "Sci-Fi")
+
+        fake_client = MagicMock()
+        fake_client.is_configured.return_value = True
+        fake_client.get_user_lists.return_value = [
+            {"id": 1, "name": "Owned"},
+            {"id": 2, "name": "Sci-Fi"},
+        ]
+        fake_client.get_list_book_memberships.return_value = [
+            {"list_id": 2, "book_id": 101},
+        ]
+        manifest = {
+            "generated_at": 1,
+            "revision": "abc",
+            "delete_mode": "mirror",
+            "books": [
+                {"abs_id": "hc-selected", "title": "Selected", "filename": "s.epub",
+                 "content_hash": "h1", "download_path": "/x", "size": 1},
+            ],
+        }
+
+        with patch.object(kosync_server, "HardcoverClient", return_value=fake_client):
+            scoped = kosync_server._scope_manifest_to_user(manifest, admin_id)
+
+        self.assertEqual(scoped["books"][0]["shelves"], ["Sci-Fi"])
+        fake_client.get_list_book_memberships.assert_called_once_with([2])
+
     def test_device_sync_download_blocks_another_users_book(self):
         from src.api import kosync_server
         from src import web_server
@@ -859,6 +1185,70 @@ class TestKosyncEndpoints(unittest.TestCase):
         data_echo = response_echo.get_json()
         self.assertEqual(data_echo['accepted_page_stats'], 0)
         self.assertEqual(data_echo['echoed_page_stats'], 1)
+
+    def test_statistics_upload_retries_on_locked_database(self):
+        """Issue #315: a transient 'database is locked' during a statistics write
+        should be retried rather than surfaced as a 500."""
+        from unittest.mock import patch
+        from src.api import kosync_server
+
+        real_bulk = kosync_server._database_service.bulk_insert_koreader_page_stats
+        calls = {'n': 0}
+
+        def flaky_bulk(*args, **kwargs):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise Exception("(sqlite3.OperationalError) database is locked")
+            return real_bulk(*args, **kwargs)
+
+        with patch.object(kosync_server._database_service, 'bulk_insert_koreader_page_stats', side_effect=flaky_bulk), \
+                patch.object(kosync_server.time, 'sleep') as mock_sleep:
+            response = self.client.post(
+                '/koreader/device-sync/statistics',
+                headers=self.auth_headers,
+                json={
+                    'device': 'Kobo',
+                    'device_id': 'device-retry',
+                    'books': [],
+                    'page_stats': [
+                        {'md5': 'r' * 32, 'page': 1, 'start_time': 1700000500, 'duration': 30},
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls['n'], 2)  # failed once, retried and succeeded
+        mock_sleep.assert_called_once()  # backed off before the retry
+        self.assertEqual(response.get_json()['accepted_page_stats'], 1)
+
+    def test_statistics_upload_gives_up_after_persistent_lock(self):
+        """Issue #315: if the database stays locked past all retries, the endpoint
+        returns 500 rather than looping forever."""
+        from unittest.mock import patch
+        from src.api import kosync_server
+
+        with patch.object(
+                    kosync_server._database_service,
+                    'bulk_insert_koreader_page_stats',
+                    side_effect=Exception("(sqlite3.OperationalError) database is locked"),
+                ), \
+                patch.object(kosync_server.time, 'sleep') as mock_sleep:
+            response = self.client.post(
+                '/koreader/device-sync/statistics',
+                headers=self.auth_headers,
+                json={
+                    'device': 'Kobo',
+                    'device_id': 'device-stuck',
+                    'books': [],
+                    'page_stats': [
+                        {'md5': 's' * 32, 'page': 1, 'start_time': 1700000600, 'duration': 30},
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 500)
+        # 3 bounded attempts total → exactly two backoff sleeps between them.
+        self.assertEqual(mock_sleep.call_count, 2)
 
     def test_merged_statistics_requires_auth(self):
         response = self.client.get('/koreader/device-sync/statistics/merged?device_id=device-b')
@@ -1358,22 +1748,47 @@ class TestKosyncEndpoints(unittest.TestCase):
             kosync_server._update_grouped_kosync_session(book, doc_hash, device, device_id, 0.10, start_time)
             kosync_server._update_grouped_kosync_session(book, doc_hash, device, device_id, 0.20, end_time)
 
+            payload = [{
+                'session_id': 'plugin-session-1',
+                'document_hash': doc_hash,
+                'session_type': 'EPUB',
+                'start_time': start_time,
+                'end_time': end_time,
+                'duration_seconds': int(end_time - start_time),
+                'start_progress': 10,
+                'end_progress': 20,
+            }]
             response = self.client.post(
                 '/koreader/device-sync/sessions',
                 headers=self.auth_headers,
-                json=[{
-                    'document_hash': doc_hash,
-                    'session_type': 'EPUB',
-                    'start_time': start_time,
-                    'end_time': end_time,
-                    'duration_seconds': int(end_time - start_time),
-                    'start_progress': 10,
-                    'end_progress': 20,
-                }],
+                json=payload,
+            )
+            retry_response = self.client.post(
+                '/koreader/device-sync/sessions',
+                headers=self.auth_headers,
+                json=payload,
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json(), {'accepted': 1, 'rejected': 0})
+        self.assertEqual(response.get_json(), {
+            'accepted': 1,
+            'rejected': 0,
+            'results': [{
+                'accepted': True,
+                'index': 1,
+                'session_id': 'plugin-session-1',
+            }],
+        })
+        self.assertEqual(retry_response.status_code, 200)
+        self.assertEqual(retry_response.get_json(), {
+            'accepted': 1,
+            'rejected': 0,
+            'results': [{
+                'accepted': True,
+                'index': 1,
+                'session_id': 'plugin-session-1',
+            }],
+        })
 
         registry = web_server.database_service.get_json_setting('KOSYNC_DEVICE_SESSION_REGISTRY', default={})
         self.assertEqual(registry[device_id]['mode'], 'plugin')
@@ -1387,6 +1802,130 @@ class TestKosyncEndpoints(unittest.TestCase):
 
         with kosync_server._kosync_open_sessions_lock:
             self.assertFalse(kosync_server._kosync_open_sessions)
+
+    def test_plugin_session_upload_returns_per_session_rejections(self):
+        """A missing book must be retryable instead of hidden by an HTTP 200 batch."""
+        from src import web_server
+        from src.api import kosync_server
+
+        book = Book(
+            abs_id='session-ack-book',
+            abs_title='Session Ack Book',
+            ebook_filename='session-ack.epub',
+            kosync_doc_id='s' * 32,
+            status='active',
+            sync_mode='ebook_only',
+        )
+        web_server.database_service.save_book(book)
+        payload = [
+            {
+                'session_id': 'accepted-session',
+                'abs_id': book.abs_id,
+                'session_type': 'EPUB',
+                'start_time': 1_742_910_000,
+                'end_time': 1_742_910_120,
+                'duration_seconds': 120,
+                'start_progress': 10,
+                'end_progress': 12,
+            },
+            {
+                'session_id': 'rejected-session',
+                'abs_id': 'missing-book',
+                'session_type': 'EPUB',
+                'start_time': 1_742_920_000,
+                'end_time': 1_742_920_120,
+                'duration_seconds': 120,
+                'start_progress': 5,
+                'end_progress': 6,
+            },
+        ]
+
+        with patch.object(kosync_server, '_manager', None), \
+             self.assertLogs(kosync_server.logger, level='WARNING') as captured:
+            response = self.client.post(
+                '/koreader/device-sync/sessions',
+                headers=self.auth_headers,
+                json=payload,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {
+            'accepted': 1,
+            'rejected': 1,
+            'results': [
+                {
+                    'accepted': True,
+                    'index': 1,
+                    'session_id': 'accepted-session',
+                },
+                {
+                    'accepted': False,
+                    'index': 2,
+                    'reason': 'book_not_found',
+                    'session_id': 'rejected-session',
+                },
+            ],
+        })
+        self.assertIn(
+            "Session upload: book not found for abs_id='missing-book' hash='None'",
+            "\n".join(captured.output),
+        )
+
+    def test_plugin_log_upload_relays_bounded_severity_to_bridge_logs(self):
+        """Device log telemetry is authenticated, sanitized, and severity-preserving."""
+        from src.api import kosync_server
+
+        payload = {
+            'operation': 'book_sync',
+            'status': 'partial',
+            'plugin_version': '0.5.3',
+            'device': 'Kobo',
+            'device_id': 'KOBO123\nspoofed',
+            'lines': [
+                '2026-07-11 12:00:00 [info] Book sync started',
+                '2026-07-11 12:00:01 [warn] One download was deferred',
+                '2026-07-11 12:00:02 [error] One download failed',
+            ],
+        }
+
+        with patch.object(kosync_server.logger, 'info') as info_log, \
+             patch.object(kosync_server.logger, 'warning') as warning_log, \
+             patch.object(kosync_server.logger, 'error') as error_log:
+            response = self.client.post(
+                '/koreader/device-sync/logs',
+                headers=self.auth_headers,
+                json=payload,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {'accepted': 3})
+        self.assertGreaterEqual(info_log.call_count, 1)
+        self.assertGreaterEqual(warning_log.call_count, 2)
+        error_log.assert_called_once()
+        warning_line_calls = [
+            call for call in warning_log.call_args_list
+            if call.args and call.args[0] == '%s %s'
+        ]
+        self.assertEqual(len(warning_line_calls), 1)
+        warning_prefix = warning_line_calls[0].args[1]
+        self.assertIn('Kobo/KOBO123 spoofed', warning_prefix)
+        self.assertIn('[book_sync]', warning_prefix)
+        self.assertIn('[warn]', warning_line_calls[0].args[2])
+        self.assertIn('[error]', error_log.call_args.args[2])
+        self.assertTrue(any(
+            call.args and str(call.args[0]).startswith('BridgeSync device report:')
+            for call in warning_log.call_args_list
+        ))
+
+    def test_plugin_log_upload_rejects_non_array_lines(self):
+        response = self.client.post(
+            '/koreader/device-sync/logs',
+            headers=self.auth_headers,
+            json={'operation': 'book_sync', 'status': 'failure', 'lines': 'not-an-array'},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json(), {'error': 'lines must be an array'})
 
     def test_internal_kosync_put_does_not_overwrite_plugin_device_classification_source(self):
         from src import web_server
@@ -1452,7 +1991,11 @@ class TestKosyncEndpoints(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json(), {'accepted': 1, 'rejected': 0})
+        self.assertEqual(response.get_json(), {
+            'accepted': 1,
+            'rejected': 0,
+            'results': [{'accepted': True, 'index': 1}],
+        })
 
         registry = web_server.database_service.get_json_setting('KOSYNC_DEVICE_SESSION_REGISTRY', default={})
         self.assertEqual(registry[external_device_id]['mode'], 'plugin')
@@ -2078,6 +2621,57 @@ class TestAnnotationExchangeEndpoints(unittest.TestCase):
             json={"device": "A", "device_id": "a", "books": books},
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_exchange_reports_more_when_annotation_delta_is_truncated(self):
+        doc = "q" * 32
+        changes = []
+        for index in range(205):
+            entry = self._entry()
+            entry["datetime"] = f"2026-07-{(index // 86400) + 1:02d} " \
+                f"{(index // 3600) % 24:02d}:{(index // 60) % 60:02d}:{index % 60:02d}"
+            entry["pos0"] = f"/body/DocFragment[7]/p[{index + 1}]/text().0"
+            entry["pos1"] = f"/body/DocFragment[7]/p[{index + 1}]/text().10"
+            changes.append(entry)
+
+        upload = self.client.post(
+            '/koreader/device-sync/annotations/exchange',
+            headers=self.auth_headers,
+            json={"device": "KoboA", "device_id": "kobo-a",
+                  "books": [{"hash": doc, "keys": [], "keysComplete": False, "changes": changes}]},
+        )
+        self.assertEqual(upload.status_code, 200)
+
+        pull = self.client.post(
+            '/koreader/device-sync/annotations/exchange',
+            headers=self.auth_headers,
+            json={"device": "KindleB", "device_id": "kindle-b",
+                  "books": [{"hash": doc, "keys": [], "keysComplete": False, "changes": []}]},
+        )
+        self.assertEqual(pull.status_code, 200)
+        result = pull.get_json()["books"][0]
+        self.assertEqual(len(result["toApply"]["add"]), 200)
+        self.assertTrue(result["more"])
+
+        ack_items = [
+            {"serverId": item["serverId"], "version": item["version"], "status": "applied"}
+            for item in result["toApply"]["add"]
+        ]
+        ack = self.client.post(
+            '/koreader/device-sync/annotations/exchange-ack',
+            headers=self.auth_headers,
+            json={"device": "KindleB", "device_id": "kindle-b",
+                  "books": [{"hash": doc, "applied": ack_items, "deleted": []}]},
+        )
+        self.assertEqual(ack.status_code, 200)
+
+        remainder = self.client.post(
+            '/koreader/device-sync/annotations/exchange',
+            headers=self.auth_headers,
+            json={"device": "KindleB", "device_id": "kindle-b",
+                  "books": [{"hash": doc, "keys": [], "keysComplete": False, "changes": []}]},
+        ).get_json()["books"][0]
+        self.assertEqual(len(remainder["toApply"]["add"]), 5)
+        self.assertFalse(remainder["more"])
 
 
 if __name__ == '__main__':

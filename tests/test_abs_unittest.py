@@ -12,6 +12,8 @@ from unittest.mock import Mock
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tests.base_sync_test import BaseSyncCycleTestCase
+from src.db.models import State
+from src.sync_clients.abs_sync_client import ABSSyncClient
 from src.sync_clients.kosync_sync_client import KoSyncSyncClient
 from src.sync_clients.sync_client_interface import LocatorResult
 
@@ -123,6 +125,33 @@ class TestABSLeadsSync(BaseSyncCycleTestCase):
         self.assertEqual(state.current["_kosync_last_put_device"], "Kobo_monza")
         self.assertEqual(state.current["_kosync_last_put_device_id"], "device-id")
         self.assertEqual(state.current["_kosync_last_put_age_seconds"], 247.0)
+
+    def test_finished_abs_state_uses_duration_and_stays_complete(self):
+        abs_api = Mock()
+        abs_api.get_progress.return_value = {
+            "currentTime": 37544.67,
+            "isFinished": True,
+            "lastUpdate": 1783877412034,
+        }
+        abs_api.is_configured.return_value = True
+        client = ABSSyncClient(abs_api, Mock(), Mock())
+        book = SimpleNamespace(
+            abs_id="sea-of-rust",
+            duration=37588.3,
+            transcript_file="DB_MANAGED",
+        )
+        previous = State(
+            abs_id="sea-of-rust",
+            client_name="abs",
+            percentage=1.0,
+            timestamp=37588.3,
+        )
+
+        state = client.get_service_state(book, previous, title_snip="Sea of Rust")
+
+        self.assertEqual(state.current["pct"], 1.0)
+        self.assertEqual(state.current["ts"], 37588.3)
+        self.assertEqual(state.delta, 0.0)
 
 
 if __name__ == '__main__':

@@ -536,9 +536,18 @@
             font-weight: 600;
         }
 
-        .users-table .row-actions form {
-            display: inline;
-            margin-right: 6px;
+        .row-actions-flex {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .row-actions-flex form {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin: 0;
         }
 
         .u-badge {
@@ -627,6 +636,133 @@
             border: 1px solid rgba(244, 67, 54, .4);
             color: #ff8a80;
         }
+
+        /* Write-only tracker tag on integration headers */
+        .tracker-tag {
+            font-size: 11px;
+            font-weight: 600;
+            color: rgba(255, 255, 255, 0.45);
+            background: rgba(255, 255, 255, 0.07);
+            border-radius: 10px;
+            padding: 2px 8px;
+            margin-left: 8px;
+            vertical-align: middle;
+        }
+
+        /* Collapsed advanced sub-section inside a settings card */
+        details.advanced-sub summary {
+            cursor: pointer;
+            color: rgba(255, 255, 255, 0.55);
+            font-size: 13px;
+            font-weight: 600;
+            user-select: none;
+            padding: 4px 0;
+        }
+
+        details.advanced-sub summary:hover {
+            color: #fff;
+        }
+
+        /* Integrations: service card headers */
+        .svc-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 0;
+        }
+
+        .svc-chev {
+            color: rgba(255, 255, 255, 0.35);
+            font-size: 11px;
+            flex: none;
+            transition: transform .15s;
+        }
+
+        .settings-section:not(:has(.section-body.collapsed)) .svc-chev {
+            transform: rotate(90deg);
+        }
+
+        .svc-chip {
+            width: 34px;
+            height: 34px;
+            border-radius: 9px;
+            flex: none;
+            background: rgba(102, 126, 234, 0.14);
+            border: 1px solid rgba(102, 126, 234, 0.38);
+            display: grid;
+            place-items: center;
+            font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+            font-size: 12px;
+            font-weight: 700;
+            color: #aab6f7;
+        }
+
+        .svc-title h3 {
+            margin: 0;
+        }
+
+        .svc-desc {
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.4);
+        }
+
+        .header-tail {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex: none;
+        }
+
+        .pill {
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 9px;
+            border-radius: 20px;
+            white-space: nowrap;
+        }
+
+        .pill.ok {
+            background: rgba(76, 175, 80, 0.13);
+            color: #a5d6a7;
+        }
+
+        .pill.off {
+            background: rgba(255, 255, 255, 0.06);
+            color: rgba(255, 255, 255, 0.4);
+        }
+
+        .settings-section[data-svc]>.section-header {
+            cursor: pointer;
+        }
+
+        .settings-section[data-svc]>.section-header:hover {
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        /* Sidebar settings search */
+        .settings-search {
+            width: 100%;
+            padding: 9px 12px;
+            margin: 0 0 8px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            color: #fff;
+            font-size: 13px;
+        }
+
+        .settings-search:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        /* Save-bar dirty counter */
+        .dirty-note {
+            margin-right: auto;
+            color: #aab4f5;
+            font-size: 13px;
+            font-weight: 600;
+        }
     </style>
 </head>
 
@@ -695,12 +831,13 @@
 
         <div class="settings-layout">
             <aside class="settings-sidebar">
-                <button type="button" class="settings-tab active" data-tab="general" onclick="showSettingsTab('general')">⚙️ General</button>
-                <button type="button" class="settings-tab" data-tab="reading_apps" onclick="showSettingsTab('reading_apps')">📚 Reading Apps</button>
-                <button type="button" class="settings-tab" data-tab="trackers" onclick="showSettingsTab('trackers')">📈 Trackers</button>
-                <button type="button" class="settings-tab" data-tab="tools" onclick="showSettingsTab('tools')">🔔 Notifications &amp; Tools</button>
+                <input type="search" id="settings_search" class="settings-search" placeholder="Find a setting…"
+                    aria-label="Find a setting" autocomplete="off">
+                <button type="button" class="settings-tab active" data-tab="integrations" onclick="showSettingsTab('integrations')">🔌 Integrations</button>
+                <button type="button" class="settings-tab" data-tab="sync" onclick="showSettingsTab('sync')">🔄 Sync</button>
+                <button type="button" class="settings-tab" data-tab="features" onclick="showSettingsTab('features')">✨ Features</button>
                 <button type="button" class="settings-tab" data-tab="ai" onclick="showSettingsTab('ai')">🤖 AI</button>
-                <button type="button" class="settings-tab" data-tab="system" onclick="showSettingsTab('system')">🛠️ Sync &amp; System</button>
+                <button type="button" class="settings-tab" data-tab="system" onclick="showSettingsTab('system')">🛠️ System</button>
                 <button type="button" class="settings-tab" data-tab="users" onclick="showSettingsTab('users')">👥 Users</button>
                 <button type="button" class="settings-tab" data-tab="logs" onclick="showSettingsTab('logs')">📊 Logs</button>
             </aside>
@@ -708,32 +845,30 @@
 
         <form method="POST" action="/settings" class="settings-form" id="settingsForm">
 
-            <div class="tab-panel active" data-panel="general">
+            <div class="tab-panel active" data-panel="integrations">
 
-            <div class="settings-section">
-                <div class="section-header">
-                    <h3>General Settings</h3>
-                </div>
-                <div class="section-body">
-                    <div class="form-group">
-                        <label>Timezone</label>
-                        <input type="text" name="TZ" value="{{ get_val('TZ') }}">
-                    </div>
-                    <div class="form-group">
-                        <label>Log Level</label>
-                        <select name="LOG_LEVEL">
-                            {% for level in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] %}
-                            <option value="{{ level }}" {% if get_val('LOG_LEVEL')==level %}selected{% endif %}>{{ level
-                                }}</option>
-                            {% endfor %}
-                        </select>
-                    </div>
-                </div>
+            <div class="help-text" style="font-size:13px; color: rgba(255,255,255,0.55); padding: 0 4px;">
+                Everything on this page is <strong>server-wide</strong> — connections and engine behavior shared by
+                all users. Personal logins and tokens live in
+                <a href="{{ url_for('account_integrations') }}" style="color:#aab4f5;">My Account → My Integrations</a>
+                (or per user under <a href="{{ url_for('settings') }}#users" style="color:#aab4f5;">Users</a>).
             </div>
 
-            <div class="settings-section section-highlight">
+            <div class="settings-section section-highlight" data-svc="audiobookshelf">
                 <div class="section-header">
-                    <h3 class="text-primary">Audiobookshelf</h3>
+                    <div class="svc-left">
+                        <span class="svc-chev">▶</span>
+                        <div class="svc-chip">AB</div>
+                        <div class="svc-title">
+                            <h3 class="text-primary">Audiobookshelf</h3>
+                            <div class="svc-desc">Audio position source of truth</div>
+                        </div>
+                    </div>
+                    <div class="header-tail">
+                        {% if get_val('ABS_SERVER')|lower == 'disabled' %}<span class="pill off">Disabled</span>
+                        {% elif get_val('ABS_SERVER') %}<span class="pill ok">Configured</span>
+                        {% else %}<span class="pill off">Not configured</span>{% endif %}
+                    </div>
                 </div>
                 <div class="section-body">
                     <!-- Moved Checkbox to top -->
@@ -767,72 +902,50 @@
                 </div>
             </div>
 
-            </div><!-- /general panel -->
-
-            <div class="tab-panel" data-panel="reading_apps">
-
             <!-- KOSync Server (Optional) -->
-            <div class="settings-section section-highlight" style="border-color: rgba(102, 126, 234, 0.3);">
+            <div class="settings-section section-highlight" data-svc="koreader kosync" style="border-color: rgba(102, 126, 234, 0.3);">
                 {% set kosync_configured = get_val('KOSYNC_SERVER') != '' %}
                 {% set kosync_enabled = get_bool('KOSYNC_ENABLED') or (kosync_configured and get_val('KOSYNC_ENABLED')
                 == '') %}
+                {% set kosync_builtin_url = 'http://127.0.0.1:' ~ get_val('KOSYNC_PORT', '5757') %}
+                {% set kosync_external = kosync_configured and get_val('KOSYNC_SERVER') != kosync_builtin_url %}
                 <div class="section-header">
-                    <h3 class="text-primary">KOSync Integration</h3>
-                    <div class="toggle-switch-wrapper">
-                        <span class="toggle-label">Enable</span>
-                        <label class="toggle-switch">
-                            <input type="checkbox" id="toggle_kosync" name="KOSYNC_ENABLED"
-                                onchange="toggleSection('kosync_body', this.checked)" {% if kosync_enabled %}checked{%
-                                endif %}>
-                            <span class="slider"></span>
-                        </label>
+                    <div class="svc-left">
+                        <span class="svc-chev">▶</span>
+                        <div class="svc-chip">KO</div>
+                        <div class="svc-title">
+                            <h3 class="text-primary">KOReader / KoSync</h3>
+                            <div class="svc-desc">E-reader progress via the built-in sync server</div>
+                        </div>
+                    </div>
+                    <div class="header-tail">
+                        {% if kosync_external %}<span class="pill ok">External server</span>
+                        {% else %}<span class="pill ok">Built-in server</span>{% endif %}
+                        <div class="toggle-switch-wrapper">
+                            <span class="toggle-label">Enable</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="toggle_kosync" name="KOSYNC_ENABLED"
+                                    onchange="toggleSection('kosync_body', this.checked)" {% if kosync_enabled %}checked{%
+                                    endif %}>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
                     </div>
                 </div>
                 <div id="kosync_body" class="section-body {% if not kosync_enabled %}collapsed{% endif %}">
 
-                    <!-- Integrated Server Toggle -->
-                    <div class="checkbox-wrapper full-width">
-                        <!-- We use a hidden input or similar logic? 
-                             The user wants a toggle "Use Built-in KOSync Bridge"
-                             Let's assume a new setting key KOSYNC_USE_BUILTIN for the frontend logic, 
-                             or strictly rely on front-end JS to set the URL.
-                             The request says: "secondary toggle one for yes use kosync which opens url to input user/pass... then the second to use built in"
-                        -->
-                        <input type="checkbox" id="kosync_use_builtin" onchange="toggleKosyncServerMode()" checked>
-                        <label for="kosync_use_builtin">Use Built-in KOSync Bridge (Recommended)</label>
-                    </div>
-
-                    <!-- Public URL (Only if Built-in) -->
-                    <div id="kosync_public_url_group" class="full-width"
-                        style="background: rgba(102, 126, 234, 0.1); padding: 15px; border-radius: 8px; border: 1px solid rgba(102, 126, 234, 0.2); margin-bottom: 5px;">
-                        <h4 style="margin-bottom: 12px; color: #fff; font-size: 14px;">🚀 Public URL (Put this in
-                            KOReader)</h4>
-
-                        <div style="display: flex; gap: 10px;">
-                            <input type="text" id="public_kosync_url" aria-label="Public KOSync URL" value=""
-                                readonly onclick="this.select()"
-                                style="flex: 1; cursor: text; font-family: monospace; color: #667eea; font-weight: bold; background: rgba(0,0,0,0.2);">
-                            <button type="button" class="btn" onclick="copyPublicUrl()"
-                                title="Copy to clipboard">📋</button>
-                        </div>
-                        <div class="help-text" style="color: rgba(255,255,255,0.5); margin-top: 4px;">Replace
-                            'localhost' with your server IP or Domain if accessing remotely.</div>
-                    </div>
-
-                    <div class="form-group full-width">
-                        <label>Target KOSync URL</label>
-                        <input type="text" name="KOSYNC_SERVER" id="kosync_server_input"
-                            value="{{ get_val('KOSYNC_SERVER') }}">
-                        <div class="help-text" id="kosync_server_help">Internal URL the bridge connects to.</div>
-                    </div>
-
-                    <!-- Separator -->
-                    <div class="full-width" style="margin: 10px 0; border-top: 1px solid rgba(255,255,255,0.1);"></div>
                     <div class="form-group full-width">
                         <div class="help-text" style="background:rgba(102,126,234,.08);border:1px solid rgba(102,126,234,.25);border-radius:8px;padding:10px 12px;">
                             🔒 <strong>Per-user login.</strong> Each user's KoSync username &amp; password are set per user in
                             <a href="{{ url_for('settings') }}#users" style="color:#aab4f5;">Settings → Users → (user) → Integrations</a>
-                            (including your own). The server URL above stays global.
+                            (including your own).
+                        </div>
+                    </div>
+                    <div class="form-group full-width">
+                        <div class="help-text" style="background:rgba(102,126,234,.08);border:1px solid rgba(102,126,234,.25);border-radius:8px;padding:10px 12px;">
+                            📱 <strong>Connecting a device?</strong> The sync-server URL to enter in KOReader and the
+                            BridgeSync plugin download live on
+                            <a href="{{ url_for('account') }}" style="color:#aab4f5;">My Account → Connect a KOReader device</a>.
                         </div>
                     </div>
                     <div class="form-group full-width">
@@ -867,46 +980,52 @@
                             from Add / Update Book -> Reader Documents before any sync — percentage or text — can happen.</div>
                     </div>
 
-                    <!-- Separator -->
-                    <div class="full-width" style="margin: 10px 0; border-top: 1px solid rgba(255,255,255,0.1);"></div>
-                    <div class="full-width" id="bridgesync_plugin_group"
-                        style="background: rgba(102, 126, 234, 0.1); padding: 15px; border-radius: 8px; border: 1px solid rgba(102, 126, 234, 0.2); margin-bottom: 5px;">
-                        <h4 style="margin-bottom: 8px; color: #fff; font-size: 14px;">📥 BridgeSync KOReader Plugin
-                            <span id="bridgesync_plugin_version"
-                                style="font-weight: normal; color: rgba(255,255,255,0.5); font-size: 12px;"></span>
-                        </h4>
-                        <p class="help-text" style="margin: 0 0 10px 0;">Installs books from the bridge byte-for-byte
-                            (so KOReader progress auto-links with no manual matching) and syncs reading stats. Download
-                            below, unzip into your device's <code>koreader/plugins/</code> folder, then restart
-                            KOReader.</p>
-                        <a class="btn" href="/api/kosync-plugin/download" download>⬇️ Download plugin (.zip)</a>
-                    </div>
-                    <script>
-                        fetch('/api/kosync-plugin/version').then(function (r) { return r.ok ? r.json() : null; })
-                            .then(function (d) {
-                                if (d && d.version) {
-                                    document.getElementById('bridgesync_plugin_version').textContent = 'v' + d.version;
-                                }
-                            }).catch(function () { });
-                    </script>
+                    <details class="advanced-sub full-width" {% if kosync_external %}open{% endif %}>
+                        <summary>Advanced — external KoSync server</summary>
+                        <div class="section-body" style="padding: 12px 0 0;">
+                            <div class="checkbox-wrapper full-width">
+                                <input type="checkbox" id="kosync_use_builtin" onchange="toggleKosyncServerMode()" checked>
+                                <label for="kosync_use_builtin">Use built-in KoSync server (recommended)</label>
+                            </div>
+                            <div class="form-group full-width">
+                                <label>Target KOSync URL</label>
+                                <input type="text" name="KOSYNC_SERVER" id="kosync_server_input"
+                                    value="{{ get_val('KOSYNC_SERVER') }}">
+                                <div class="help-text" id="kosync_server_help">Internal URL the bridge connects to.
+                                    Only change this to relay through a separate KoSync instance — almost every
+                                    install should keep the built-in server.</div>
+                            </div>
+                        </div>
+                    </details>
                 </div>
             </div>
 
             <!-- Storyteller (Optional) -->
-            <div class="settings-section">
+            <div class="settings-section" data-svc="storyteller">
                 {% set storyteller_configured = get_val('STORYTELLER_API_URL') != '' %}
                 {% set storyteller_enabled = get_bool('STORYTELLER_ENABLED') or (storyteller_configured and
                 get_val('STORYTELLER_ENABLED') == '') %}
                 <div class="section-header">
-                    <h3>Storyteller</h3>
-                    <div class="toggle-switch-wrapper">
-                        <span class="toggle-label">Enable</span>
-                        <label class="toggle-switch">
-                            <input type="checkbox" id="toggle_storyteller" name="STORYTELLER_ENABLED"
-                                onchange="toggleSection('storyteller_body', this.checked)" {% if storyteller_enabled
-                                %}checked{% endif %}>
-                            <span class="slider"></span>
-                        </label>
+                    <div class="svc-left">
+                        <span class="svc-chev">▶</span>
+                        <div class="svc-chip">ST</div>
+                        <div class="svc-title">
+                            <h3>Storyteller</h3>
+                            <div class="svc-desc">Read-along positions &amp; premium alignment source</div>
+                        </div>
+                    </div>
+                    <div class="header-tail">
+                        {% if storyteller_configured %}<span class="pill ok">Configured</span>
+                        {% else %}<span class="pill off">Not configured</span>{% endif %}
+                        <div class="toggle-switch-wrapper">
+                            <span class="toggle-label">Enable</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="toggle_storyteller" name="STORYTELLER_ENABLED"
+                                    onchange="toggleSection('storyteller_body', this.checked)" {% if storyteller_enabled
+                                    %}checked{% endif %}>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
                     </div>
                 </div>
                 <div id="storyteller_body" class="section-body {% if not storyteller_enabled %}collapsed{% endif %}">
@@ -943,20 +1062,31 @@
             </div>
 
             <!-- Grimmory (Optional) -->
-            <div class="settings-section">
+            <div class="settings-section" data-svc="grimmory booklore">
                 {% set booklore_configured = get_val('BOOKLORE_SERVER') != '' %}
                 {% set booklore_enabled = get_bool('BOOKLORE_ENABLED') or (booklore_configured and
                 get_val('BOOKLORE_ENABLED') == '') %}
                 <div class="section-header">
-                    <h3>Grimmory</h3>
-                    <div class="toggle-switch-wrapper">
-                        <span class="toggle-label">Enable</span>
-                        <label class="toggle-switch">
-                            <input type="checkbox" id="toggle_booklore" name="BOOKLORE_ENABLED"
-                                onchange="toggleSection('booklore_body', this.checked)" {% if booklore_enabled
-                                %}checked{% endif %}>
-                            <span class="slider"></span>
-                        </label>
+                    <div class="svc-left">
+                        <span class="svc-chev">▶</span>
+                        <div class="svc-chip">GR</div>
+                        <div class="svc-title">
+                            <h3>Grimmory</h3>
+                            <div class="svc-desc">Ebook positions, shelves &amp; reading sessions</div>
+                        </div>
+                    </div>
+                    <div class="header-tail">
+                        {% if booklore_configured %}<span class="pill ok">Configured</span>
+                        {% else %}<span class="pill off">Not configured</span>{% endif %}
+                        <div class="toggle-switch-wrapper">
+                            <span class="toggle-label">Enable</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="toggle_booklore" name="BOOKLORE_ENABLED"
+                                    onchange="toggleSection('booklore_body', this.checked)" {% if booklore_enabled
+                                    %}checked{% endif %}>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
                     </div>
                 </div>
                 <div id="booklore_body" class="section-body {% if not booklore_enabled %}collapsed{% endif %}">
@@ -1024,46 +1154,92 @@
                     <h4 class="full-width" style="font-size: 14px; color: #fff; margin-bottom: -10px;">Device Sync Collections</h4>
 
                     <div class="form-group full-width">
-                        <label>Collection Syncing (Grimmory Shelves to KOReader)</label>
-                        <select name="DEVICE_SYNC_COLLECTIONS">
-                            <option value="off" {% if get_val('DEVICE_SYNC_COLLECTIONS') == 'off' %}selected{% endif %}>Off / Disabled</option>
-                            <option value="all" {% if get_val('DEVICE_SYNC_COLLECTIONS') == 'all' %}selected{% endif %}>All Shelves</option>
-                            <option value="magic" {% if get_val('DEVICE_SYNC_COLLECTIONS') == 'magic' %}selected{% endif %}>Magic Shelves Only</option>
-                            <option value="shelf" {% if get_val('DEVICE_SYNC_COLLECTIONS') == 'shelf' %}selected{% endif %}>Regular Shelves Only</option>
-                        </select>
-                        <div class="help-text">Automatically creates KOReader collections based on Grimmory shelf membership (<b>Note:</b> This feature only works with <code>bridgesync.koplugin</code> active on your KOReader device).</div>
+                        <label>KOReader Collection Source</label>
+                        <div class="help-text">
+                            BridgeSync-managed KOReader collections are configured per reader in
+                            <a href="{{ url_for('settings') }}#users" style="color:#aab4f5;">Settings -> Users -> (user) -> Integrations</a>
+                            under <b>KOReader Collections</b>. Choose Grimmory shelves or Hardcover lists there.
+                        </div>
                     </div>
-                    <div class="form-group full-width">
+                    <div class="form-group full-width" style="display:none;">
                         <label>Excluded Shelves</label>
                         <div style="display: flex; gap: 10px;">
-                            <input type="text" name="DEVICE_SYNC_EXCLUDED_SHELVES" value="{{ get_val('DEVICE_SYNC_EXCLUDED_SHELVES') }}" placeholder="e.g. Read, Archive, DNF" style="flex: 1;">
                             <button class="btn" type="button" onclick="checkBookloreShelves()">🔍 Find Shelves</button>
                         </div>
-                        <select id="booklore_shelf_picker" style="display:none; margin-top:10px;"
-                            onchange="applyShelfPickerSelection('DEVICE_SYNC_EXCLUDED_SHELVES', 'booklore_shelf_picker')">
-                            <option value="">Select a shelf to add...</option>
-                        </select>
-                        <div id="booklore_shelf_picker_status" class="help-text" style="display:none; margin-top:6px;"></div>
                         <div class="help-text">Comma-separated list of Grimmory shelf names to skip when creating KOReader collections.</div>
                     </div>
                 </div>
             </div>
 
 
+            <!-- BookFusion (Optional) -->
+            <div class="settings-section" data-svc="bookfusion">
+                {% set bookfusion_enabled = get_bool('BOOKFUSION_ENABLED') %}
+                <div class="section-header">
+                    <div class="svc-left">
+                        <span class="svc-chev">▶</span>
+                        <div class="svc-chip">BF</div>
+                        <div class="svc-title">
+                            <h3>BookFusion</h3>
+                            <div class="svc-desc">Progress, highlights &amp; uploads</div>
+                        </div>
+                    </div>
+                    <div class="header-tail">
+                        <span class="pill off">Per-user accounts</span>
+                        <div class="toggle-switch-wrapper">
+                            <span class="toggle-label">Enable</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="toggle_bookfusion" name="BOOKFUSION_ENABLED"
+                                    onchange="toggleSection('bookfusion_body', this.checked)" {% if bookfusion_enabled
+                                    %}checked{% endif %}>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                <div id="bookfusion_body" class="section-body {% if not bookfusion_enabled %}collapsed{% endif %}">
+                    <div class="form-group full-width">
+                        <label>API URL</label>
+                        <input type="text" name="BOOKFUSION_API_URL" value="{{ get_val('BOOKFUSION_API_URL', 'https://www.bookfusion.com') }}">
+                    </div>
+                    <div class="form-group full-width">
+                        <div class="help-text" style="background:rgba(102,126,234,.08);border:1px solid rgba(102,126,234,.25);border-radius:8px;padding:10px 12px;">
+                            🔒 <strong>Per-user account.</strong> Each user links their own BookFusion by device flow under
+                            <a href="{{ url_for('account_integrations') }}" style="color:#aab4f5;">Account → My Integrations</a>,
+                            or an admin can link it for any user under
+                            <a href="{{ url_for('settings') }}#users" style="color:#aab4f5;">Settings → Users → (user) → Integrations</a>.
+                            The API URL and engine settings here stay global.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+
             <!-- BookOrbit (Optional) -->
-            <div class="settings-section">
+            <div class="settings-section" data-svc="bookorbit">
                 {% set bookorbit_configured = get_val('BOOKORBIT_SERVER') != '' %}
                 {% set bookorbit_enabled = get_bool('BOOKORBIT_ENABLED') %}
                 <div class="section-header">
-                    <h3>BookOrbit</h3>
-                    <div class="toggle-switch-wrapper">
-                        <span class="toggle-label">Enable</span>
-                        <label class="toggle-switch">
-                            <input type="checkbox" id="toggle_bookorbit" name="BOOKORBIT_ENABLED"
-                                onchange="toggleSection('bookorbit_body', this.checked)" {% if bookorbit_enabled
-                                %}checked{% endif %}>
-                            <span class="slider"></span>
-                        </label>
+                    <div class="svc-left">
+                        <span class="svc-chev">▶</span>
+                        <div class="svc-chip">BO</div>
+                        <div class="svc-title">
+                            <h3>BookOrbit</h3>
+                            <div class="svc-desc">Web reader &amp; audio positions</div>
+                        </div>
+                    </div>
+                    <div class="header-tail">
+                        {% if bookorbit_configured %}<span class="pill ok">Configured</span>
+                        {% else %}<span class="pill off">Not configured</span>{% endif %}
+                        <div class="toggle-switch-wrapper">
+                            <span class="toggle-label">Enable</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="toggle_bookorbit" name="BOOKORBIT_ENABLED"
+                                    onchange="toggleSection('bookorbit_body', this.checked)" {% if bookorbit_enabled
+                                    %}checked{% endif %}>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
                     </div>
                 </div>
                 <div id="bookorbit_body" class="section-body {% if not bookorbit_enabled %}collapsed{% endif %}">
@@ -1132,20 +1308,71 @@
             </div>
 
 
+            <!-- Readest Highlight Sync (engine knobs; account is per-user) -->
+            <div class="settings-section" data-svc="readest">
+                <div class="section-header">
+                    <div class="svc-left">
+                        <span class="svc-chev">▶</span>
+                        <div class="svc-chip">RD</div>
+                        <div class="svc-title">
+                            <h3>Readest</h3>
+                            <div class="svc-desc">Highlight &amp; note relay</div>
+                        </div>
+                    </div>
+                    <div class="header-tail">
+                        <span class="pill off">Per-user accounts</span>
+                    </div>
+                </div>
+                <div class="section-body">
+                    <div class="form-group full-width">
+                        <div class="help-text" style="background:rgba(102,126,234,.08);border:1px solid rgba(102,126,234,.25);border-radius:8px;padding:10px 12px;">
+                            Bidirectionally syncs KOReader highlights and bookmarks with each user's
+                            <a href="https://readest.com" target="_blank" style="color:#aab4f5;">Readest</a> account.
+                            Enable it and enter the Readest <strong>email &amp; password</strong> per user under
+                            <strong>Users → Integrations</strong> (the same credentials the Readest KOReader plugin uses).
+                            The settings below are global engine knobs.
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Sync Interval (minutes)</label>
+                        <input type="number" min="0" name="READEST_ANNOTATION_SYNC_MINUTES"
+                            value="{{ get_val('READEST_ANNOTATION_SYNC_MINUTES', '15') }}">
+                        <div class="help-text">0 disables the sync timer (manual trigger only).</div>
+                    </div>
+                    <div class="form-group full-width">
+                        <label>Supabase URL (advanced)</label>
+                        <input type="text" name="READEST_SUPABASE_URL" value="{{ get_val('READEST_SUPABASE_URL', 'https://readest.supabase.co') }}"
+                            placeholder="https://readest.supabase.co">
+                        <div class="help-text">Leave as default unless you self-host Readest.</div>
+                    </div>
+                </div>
+            </div>
+
             <!-- CWA (Optional) -->
-            <div class="settings-section">
+            <div class="settings-section" data-svc="cwa calibre-web">
                 {% set cwa_configured = get_val('CWA_SERVER') != '' %}
                 {% set cwa_enabled = get_bool('CWA_ENABLED') %}
                 <div class="section-header">
-                    <h3>Calibre-Web Automated</h3>
-                    <div class="toggle-switch-wrapper">
-                        <span class="toggle-label">Enable</span>
-                        <label class="toggle-switch">
-                            <input type="checkbox" id="toggle_cwa" name="CWA_ENABLED"
-                                onchange="toggleSection('cwa_body', this.checked)" {% if cwa_enabled %}checked{% endif
-                                %}>
-                            <span class="slider"></span>
-                        </label>
+                    <div class="svc-left">
+                        <span class="svc-chev">▶</span>
+                        <div class="svc-chip">CW</div>
+                        <div class="svc-title">
+                            <h3>Calibre-Web Automated</h3>
+                            <div class="svc-desc">Kobo bookmarks &amp; ebook library</div>
+                        </div>
+                    </div>
+                    <div class="header-tail">
+                        {% if cwa_configured %}<span class="pill ok">Configured</span>
+                        {% else %}<span class="pill off">Not configured</span>{% endif %}
+                        <div class="toggle-switch-wrapper">
+                            <span class="toggle-label">Enable</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="toggle_cwa" name="CWA_ENABLED"
+                                    onchange="toggleSection('cwa_body', this.checked)" {% if cwa_enabled %}checked{% endif
+                                    %}>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
                     </div>
                 </div>
                 <div id="cwa_body" class="section-body {% if not cwa_enabled %}collapsed{% endif %}">
@@ -1201,38 +1428,31 @@
                 </div>
             </div>
 
-            </div><!-- /reading_apps panel -->
-
-            <div class="tab-panel" data-panel="trackers">
-
-            <div class="settings-section">
-                <div class="section-header">
-                    <h3>Progress Trackers</h3>
-                </div>
-                <div class="section-body">
-                    <div class="help-text">
-                        Enable Hardcover and/or StoryGraph below to make them available. Each user picks which
-                        they actually use — and supplies their own token/cookies — in
-                        <a href="{{ url_for('settings') }}#users">Settings → Users → (user) → Integrations</a>.
-                    </div>
-                </div>
-            </div>
-
-            <!-- Hardcover.app (Optional) -->
-            <div class="settings-section">
+            <!-- Hardcover (Optional) -->
+            <div class="settings-section" data-svc="hardcover">
                 {% set hardcover_configured = get_val('HARDCOVER_TOKEN') != '' %}
                 {% set hardcover_enabled = get_bool('HARDCOVER_ENABLED') or (hardcover_configured and
                 get_val('HARDCOVER_ENABLED') == '') %}
                 <div class="section-header">
-                    <h3>Hardcover.app</h3>
-                    <div class="toggle-switch-wrapper">
-                        <span class="toggle-label">Enable</span>
-                        <label class="toggle-switch">
-                            <input type="checkbox" id="toggle_hardcover" name="HARDCOVER_ENABLED"
-                                onchange="toggleSection('hardcover_body', this.checked)" {% if hardcover_enabled
-                                %}checked{% endif %}>
-                            <span class="slider"></span>
-                        </label>
+                    <div class="svc-left">
+                        <span class="svc-chev">▶</span>
+                        <div class="svc-chip">HC</div>
+                        <div class="svc-title">
+                            <h3>Hardcover <span class="tracker-tag">write-only tracker</span></h3>
+                            <div class="svc-desc">Progress tracking, highlights &amp; lists</div>
+                        </div>
+                    </div>
+                    <div class="header-tail">
+                        <span class="pill off">Per-user tokens</span>
+                        <div class="toggle-switch-wrapper">
+                            <span class="toggle-label">Enable</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="toggle_hardcover" name="HARDCOVER_ENABLED"
+                                    onchange="toggleSection('hardcover_body', this.checked)" {% if hardcover_enabled
+                                    %}checked{% endif %}>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
                     </div>
                 </div>
                 <div id="hardcover_body" class="section-body {% if not hardcover_enabled %}collapsed{% endif %}">
@@ -1248,24 +1468,80 @@
                         <input type="number" name="HARDCOVER_UPDATE_COOLDOWN_MINS" min="0" value="{{ get_val('HARDCOVER_UPDATE_COOLDOWN_MINS', '60') }}">
                         <div class="help-text">Wait this many minutes of no new progress before posting to Hardcover; any new progress resets the timer. Finishing a book posts immediately. 0 = update every cycle.</div>
                     </div>
+
+                    <!-- Highlight sync sub-section -->
+                    <div class="full-width" style="margin: 10px 0; border-top: 1px solid rgba(255,255,255,0.1);"></div>
+                    <h4 class="full-width" style="font-size: 14px; color: #fff; margin-bottom: -10px;">Highlight Sync</h4>
+                    <div class="checkbox-wrapper full-width">
+                        <input type="checkbox" id="hardcover_ann_sync" name="HARDCOVER_ANNOTATION_SYNC"
+                            {% if get_bool('HARDCOVER_ANNOTATION_SYNC') %}checked{% endif %}>
+                        <label for="hardcover_ann_sync">Push highlights to Hardcover</label>
+                    </div>
+                    <div class="form-group">
+                        <label>Highlight Sync Interval (minutes)</label>
+                        <input type="number" min="0" name="HARDCOVER_ANNOTATION_SYNC_MINUTES"
+                            value="{{ get_val('HARDCOVER_ANNOTATION_SYNC_MINUTES', '30') }}">
+                        <div class="help-text">Pushes KOReader highlights (yellow highlight style) to Hardcover's highlights store every N minutes. 0 disables.</div>
+                    </div>
+                    <div class="full-width" style="margin: 10px 0; border-top: 1px solid rgba(255,255,255,0.1);"></div>
+                    <h4 class="full-width" style="font-size: 14px; color: #fff; margin-bottom: -10px;">Grimmory Shelves to Lists</h4>
+                    <div class="help-text full-width" style="margin-bottom: 8px;">
+                        These are the admin/default values. This projection is resolved <b>per reader</b> — each
+                        user can override the mode, prefix, and excluded shelves under
+                        <a href="{{ url_for('settings') }}#users" style="color:#aab4f5;">Settings -> Users -> (user) -> Integrations</a>
+                        (Hardcover). Regular users are not projected until they opt in there.
+                    </div>
+                    <div class="form-group full-width">
+                        <label>List Syncing</label>
+                        <select name="HARDCOVER_GRIMMORY_LIST_SYNC">
+                            <option value="off" {% if get_val('HARDCOVER_GRIMMORY_LIST_SYNC', 'off') == 'off' %}selected{% endif %}>Off / Disabled</option>
+                            <option value="all" {% if get_val('HARDCOVER_GRIMMORY_LIST_SYNC') == 'all' %}selected{% endif %}>All Shelves</option>
+                            <option value="magic" {% if get_val('HARDCOVER_GRIMMORY_LIST_SYNC') == 'magic' %}selected{% endif %}>Magic Shelves Only</option>
+                            <option value="shelf" {% if get_val('HARDCOVER_GRIMMORY_LIST_SYNC') == 'shelf' %}selected{% endif %}>Regular Shelves Only</option>
+                        </select>
+                        <div class="help-text">When a Grimmory-backed book is matched to Hardcover, create matching Hardcover lists and add the book to them.</div>
+                    </div>
+                    <div class="form-group">
+                        <label>List Name Prefix</label>
+                        <input type="text" name="HARDCOVER_GRIMMORY_LIST_PREFIX"
+                            value="{{ get_val('HARDCOVER_GRIMMORY_LIST_PREFIX', 'Grimmory: ') }}">
+                        <div class="help-text">Prefix applied to created Hardcover list names. Leave blank to use the Grimmory shelf name exactly.</div>
+                    </div>
+                    <div class="form-group">
+                        <label>Excluded Shelves</label>
+                        <input type="text" name="HARDCOVER_GRIMMORY_LIST_EXCLUDED_SHELVES"
+                            value="{{ get_val('HARDCOVER_GRIMMORY_LIST_EXCLUDED_SHELVES') }}"
+                            placeholder="e.g. Read, Archive, DNF">
+                        <div class="help-text">Comma-separated Grimmory shelf names to skip when creating Hardcover lists.</div>
+                    </div>
                 </div>
             </div>
 
             <!-- StoryGraph (Optional) -->
-            <div class="settings-section">
+            <div class="settings-section" data-svc="storygraph">
                 {% set storygraph_configured = get_val('STORYGRAPH_SESSION_COOKIE') != '' and get_val('STORYGRAPH_REMEMBER_USER_TOKEN') != '' %}
                 {% set storygraph_enabled = get_bool('STORYGRAPH_ENABLED') or (storygraph_configured and
                 get_val('STORYGRAPH_ENABLED') == '') %}
                 <div class="section-header">
-                    <h3>StoryGraph</h3>
-                    <div class="toggle-switch-wrapper">
-                        <span class="toggle-label">Enable</span>
-                        <label class="toggle-switch">
-                            <input type="checkbox" id="toggle_storygraph" name="STORYGRAPH_ENABLED"
-                                onchange="toggleSection('storygraph_body', this.checked)" {% if storygraph_enabled
-                                %}checked{% endif %}>
-                            <span class="slider"></span>
-                        </label>
+                    <div class="svc-left">
+                        <span class="svc-chev">▶</span>
+                        <div class="svc-chip">SG</div>
+                        <div class="svc-title">
+                            <h3>StoryGraph <span class="tracker-tag">write-only tracker</span></h3>
+                            <div class="svc-desc">Progress tracking with edition picking</div>
+                        </div>
+                    </div>
+                    <div class="header-tail">
+                        <span class="pill off">Per-user cookies</span>
+                        <div class="toggle-switch-wrapper">
+                            <span class="toggle-label">Enable</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="toggle_storygraph" name="STORYGRAPH_ENABLED"
+                                    onchange="toggleSection('storygraph_body', this.checked)" {% if storygraph_enabled
+                                    %}checked{% endif %}>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
                     </div>
                 </div>
                 <div id="storygraph_body" class="section-body {% if not storygraph_enabled %}collapsed{% endif %}">
@@ -1284,9 +1560,9 @@
                 </div>
             </div>
 
-            </div><!-- /trackers panel -->
+            </div><!-- /integrations panel -->
 
-            <div class="tab-panel" data-panel="tools">
+            <div class="tab-panel" data-panel="features">
 
             <!-- Telegram (Optional) -->
             <div class="settings-section">
@@ -1383,7 +1659,7 @@
                 </div>
             </div>
 
-            </div><!-- /tools panel -->
+            </div><!-- /features panel -->
 
             <div class="tab-panel" data-panel="ai">
 
@@ -1569,7 +1845,7 @@
 
             </div><!-- /ai panel -->
 
-            <div class="tab-panel" data-panel="system">
+            <div class="tab-panel" data-panel="sync">
 
             <div class="settings-section">
                 <div class="section-header">
@@ -1730,6 +2006,70 @@
                         </div>
                         {% endif %}
 
+                        {% if get_bool('BOOKFUSION_ENABLED') %}
+                        <div class="form-group" style="align-items: center;">
+                            <label>BookFusion Poll Mode</label>
+                            <select name="BOOKFUSION_POLL_MODE" id="bookfusion_poll_mode"
+                                    onchange="togglePollSeconds('bookfusion_poll_seconds_row', this.value)">
+                                <option value="global" {% if get_val('BOOKFUSION_POLL_MODE', 'global') == 'global' %}selected{% endif %}>Global</option>
+                                <option value="custom" {% if get_val('BOOKFUSION_POLL_MODE') == 'custom' %}selected{% endif %}>Custom</option>
+                            </select>
+                        </div>
+                        <div class="form-group" id="bookfusion_poll_seconds_row"
+                             {% if get_val('BOOKFUSION_POLL_MODE') != 'custom' %}style="opacity: 0.45; pointer-events: none;"{% endif %}>
+                            <label>BookFusion Poll Interval (seconds)</label>
+                            <input type="number" name="BOOKFUSION_POLL_SECONDS" min="10"
+                                   value="{{ get_val('BOOKFUSION_POLL_SECONDS', '300') }}">
+                            <div class="help-text">Recommended: 300s for BookFusion.</div>
+                        </div>
+                        {% endif %}
+
+                    </div>
+                </div>
+            </div>
+
+            <!-- Alignment Health -->
+            <div class="settings-section">
+                <div class="section-header">
+                    <h3>Alignment Health</h3>
+                </div>
+                <div class="section-body">
+                    <div class="form-group full-width">
+                        <label>Pre-LLM / Linear Alignment Maps</label>
+                        <div class="cleanup-group">
+                            <button type="button" class="btn btn-primary" id="realignAllBtn" onclick="realignAllNonLlm()">
+                                Re-align all pre-LLM / linear maps
+                            </button>
+                            <p class="help-text flex-1 m-0" id="alignHealthSummary">Loading alignment health...</p>
+                        </div>
+                    </div>
+                    <div class="form-group full-width">
+                        <div id="alignHealthList" style="display:flex;flex-direction:column;gap:6px;max-height:340px;overflow:auto;width:100%;"></div>
+                    </div>
+                </div>
+            </div>
+
+            </div><!-- /sync panel -->
+
+            <div class="tab-panel" data-panel="system">
+
+            <div class="settings-section">
+                <div class="section-header">
+                    <h3>General</h3>
+                </div>
+                <div class="section-body">
+                    <div class="form-group">
+                        <label>Timezone</label>
+                        <input type="text" name="TZ" value="{{ get_val('TZ') }}">
+                    </div>
+                    <div class="form-group">
+                        <label>Log Level</label>
+                        <select name="LOG_LEVEL">
+                            {% for level in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] %}
+                            <option value="{{ level }}" {% if get_val('LOG_LEVEL')==level %}selected{% endif %}>{{ level
+                                }}</option>
+                            {% endfor %}
+                        </select>
                     </div>
                 </div>
             </div>
@@ -1789,27 +2129,6 @@
                     <div class="form-group">
                         <label>Audiobooks Dir</label>
                         <input type="text" name="AUDIOBOOKS_DIR" value="{{ get_val('AUDIOBOOKS_DIR') }}">
-                    </div>
-                </div>
-            </div>
-
-            <!-- Alignment Health -->
-            <div class="settings-section">
-                <div class="section-header">
-                    <h3>Alignment Health</h3>
-                </div>
-                <div class="section-body">
-                    <div class="form-group full-width">
-                        <label>Pre-LLM / Linear Alignment Maps</label>
-                        <div class="cleanup-group">
-                            <button type="button" class="btn btn-primary" id="realignAllBtn" onclick="realignAllNonLlm()">
-                                Re-align all pre-LLM / linear maps
-                            </button>
-                            <p class="help-text flex-1 m-0" id="alignHealthSummary">Loading alignment health...</p>
-                        </div>
-                    </div>
-                    <div class="form-group full-width">
-                        <div id="alignHealthList" style="display:flex;flex-direction:column;gap:6px;max-height:340px;overflow:auto;width:100%;"></div>
                     </div>
                 </div>
             </div>
@@ -2036,6 +2355,7 @@
             </div><!-- /system panel -->
 
             <div class="submit-bar">
+                <span class="dirty-note" id="dirty_note" style="display:none;"></span>
                 <span class="restart-warn">⚠️ Application will restart instantly</span>
                 <button type="submit" class="btn btn-primary">💾 Save Settings</button>
             </div>
@@ -2051,7 +2371,7 @@
                     <h3>👥 Users</h3>
                 </div>
                 <div class="section-body">
-                    <table class="users-table">
+                    <table class="users-table full-width">
                         <tr>
                             <th>User</th>
                             <th>Role</th>
@@ -2066,25 +2386,27 @@
                             <td>{% if u.active %}<span class="u-badge on">active</span>{% else %}<span class="u-badge off">disabled</span>{% endif %}</td>
                             <td style="color:#888">{{ u.last_login.strftime('%Y-%m-%d %H:%M') if u.last_login else '—' }}</td>
                             <td class="row-actions">
-                                <a href="{{ url_for('admin_user_integrations', user_id=u.id) }}" class="u-btn u-btn-sm">Integrations</a>
-                                <form method="POST" action="/settings">
-                                    <input type="hidden" name="action" value="reset_password">
-                                    <input type="hidden" name="user_id" value="{{ u.id }}">
-                                    <input class="u-input" type="password" name="password" placeholder="new password" autocomplete="off" style="width:130px">
-                                    <button type="submit" class="u-btn u-btn-sm">Reset</button>
-                                </form>
-                                <form method="POST" action="/settings">
-                                    <input type="hidden" name="action" value="toggle_active">
-                                    <input type="hidden" name="user_id" value="{{ u.id }}">
-                                    <button type="submit" class="u-btn u-btn-sm">{{ 'Disable' if u.active else 'Enable' }}</button>
-                                </form>
-                                {% if u.id != current_user_id %}
-                                <form method="POST" action="/settings" onsubmit="return confirm('Delete {{ u.username }}? Their progress/credentials are removed.');">
-                                    <input type="hidden" name="action" value="delete">
-                                    <input type="hidden" name="user_id" value="{{ u.id }}">
-                                    <button type="submit" class="u-btn u-btn-danger">Delete</button>
-                                </form>
-                                {% endif %}
+                                <div class="row-actions-flex">
+                                    <a href="{{ url_for('admin_user_integrations', user_id=u.id) }}" class="u-btn u-btn-sm">Integrations</a>
+                                    <form method="POST" action="/settings">
+                                        <input type="hidden" name="action" value="reset_password">
+                                        <input type="hidden" name="user_id" value="{{ u.id }}">
+                                        <input class="u-input" type="password" name="password" placeholder="new password" autocomplete="off" style="width:130px">
+                                        <button type="submit" class="u-btn u-btn-sm">Reset</button>
+                                    </form>
+                                    <form method="POST" action="/settings">
+                                        <input type="hidden" name="action" value="toggle_active">
+                                        <input type="hidden" name="user_id" value="{{ u.id }}">
+                                        <button type="submit" class="u-btn u-btn-sm">{{ 'Disable' if u.active else 'Enable' }}</button>
+                                    </form>
+                                    {% if u.id != current_user_id %}
+                                    <form method="POST" action="/settings" onsubmit="return confirm('Delete {{ u.username }}? Their progress/credentials are removed.');">
+                                        <input type="hidden" name="action" value="delete">
+                                        <input type="hidden" name="user_id" value="{{ u.id }}">
+                                        <button type="submit" class="u-btn u-btn-danger">Delete</button>
+                                    </form>
+                                    {% endif %}
+                                </div>
                             </td>
                         </tr>
                         {% endfor %}
@@ -2097,7 +2419,7 @@
                     <h3>Create user</h3>
                 </div>
                 <div class="section-body">
-                    <form method="POST" action="/settings" class="u-create">
+                    <form method="POST" action="/settings" class="u-create full-width">
                         <input type="hidden" name="action" value="create">
                         <input class="u-input" type="text" name="username" placeholder="username" autocomplete="off" required>
                         <input class="u-input" type="password" name="password" placeholder="password" autocomplete="new-password" required>
@@ -2231,6 +2553,7 @@
             storyteller: ['STORYTELLER_ENABLED', 'STORYTELLER_API_URL', 'STORYTELLER_USER', 'STORYTELLER_PASSWORD'],
             booklore: ['BOOKLORE_ENABLED', 'BOOKLORE_SERVER', 'BOOKLORE_USER', 'BOOKLORE_PASSWORD'],
             bookorbit: ['BOOKORBIT_ENABLED', 'BOOKORBIT_SERVER', 'BOOKORBIT_USER', 'BOOKORBIT_PASSWORD'],
+            bookfusion: ['BOOKFUSION_ENABLED', 'BOOKFUSION_API_URL', 'BOOKFUSION_ACCESS_TOKEN'],
             cwa: ['CWA_ENABLED', 'CWA_SERVER', 'CWA_USERNAME', 'CWA_PASSWORD', 'CWA_SYNC_TOKEN'],
             hardcover: ['HARDCOVER_ENABLED', 'HARDCOVER_TOKEN'],
             storygraph: ['STORYGRAPH_ENABLED', 'STORYGRAPH_SESSION_COOKIE', 'STORYGRAPH_REMEMBER_USER_TOKEN'],
@@ -2316,42 +2639,22 @@
         }
 
         function toggleKosyncServerMode() {
-            const useBuiltin = document.getElementById('kosync_use_builtin').checked;
-
+            const useBuiltin = document.getElementById('kosync_use_builtin');
             const internalInput = document.getElementById('kosync_server_input');
-            const publicGroup = document.getElementById('kosync_public_url_group');
-            // We want to force it if checked?
+            if (!useBuiltin || !internalInput) return;
 
-            if (useBuiltin) {
-                // Show Public URL section
-                if (publicGroup) publicGroup.classList.remove('hidden');
-
+            if (useBuiltin.checked) {
                 // Force internal value and make readonly
                 internalInput.value = "http://127.0.0.1:{{ get_val('KOSYNC_PORT', '5757') }}";
                 internalInput.setAttribute('readonly', 'readonly');
                 internalInput.style.opacity = "0.7";
                 internalInput.style.cursor = "not-allowed";
             } else {
-                // Hide Public URL section
-                if (publicGroup) publicGroup.classList.add('hidden');
-
                 // Make internal editable so the user can set their external server.
                 internalInput.removeAttribute('readonly');
                 internalInput.style.opacity = "1";
                 internalInput.style.cursor = "text";
-                // If it was the localhost default, maybe clear it? No, safe to leave.
             }
-        }
-
-        function copyPublicUrl() {
-            const copyText = document.getElementById("public_kosync_url");
-            copyText.select();
-            copyText.setSelectionRange(0, 99999);
-            navigator.clipboard.writeText(copyText.value);
-            // Visual feedback
-            const originalBg = copyText.style.backgroundColor;
-            copyText.style.backgroundColor = "rgba(102, 126, 234, 0.3)";
-            setTimeout(() => copyText.style.backgroundColor = originalBg, 200);
         }
 
         function escapeHtml(text) {
@@ -2570,34 +2873,20 @@
 
         document.addEventListener('DOMContentLoaded', loadAlignmentHealth);
 
-        // Auto-calculate public URL on load
         document.addEventListener('DOMContentLoaded', function () {
-            const configuredPort = "{{ get_val('KOSYNC_PORT', '5757') }}";
-
-            // Generic example so users see the expected shape of an internet-reachable URL.
-            let suggestedUrl = `https://koreader.example.com:${configuredPort}`;
-
-            const publicUrlInput = document.getElementById('public_kosync_url');
-            publicUrlInput.value = suggestedUrl;
-
-            // Make it editable
-            publicUrlInput.removeAttribute('readonly');
-            publicUrlInput.style.backgroundColor = "rgba(0,0,0,0.2)";
-            publicUrlInput.style.cursor = "text";
-
             // Initialize Dynamic Logic
             initDynamicForms();
 
-            // Check initial state of KOSync
-            const kosyncServerVal = document.getElementById('kosync_server_input').value;
-            // If it matches localhost, check the box. Else uncheck.
+            // Check initial state of KOSync: if the target matches the built-in
+            // localhost server (or is unset), keep the built-in box checked.
+            const kosyncInput = document.getElementById('kosync_server_input');
             const builtinCheckbox = document.getElementById('kosync_use_builtin');
-            if (kosyncServerVal === "http://127.0.0.1:{{ get_val('KOSYNC_PORT', '5757') }}" || kosyncServerVal === "") {
-                builtinCheckbox.checked = true;
-            } else {
-                builtinCheckbox.checked = false;
+            if (kosyncInput && builtinCheckbox) {
+                const kosyncServerVal = kosyncInput.value;
+                builtinCheckbox.checked =
+                    kosyncServerVal === "http://127.0.0.1:{{ get_val('KOSYNC_PORT', '5757') }}" || kosyncServerVal === "";
+                toggleKosyncServerMode();
             }
-            toggleKosyncServerMode();
         });
 
         function initDynamicForms() {
@@ -2685,9 +2974,24 @@
     <script>
         // --- Unsaved Changes Guard ---
         let isFormDirty = false;
+        const dirtyFields = new Set();
 
-        function markDirty() {
+        function markDirty(field) {
             isFormDirty = true;
+            dirtyFields.add(field && (field.name || field.id) ? (field.name || field.id) : '__misc__');
+            const note = document.getElementById('dirty_note');
+            if (note) {
+                const n = dirtyFields.size;
+                note.style.display = '';
+                note.textContent = n === 1 ? '1 unsaved change' : n + ' unsaved changes';
+            }
+        }
+
+        function clearDirty() {
+            isFormDirty = false;
+            dirtyFields.clear();
+            const note = document.getElementById('dirty_note');
+            if (note) note.style.display = 'none';
         }
 
         function setupDirtyCheck() {
@@ -2695,8 +2999,9 @@
             // has its own forms that navigate immediately on submit.
             const inputs = document.querySelectorAll('#settingsForm input, #settingsForm select, #settingsForm textarea');
             inputs.forEach(input => {
-                input.addEventListener('change', markDirty);
-                input.addEventListener('input', markDirty);
+                if (input.id === 'settings_search') return;
+                input.addEventListener('change', function () { markDirty(input); });
+                input.addEventListener('input', function () { markDirty(input); });
             });
 
             // Warn before leaving
@@ -2711,9 +3016,7 @@
 
             // Clear dirty flag on any form submit (settings save or user-admin action).
             document.querySelectorAll('form').forEach(function (form) {
-                form.addEventListener('submit', function () {
-                    isFormDirty = false;
-                });
+                form.addEventListener('submit', clearDirty);
             });
         }
 
@@ -2722,7 +3025,9 @@
     </script>
     <script>
         // --- Settings sidebar tabs ---
-        const SETTINGS_TABS = ['general', 'reading_apps', 'trackers', 'tools', 'ai', 'system', 'users', 'logs'];
+        const SETTINGS_TABS = ['integrations', 'sync', 'features', 'ai', 'system', 'users', 'logs'];
+        // Old tab names (bookmarks / external links) map onto the new grouping.
+        const LEGACY_TAB_ALIASES = { general: 'integrations', reading_apps: 'integrations', trackers: 'integrations', tools: 'features' };
 
         // Lazy-load the embedded log viewer on first open; unload it on leave so
         // its live-tail polling only runs while the Logs tab is active.
@@ -2737,7 +3042,8 @@
         }
 
         function showSettingsTab(name) {
-            if (SETTINGS_TABS.indexOf(name) === -1) name = 'general';
+            if (LEGACY_TAB_ALIASES[name]) name = LEGACY_TAB_ALIASES[name];
+            if (SETTINGS_TABS.indexOf(name) === -1) name = 'integrations';
             document.querySelectorAll('.settings-tab').forEach(function (b) {
                 b.classList.toggle('active', b.dataset.tab === name);
             });
@@ -2758,7 +3064,33 @@
 
         document.addEventListener('DOMContentLoaded', function () {
             const fromHash = (location.hash || '').replace('#', '');
-            showSettingsTab(SETTINGS_TABS.indexOf(fromHash) !== -1 ? fromHash : 'general');
+            showSettingsTab(fromHash || 'integrations');
+
+            // Integration card headers expand/collapse their body on click.
+            // Clicks inside the header tail (status pill, enable switch) are ignored.
+            document.querySelectorAll('.settings-section[data-svc] > .section-header').forEach(function (head) {
+                head.addEventListener('click', function (e) {
+                    if (e.target.closest('.header-tail')) return;
+                    const body = head.parentElement.querySelector('.section-body');
+                    if (body) body.classList.toggle('collapsed');
+                });
+            });
+
+            // Sidebar search filters the Integrations service cards by name or
+            // any text on the card (field labels, help text).
+            const svcSearch = document.getElementById('settings_search');
+            if (svcSearch) {
+                svcSearch.addEventListener('input', function () {
+                    const q = svcSearch.value.trim().toLowerCase();
+                    if (q) showSettingsTab('integrations');
+                    document.querySelectorAll('.settings-section[data-svc]').forEach(function (card) {
+                        const hit = !q
+                            || card.dataset.svc.indexOf(q) !== -1
+                            || card.textContent.toLowerCase().indexOf(q) !== -1;
+                        card.style.display = hit ? '' : 'none';
+                    });
+                });
+            }
         });
     </script>
 </body>

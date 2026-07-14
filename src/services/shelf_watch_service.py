@@ -33,7 +33,7 @@ class ShelfWatchService:
 
     def __init__(self, booklore_client, database_service, book_mapping_service,
                  suggestions_service_factory=None, source_name='BookLore',
-                 env_prefix='BOOKLORE'):
+                 env_prefix='BOOKLORE', user_client_registry=None):
         """Args:
             booklore_client: the library client (BookloreClient or BookOrbitClient).
                 Both expose the same shelf surface (is_configured, get_all_shelves,
@@ -45,6 +45,9 @@ class ShelfWatchService:
                 `web_server._get_suggestions_service` at first use.
             source_name: ebook source label written to mappings ('BookLore' / 'BookOrbit').
             env_prefix: settings prefix for this source ('BOOKLORE' / 'BOOKORBIT').
+            user_client_registry: optional UserClientRegistry for per-user client
+                resolution. When provided and user_id is supplied, the watcher
+                resolves the user's own library client instead of the singleton.
         """
         self.booklore_client = booklore_client
         self.database_service = database_service
@@ -52,6 +55,7 @@ class ShelfWatchService:
         self._suggestions_service_factory = suggestions_service_factory
         self._source_name = source_name
         self._env_prefix = env_prefix
+        self._user_client_registry = user_client_registry
 
     def set_suggestions_service_factory(self, factory):
         """Inject the SuggestionsService factory at runtime.
@@ -83,9 +87,6 @@ class ShelfWatchService:
     def _watch_shelf_name(self) -> str:
         return (os.environ.get(f'{self._env_prefix}_SHELF_WATCH_NAME') or 'Up Next').strip()
 
-    def _kobo_shelf_name(self) -> str:
-        return (os.environ.get(f'{self._env_prefix}_SHELF_NAME') or 'Kobo').strip()
-
     def _threshold(self) -> float:
         raw = os.environ.get(f'{self._env_prefix}_SHELF_WATCH_THRESHOLD', '95')
         try:
@@ -109,6 +110,40 @@ class ShelfWatchService:
         key for the library displayed to users as 'Grimmory'."""
         return 'Grimmory' if self._source_name == 'BookLore' else self._source_name
 
+    def _resolve_user_bundle(self, user_id=None):
+        """Return the explicit user's client bundle when one is available."""
+        if user_id is None or self._user_client_registry is None:
+            return None
+        try:
+            return self._user_client_registry.get_clients(user_id)
+        except Exception as exc:
+            logger.warning("Shelf-watch: could not build client bundle for user %s: %s", user_id, exc)
+            return None
+
+    def _resolve_client_for_user(self, user_id=None, bundle=None):
+        """Resolve the library client for shelf operations.
+
+        When *user_id* is provided and a ``user_client_registry`` is available,
+        returns the user's own library client from their bundle.  Otherwise
+        falls back to the shared ``self.booklore_client`` singleton.
+        """
+        if user_id is None or self._user_client_registry is None:
+            return self.booklore_client
+        bundle = bundle or self._resolve_user_bundle(user_id)
+        if bundle is None:
+            return None
+        if self._source_name == 'BookOrbit':
+            return getattr(bundle, 'bookorbit_client', None)
+        return getattr(bundle, 'booklore_client', None)
+
+    def _kobo_shelf_name(self) -> str:
+        """Return the user's destination shelf, falling back to environment."""
+        try:
+            from src.utils.user_config import user_setting
+            return (user_setting(f'{self._env_prefix}_SHELF_NAME') or 'Kobo').strip()
+        except Exception:
+            return (os.environ.get(f'{self._env_prefix}_SHELF_NAME') or 'Kobo').strip()
+
     def runs_in_global_cycle(self) -> bool:
         """True when this source polls in 'global' mode, so the full sync cycle
         (not ClientPoller) should drive the shelf-watch check."""
@@ -123,8 +158,51 @@ class ShelfWatchService:
 
     # ---- main entry point ----------------------------------------------
 
-    def process_watch_shelf(self) -> dict:
-        """Scan the watch shelf and act on each book. Returns stats for logging."""
+    def process_watch_shelf(self, user_id: int = None) -> dict:
+        """Run a shelf scan with the requested user's clients and context."""
+        if user_id is None or self._user_client_registry is None:
+            return self._process_watch_shelf(user_id=user_id)
+
+        bundle = self._resolve_user_bundle(user_id)
+        client = self._resolve_client_for_user(user_id, bundle=bundle)
+        if bundle is None or client is None:
+            logger.warning("Shelf-watch: no client bundle available for user %s", user_id)
+            return self._disabled_stats()
+
+        user_token = None
+        credentials_token = None
+        try:
+            from src.utils.user_context import set_current_user_id, set_current_user_credentials
+            user_token = set_current_user_id(user_id)
+            credentials_token = set_current_user_credentials(getattr(bundle, 'credentials', None))
+            return self._process_watch_shelf(user_id=user_id, active_client=client)
+        finally:
+            if credentials_token is not None:
+                from src.utils.user_context import reset_current_user_credentials
+                reset_current_user_credentials(credentials_token)
+            if user_token is not None:
+                from src.utils.user_context import reset_current_user_id
+                reset_current_user_id(user_token)
+
+    @staticmethod
+    def _disabled_stats() -> dict:
+        """Return the standard no-op result for an unavailable user client."""
+        return {
+            'enabled': False, 'shelf': None, 'scanned': 0,
+            'auto_matched': 0, 'suggested': 0, 'ebook_only': 0,
+            'skipped_existing': 0, 'skipped_throttled': 0, 'errors': 0,
+        }
+
+    def _process_watch_shelf(self, user_id: int = None, active_client=None) -> dict:
+        """Scan the watch shelf and act on each book.
+
+        When *user_id* is provided, the scan uses per-user context: the
+        user's own client bundle, shelves, source IDs, and the candidate
+        pool is built from the user's configured sources.  Shelf moves
+        target only the user's own library.
+
+        Returns stats for logging.
+        """
         stats = {
             'enabled': False,
             'shelf': None,
@@ -139,7 +217,12 @@ class ShelfWatchService:
 
         if not self._is_enabled():
             return stats
-        if not self.booklore_client.is_configured():
+
+        # Resolve the active client: per-user when a user_id and registry are
+        # available, otherwise the shared singleton.
+        active_client = active_client or self._resolve_client_for_user(user_id)
+
+        if active_client is None or not active_client.is_configured():
             logger.debug("Shelf-watch: %s client not configured, skipping", self._display_name())
             return stats
 
@@ -152,7 +235,7 @@ class ShelfWatchService:
             return stats
 
         try:
-            books = self.booklore_client.list_books_on_shelf(shelf_name) or []
+            books = active_client.list_books_on_shelf(shelf_name) or []
         except Exception as e:
             logger.error(f"Shelf-watch: failed to list books on '{shelf_name}': {e}")
             stats['errors'] += 1
@@ -165,7 +248,7 @@ class ShelfWatchService:
         # they want via the library UI directly.
         if not books:
             try:
-                shelves = self.booklore_client.get_all_shelves() or []
+                shelves = active_client.get_all_shelves() or []
                 shelf_names = {s.get('name') for s in shelves if isinstance(s, dict)}
                 if shelf_name not in shelf_names:
                     display = self._display_name()
@@ -195,7 +278,7 @@ class ShelfWatchService:
                 logger.debug(f"Shelf-watch: skipping book with missing id/filename: {book.get('title')}")
                 continue
 
-            if self._is_already_mapped(grimmory_id, filename):
+            if self._is_already_mapped(grimmory_id, filename, user_id=user_id):
                 stats['skipped_existing'] += 1
                 continue
 
@@ -220,7 +303,8 @@ class ShelfWatchService:
             try:
                 outcome = self._process_one_book(
                     book, filename, grimmory_id, candidate_pool, threshold,
-                    shelf_name, kobo_shelf,
+                    shelf_name, kobo_shelf, user_id=user_id,
+                    active_client=active_client,
                 )
             except Exception as e:
                 logger.exception(f"Shelf-watch: unexpected error processing '{filename}': {e}")
@@ -243,7 +327,8 @@ class ShelfWatchService:
 
     def _process_one_book(self, grimmory_book: dict, filename: str, grimmory_id: str,
                          candidate_pool: list, threshold: float,
-                         watch_shelf: str, kobo_shelf: str) -> str:
+                         watch_shelf: str, kobo_shelf: str,
+                         user_id: int = None, active_client=None) -> str:
         ebook_anchor = {
             'filename': filename,
             'title': (grimmory_book.get('title') or '').strip(),
@@ -269,6 +354,7 @@ class ShelfWatchService:
             outcome_status = 'ebook_only'
             self._create_ebook_only_and_move(
                 grimmory_book, filename, grimmory_id, watch_shelf, kobo_shelf,
+                user_id=user_id, active_client=active_client,
             )
             self.database_service.upsert_shelf_watch_scan(
                 self._scan_key(grimmory_id), filename, top_score=None, status=outcome_status,
@@ -282,6 +368,7 @@ class ShelfWatchService:
             outcome_status = 'auto_matched'
             self._create_audio_mapping_and_move(
                 grimmory_book, filename, grimmory_id, top, watch_shelf, kobo_shelf,
+                user_id=user_id, active_client=active_client,
             )
         else:
             outcome_status = 'suggested'
@@ -295,7 +382,9 @@ class ShelfWatchService:
 
     def _create_audio_mapping_and_move(self, grimmory_book: dict, filename: str,
                                        grimmory_id: str, top_match: dict,
-                                       watch_shelf: str, kobo_shelf: str) -> None:
+                                       watch_shelf: str, kobo_shelf: str,
+                                       user_id: int = None,
+                                       active_client=None) -> None:
         saved = self.book_mapping_service.create_audio_mapping_from_match(
             audio_source=top_match.get('audio_source') or 'ABS',
             audio_source_id=top_match.get('audio_source_id') or '',
@@ -308,6 +397,7 @@ class ShelfWatchService:
             ebook_source=self._source_name,
             ebook_source_id=grimmory_id,
             booklore_ebook_id=grimmory_id,
+            user_id=user_id,
         )
         if not saved:
             logger.warning(
@@ -318,25 +408,34 @@ class ShelfWatchService:
             f"Shelf-watch: auto-matched '{filename}' -> {saved.audio_source}:{saved.audio_source_id} "
             f"(score={top_match.get('score')})"
         )
-        self._move_shelf(filename, watch_shelf, kobo_shelf)
+        self._move_shelf(filename, watch_shelf, kobo_shelf, client=active_client)
 
     def _create_ebook_only_and_move(self, grimmory_book: dict, filename: str,
                                     grimmory_id: str,
-                                    watch_shelf: str, kobo_shelf: str) -> None:
+                                    watch_shelf: str, kobo_shelf: str,
+                                    user_id: int = None,
+                                    active_client=None) -> None:
         saved = self.book_mapping_service.create_ebook_only_mapping(
             ebook_filename=filename,
             ebook_title=grimmory_book.get('title'),
             ebook_source=self._source_name,
             ebook_source_id=grimmory_id,
             booklore_ebook_id=grimmory_id,
+            user_id=user_id,
         )
         if not saved:
             logger.warning(
                 f"Shelf-watch: ebook-only save failed for '{filename}'; leaving on watch shelf"
             )
             return
+        # Claim for the current user
+        if user_id is not None:
+            try:
+                self.database_service.link_user_book(user_id, saved.abs_id)
+            except Exception:
+                pass
         logger.info(f"Shelf-watch: created ebook-only mapping for '{filename}' (abs_id={saved.abs_id})")
-        self._move_shelf(filename, watch_shelf, kobo_shelf)
+        self._move_shelf(filename, watch_shelf, kobo_shelf, client=active_client)
 
     def _create_pending_suggestion(self, grimmory_book: dict, filename: str,
                                   grimmory_id: str, matches: list) -> None:
@@ -372,26 +471,44 @@ class ShelfWatchService:
 
     # ---- guards ---------------------------------------------------------
 
-    def _is_already_mapped(self, grimmory_id: str, filename: str) -> bool:
-        """Check whether a Grimmory book already has a `Book` mapping by filename,
-        Grimmory ID, or `booklore:` bridge key.
+    def _is_already_mapped(self, grimmory_id: str, filename: str, user_id: int = None) -> bool:
+        """Check whether a Grimmory book already has a `Book` mapping.
+
+        When *user_id* is provided, a shared Book row belonging to another user
+        does NOT suppress this user's own shelf match — the caller should reuse
+        the shared canonical row and add this user's UserBook claim.
         """
         try:
-            if self.database_service.get_book(f"{self._source_name.lower()}:{grimmory_id}"):
+            existing = self.database_service.get_book(f"{self._source_name.lower()}:{grimmory_id}")
+            if existing:
+                if user_id is None:
+                    return True
+                # Another user's row — not this user's mapping yet
+                if not self.database_service.is_user_linked(user_id, existing.abs_id):
+                    return False
                 return True
         except Exception:
             pass
         try:
-            if self.database_service.get_book_by_ebook_filename(filename):
+            existing = self.database_service.get_book_by_ebook_filename(filename)
+            if existing:
+                if user_id is None:
+                    return True
+                if not self.database_service.is_user_linked(user_id, existing.abs_id):
+                    return False
                 return True
         except Exception:
             pass
         # Catch ebook-only mappings created from this source book via its source id.
-        # _is_already_mapped is also tolerant of int vs str id mismatches.
         try:
             if hasattr(self.database_service, 'get_book_by_ebook_source'):
                 gid_str = str(grimmory_id)
-                if self.database_service.get_book_by_ebook_source(self._source_name, gid_str):
+                existing = self.database_service.get_book_by_ebook_source(self._source_name, gid_str)
+                if existing:
+                    if user_id is None:
+                        return True
+                    if not self.database_service.is_user_linked(user_id, existing.abs_id):
+                        return False
                     return True
         except Exception:
             pass
@@ -427,11 +544,13 @@ class ShelfWatchService:
             return ', '.join(str(a) for a in author if a)
         return str(author or '').strip()
 
-    def _move_shelf(self, filename: str, from_shelf: str, to_shelf: str) -> None:
+    def _move_shelf(self, filename: str, from_shelf: str, to_shelf: str,
+                    client=None) -> None:
         if not from_shelf or not to_shelf or from_shelf == to_shelf:
             return
+        lib_client = client or self.booklore_client
         try:
-            if not self.booklore_client.move_between_shelves(filename, from_shelf, to_shelf):
+            if not lib_client.move_between_shelves(filename, from_shelf, to_shelf):
                 logger.warning(
                     f"Shelf-watch: move_between_shelves returned False for '{filename}' "
                     f"({from_shelf} -> {to_shelf})"

@@ -33,6 +33,9 @@ from pathlib import Path
 
 from src.api.booklore_client import BookloreClient
 from src.api.bookorbit_client import BookOrbitClient
+from src.services.readest_annotation_sync import ReadestAnnotationSync
+from src.services.hardcover_annotation_sync import HardcoverAnnotationSync
+from src.services.bookfusion_annotation_sync import BookFusionAnnotationSync
 from src.utils.cache_paths import safe_cache_path
 from src.utils.grimmory_cfi import GrimmoryCFIResolver
 from src.utils.user_config import resolve_setting, _ALLOW_GLOBAL_FALLBACK_KEY
@@ -85,6 +88,9 @@ class AnnotationSyncService:
         # {(user_id, md5): last_checked_epoch} — re-probed after the TTL.
         self._unmatched: dict[tuple[int | None, str], float] = {}
         self._lock = threading.Lock()
+        self._readest_sync = ReadestAnnotationSync(database_service, ebook_parser)
+        self._hardcover_sync = HardcoverAnnotationSync(database_service)
+        self._bookfusion_sync = BookFusionAnnotationSync(database_service, ebook_parser)
 
     def _is_unmatched(self, user_id, doc_md5: str) -> bool:
         checked_at = self._unmatched.get((user_id, doc_md5))
@@ -223,6 +229,27 @@ class AnnotationSyncService:
                                 synced_this_user = True
                         except Exception as e:
                             logger.error("Grimmory annotation sync failed for user %s: %s", user_id, e, exc_info=True)
+
+                if self._truthy(resolve_setting(creds, "READEST_ANNOTATION_SYNC", "false")):
+                    try:
+                        if self._readest_sync.sync_user(user_id, creds):
+                            synced_this_user = True
+                    except Exception as e:
+                        logger.error("Readest annotation sync failed for user %s: %s", user_id, e, exc_info=True)
+
+                if self._truthy(resolve_setting(creds, "BOOKFUSION_ANNOTATION_SYNC", "false")):
+                    try:
+                        if self._bookfusion_sync.sync_user(user_id, creds):
+                            synced_this_user = True
+                    except Exception as e:
+                        logger.error("BookFusion annotation sync failed for user %s: %s", user_id, e, exc_info=True)
+
+                if self._truthy(resolve_setting(creds, "HARDCOVER_ANNOTATION_SYNC", "false")):
+                    try:
+                        if self._hardcover_sync.sync_user(user_id, creds):
+                            synced_this_user = True
+                    except Exception as e:
+                        logger.error("Hardcover annotation sync failed for user %s: %s", user_id, e, exc_info=True)
 
                 if synced_this_user:
                     synced_users += 1

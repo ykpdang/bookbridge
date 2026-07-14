@@ -2,11 +2,19 @@
 
 ## Common Issues
 
+### Do I need Storyteller?
+
+No. Storyteller is an optional integration. The bridge does audio ↔ ebook alignment itself
+using built-in Whisper transcription (or the EPUB's SMIL data), so cross-format sync works
+with just an audio source and an ebook client. Add Storyteller only if you actually use the
+Storyteller read-along app — the bridge will then sync its position and use its transcripts
+as a bonus alignment source.
+
 ### Books are not showing up
 
 - Make sure your `/books` volume is mounted correctly in `docker-compose.yml`.
 - Check file permissions for the user running the container.
-- If the missing books should come from Grimmory, run **Settings -> Refresh Grimmory Cache**.
+- If the missing books should come from Grimmory, run **Settings -> System -> Advanced -> Refresh Grimmory Cache**.
 - If the missing books should come from BookOrbit, confirm BookOrbit is enabled, test the connection, and retry the matching flow.
 - If the missing books should come from CWA, confirm CWA is enabled, test the connection, and make sure the book is visible in Calibre-Web Automated.
 
@@ -25,6 +33,14 @@
 - If using custom polling, check the CWA sync poll interval and make sure it is not set higher than expected.
 - Confirm the book is linked to a CWA ebook entry; CWA progress only appears for books the bridge can resolve through CWA.
 
+### BookFusion progress or highlights are not syncing
+
+- Open **Account -> My Integrations** and confirm BookFusion is linked and enabled for that reader.
+- If you entered a token manually, BookFusion API keys are available from the [BookFusion Calibre integration page](https://www.bookfusion.com/integrations/calibre).
+- Confirm the book is linked to a BookFusion book ID. If the book only exists locally, the dashboard link flow can **Upload to BookFusion** — this needs the reader's Calibre API key in My Integrations.
+- For highlights, also enable **BookFusion -> Highlight Sync** for that reader and keep the current **Bridge Sync** KOReader plugin installed on devices that should exchange annotations.
+- If using custom polling, check the BookFusion poll interval and make sure it is not set higher than expected.
+
 ### Grimmory or BookOrbit audiobook links are not syncing
 
 - Confirm the source is enabled and the audiobook still exists in the selected Grimmory or BookOrbit library.
@@ -42,9 +58,12 @@
 
 - Update the **Bridge Sync** KOReader plugin to the current release or newer on every KOReader device that should sync annotations.
 - Plain KOReader/KOSync progress sync does not sync annotations. In KOReader, use **Tools -> Bridge Sync -> Sync Highlights** or **Sweep All Highlights**.
-- In Settings, make sure **KOReader -> Highlight Sync** is enabled.
-- For Grimmory web-reader annotations, enable **Highlight Sync** in that reader's Grimmory / BookLore Integrations.
+- Make sure **Highlight Sync** is enabled on the **Settings -> Integrations -> KOReader / KoSync** card.
+- For Grimmory web-reader annotations, enable **Highlight Sync** in that reader's Grimmory integration.
 - For BookOrbit web-reader highlights, fill in the BookOrbit KOReader sync username/password in that reader's Integrations and make sure the owner matches the BookOrbit user.
+- For BookFusion, enable **BookFusion -> Highlight Sync** in that reader's Integrations and confirm the book is linked to BookFusion.
+- For Readest, enable **Readest -> Highlight Sync** and enter that reader's Readest email/password.
+- For Hardcover, enable **Hardcover -> Highlight Sync** and enter that reader's Hardcover API token.
 
 ### Storyteller transcripts are not found
 

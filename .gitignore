@@ -39,3 +39,22 @@ dist/
 # Local System Rules
 .cursorrules
 BRANCH_STATUS.md
+CLAUDE.md
+AGENTS.md
+.claude/
+
+# Automated review pipeline (local-only: OpenCode + OmniRoute scheduled reviewer)
+opencode.json
+docs/automated-review/
+scripts/automated-review/
+
+# Omni-bridge MCP handoff (local-only: Claude/Codex <-> OmniRoute implementation bridge)
+.mcp.json.example
+docs/omni-bridge.md
+scripts/omni_bridge/
+tests/test_omni_mcp_server.py
+
+# Local planning/scratch documents (agent working notes, not shipped docs)
+plans/
+phase1_schema_design.md
+pytest_output.txt

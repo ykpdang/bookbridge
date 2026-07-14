@@ -135,9 +135,10 @@ class Book(Base):
     transcript_file = Column(String(500))
     status = Column(String(50), default='active')
     duration = Column(Float)  # Duration in seconds from AudioBookShelf
-    sync_mode = Column(String(20), default='audiobook')  # 'audiobook' or 'ebook_only'
+    sync_mode = Column(String(20), default='audiobook')  # 'audiobook', 'audiobook_only', or 'ebook_only'
     transcript_source = Column(String(32), nullable=True)  # 'storyteller', 'smil', 'whisper'
     storyteller_uuid = Column(String(36), index=True, nullable=True)
+    bookfusion_id = Column(String(255), nullable=True, index=True)
     abs_ebook_item_id = Column(String(255), nullable=True)  # New ID to track ebook item separately
     series_name = Column(String(500), nullable=True, index=True)
     series_sequence = Column(Float, nullable=True)
@@ -164,7 +165,7 @@ class Book(Base):
                  kosync_doc_id: str = None, transcript_file: str = None,
                  status: str = 'active', duration: float = None, sync_mode: str = 'audiobook',
                  transcript_source: str = None,
-                 storyteller_uuid: str = None, abs_ebook_item_id: str = None,
+                 storyteller_uuid: str = None, bookfusion_id: str = None, abs_ebook_item_id: str = None,
                  series_name: str = None, series_sequence: float = None,
                  user_id: int = None):
         self.abs_id = abs_id
@@ -187,6 +188,7 @@ class Book(Base):
         self.sync_mode = sync_mode
         self.transcript_source = transcript_source
         self.storyteller_uuid = storyteller_uuid
+        self.bookfusion_id = bookfusion_id
         self.abs_ebook_item_id = abs_ebook_item_id
         self.series_name = series_name
         self.series_sequence = series_sequence
@@ -666,6 +668,18 @@ class KoreaderAnnotation(Base):
     # Grimmory reader-note (book_notes_v2) id — a separate remote store with its
     # own id space; a row mirrors at most one of annotations/notes per field.
     booklore_note_id = Column(Integer, nullable=True, index=True)
+    # Readest spoke bookkeeping
+    readest_note_id = Column(String(32), nullable=True, index=True)
+    readest_synced_at = Column(DateTime, nullable=True)
+    readest_deleted_at = Column(DateTime, nullable=True)
+    # Hardcover spoke bookkeeping (highlight id on hardcover.app)
+    hardcover_highlight_id = Column(Integer, nullable=True, index=True)
+    hardcover_synced_at = Column(DateTime, nullable=True)
+    # BookFusion spoke bookkeeping
+    bookfusion_highlight_id = Column(Integer, nullable=True, index=True)
+    bookfusion_version = Column(Integer, nullable=True)
+    bookfusion_synced_at = Column(DateTime, nullable=True)
+    bookfusion_deleted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, index=True)
 
@@ -869,6 +883,79 @@ class UserBook(Base):
         return f"<UserBook(user_id={self.user_id}, abs_id='{self.abs_id}')>"
 
 
+class UserBookFusionLink(Base):
+    """Per-user link between a shared BookBridge book and a BookFusion book."""
+    __tablename__ = 'user_bookfusion_links'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    abs_id = Column(String(255), ForeignKey('books.abs_id', ondelete='CASCADE'), nullable=False, index=True)
+    bookfusion_id = Column(String(255), nullable=False)
+    title = Column(String(500), nullable=True)
+    author = Column(String(500), nullable=True)
+    created_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index('ix_user_bookfusion_links_user_abs', 'user_id', 'abs_id', unique=True),
+        Index('ix_user_bookfusion_links_user_bookfusion', 'user_id', 'bookfusion_id', unique=True),
+    )
+
+    def __init__(self, user_id: int, abs_id: str, bookfusion_id: str,
+                 title: str = None, author: str = None):
+        self.user_id = user_id
+        self.abs_id = abs_id
+        self.bookfusion_id = str(bookfusion_id)
+        self.title = title
+        self.author = author
+        now = utcnow()
+        self.created_at = now
+        self.updated_at = now
+
+    def __repr__(self):
+        return f"<UserBookFusionLink(user_id={self.user_id}, abs_id='{self.abs_id}', bookfusion_id='{self.bookfusion_id}')>"
+
+
+class UserBookOrbitLink(Base):
+    """Per-user link between a shared BookBridge book and BookOrbit remote IDs.
+
+    Carries both optional per-user BookOrbit identities (ebook_id and audio_id)
+    plus useful title/author metadata and timestamps.  One link per
+    ``(user_id, abs_id)``; provider IDs are NOT globally unique because the same
+    remote identity may legitimately be shared across users.
+    """
+    __tablename__ = 'user_bookorbit_links'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    abs_id = Column(String(255), ForeignKey('books.abs_id', ondelete='CASCADE'), nullable=False, index=True)
+    ebook_id = Column(String(255), nullable=True)
+    audio_id = Column(String(255), nullable=True)
+    title = Column(String(500), nullable=True)
+    author = Column(String(500), nullable=True)
+    created_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index('ix_user_bookorbit_links_user_abs', 'user_id', 'abs_id', unique=True),
+    )
+
+    def __init__(self, user_id: int, abs_id: str, ebook_id: str = None,
+                 audio_id: str = None, title: str = None, author: str = None):
+        self.user_id = user_id
+        self.abs_id = abs_id
+        self.ebook_id = str(ebook_id) if ebook_id else None
+        self.audio_id = str(audio_id) if audio_id else None
+        self.title = title
+        self.author = author
+        now = utcnow()
+        self.created_at = now
+        self.updated_at = now
+
+    def __repr__(self):
+        return f"<UserBookOrbitLink(user_id={self.user_id}, abs_id='{self.abs_id}', ebook_id='{self.ebook_id}', audio_id='{self.audio_id}')>"
+
+
 # Database configuration
 class DatabaseManager:
     """
@@ -891,12 +978,16 @@ class DatabaseManager:
         self._filesystem_type = self._filesystem_type_for_path(self.db_path)
         self._journal_mode_logged = False
         self._journal_mode_warned = False
+        # Give blocked writers a bounded chance to outlive ordinary lock
+        # contention. This is an internal database safety policy, not a runtime
+        # setting: the settings database is unavailable until this engine exists.
+        self._busy_timeout_ms = 60_000
         # Increase timeout to reduce lock errors, allow multi-thread access.
         # Using 4 slashes guarantees an absolute path in SQLAlchemy
         self.engine = create_engine(
             f'sqlite:///{self.db_path}',
             echo=False,
-            connect_args={'timeout': 30, 'check_same_thread': False}
+            connect_args={'timeout': self._busy_timeout_ms / 1000, 'check_same_thread': False}
         )
 
         journal_mode = self._resolve_journal_mode()
@@ -912,6 +1003,9 @@ class DatabaseManager:
             cursor.execute(f"PRAGMA journal_mode={journal_mode}")
             actual_journal_mode = (cursor.fetchone() or [""])[0]
             cursor.execute("PRAGMA synchronous=NORMAL")
+            # Apply the busy timeout to every connection (not just the primary
+            # pool) so blocked writers wait rather than failing immediately.
+            cursor.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
             if not self._journal_mode_logged:
                 logger.info(
                     "SQLite journal mode for '%s': requested=%s actual=%s filesystem=%s",

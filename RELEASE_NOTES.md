@@ -1,43 +1,51 @@
-# Release Notes - 7.1.0
+# Release Notes - 7.2.0
 
-The headline change is **a fuller reading-state bridge**. BookBridge now syncs more than reading position: highlights, notes, web-reader annotations, BookOrbit audiobook progress, and richer service metadata all participate in the same account-aware bridge. This release is less about chasing individual feature bugs and more about making the bridge a steadier place where every reader, source, and device can agree on what changed most recently.
+The headline change is **reader-owned integrations, full BookFusion support, and a more reliable BridgeSync**. BookBridge now gives every reader a self-service place to manage their own service accounts, connects to BookFusion for progress, highlight, and book-upload sync, reorganizes Settings and Integrations around a clearer per-service layout, and makes large-library synchronization faster and more resilient.
 
-Highlight and note sync requires the **BridgeSync KOReader plugin from this release or newer**. Standard KOReader/KOSync progress sync continues to work without it, but the new annotation features only run through the updated BridgeSync plugin.
+Highlight and note sync still requires the **BridgeSync KOReader plugin from 7.1.0 or newer**. Standard KOReader/KOSync progress sync continues to work without it, but annotation exchange, sweep, close-capture, and managed collection features use the updated plugin. Install the latest bundled plugin (0.5.4) for the reliability improvements below. Devices that briefly installed BridgeSync 0.5.0 must reinstall manually because that disabled build cannot run its own updater.
 
 ## Added
 
-- **Highlights and notes sync** - KOReader annotations can now move between devices and the Grimmory and BookOrbit web readers when the updated BridgeSync plugin is installed. Each reader keeps their own annotation set, deletions travel intentionally, and stable identity keys reduce accidental cross-device highlight churn.
-- **BridgeSync annotation actions** - the KOReader plugin adds highlight sync and sweep controls, captures annotations when books close, and includes safer plugin self-updates.
-- **BridgeSync download for every reader** - the plugin download now appears on each user's Account page, so regular readers can install or update it without admin Settings access.
-- **BookOrbit audiobook sync** - BookOrbit-hosted audiobooks can now act as the audio side of a mapping, including multi-file track position conversion and BookOrbit reading-session logging.
-- **ABS ebook participation in combined entries** - Audiobookshelf ebook progress now stays in the sync loop even when the same mapped book also has audiobook progress.
-- **Rich progress metadata** - service-native update timestamps, status, and locator metadata are persisted so the sync manager can tell stale resurfaced states apart from real reading movement.
-- **Add / Update Book KOSync document management** - recent unlinked KOSync document hashes can now be reviewed, linked to the right book, copied, unlinked, or deleted from Add / Update Book.
-- **Choice of LLM provider** - the optional AI features (match suggestions, alignment rescue) now work with Ollama, OpenAI, or an OpenAI-compatible local server such as llama-server or llama-swap, selectable from Settings. Ollama remains the default, existing configurations are unchanged, and features still fall back to normal behavior when the provider is unreachable.
+- **Audiobook-only mappings** - Add / Update Book, the legacy Match page, and
+  Batch Match can link an Audiobookshelf, Grimmory, or BookOrbit audiobook
+  without an ebook. These mappings activate immediately, avoid EPUB/hash,
+  transcript, and Forge work, and use percentage fallback when no locator EPUB
+  exists.
+- **BookFusion progress and highlight sync** - readers can link their own BookFusion account and sync reading progress with a real navigation anchor (chapter index, spine-normalized position, and CFI), so books reopen where they were left off. Highlights relay through the annotation hub using a fresh UTF-16 offset/xpointer mapper and a stable creation-time identity key, so BookFusion's own timestamp churn never gets mistaken for an edit or deletion on your other devices.
+- **BookFusion book upload, including the Storyteller ReadAloud edition** - when BookFusion's search finds no match for a book with a local EPUB, the dashboard offers to upload it via BookFusion's Calibre upload API. Books linked to Storyteller can instead upload the full ReadAloud EPUB3 (SMIL media overlays plus narration audio) so BookFusion's own read-aloud feature has something to read. Upload failures report a specific reason, including when a file exceeds your BookFusion account's own upload size limit.
+- **Self-service reader integrations** - each signed-in reader now has Account -> My Integrations, where they can manage service usernames, passwords, tokens, API keys, and per-user sync toggles. Admins can still manage those same fields for any reader from Settings -> Users.
+- **Readest and Hardcover annotation spokes** - Readest cloud highlights and Hardcover annotations participate in the annotation hub using each reader's own account configuration; per-spoke version acknowledgments mean an annotation is only re-sent when its content actually changed, and edits made in Readest propagate back to your KOReader devices.
+- **BridgeSync collections from Grimmory or Hardcover** - KOReader collection manifests can use either Grimmory shelves or Hardcover lists as the source, configured per reader.
+- **Grimmory shelves to Hardcover lists** - readers can optionally mirror Grimmory shelf membership into Hardcover lists, with modes for all shelves, magic shelves, or regular shelves.
+- **KoSync document reads warn on ambiguous user scope** - bulk KoSync document/state/book reads accept an optional user scope and log a warning when called without one, making it easier to spot an operation that could silently default to the wrong reader in a multi-user install.
 
 ## Changed
 
-- **Progress arbitration is more conservative about rollbacks** - stale service states are suppressed, and candidates that would clearly move a newer peer backward are vetoed while still allowing genuine rereads and forward movement.
-- **Annotation sync is source-aware and account-aware** - BookOrbit ownership checks, Grimmory note sub-spokes, and lossy-spoke handling keep web-reader annotations attached to the right reader and the right highlight identity.
-- **Storyteller compatibility is steadier** - BookBridge supports the newer Storyteller v2 API shape, keeps a legacy fallback, and detects meaningful locator changes even when the rounded percentage has not changed.
-- **Alignment lookups are faster** - large parsed alignment maps are cached during repeat sync work and refreshed when a map is rebuilt.
-- **Settings match the per-user model** - Grimmory highlight sync is configured from each reader's Integrations page, where that reader's credentials live, with clearer KOReader and BookOrbit setup notes in the admin view.
-- **Add / Update Book search resets after queueing** - after adding a book to the queue, the search box clears for the next lookup.
+- **Settings and Integrations got a full reorganization** - every service now has one card, one name, and one position, identical between the admin Settings -> Integrations panel and each reader's Account -> My Integrations page, with a monogram badge, a one-line description, and a status pill (Configured / Not configured / Per-user accounts). The admin sidebar is now Integrations / Sync / Features / AI / System / Users / Logs; old settings bookmarks keep working.
+- **Integration settings follow the reader** - user-owned credentials live with the reader, either in Account -> My Integrations or in the admin-managed user integrations page. Global Settings keep shared engine behavior such as server URLs, poll intervals, and daemon-level options.
+- **KOReader collection controls are per-reader** - the collection source selector now lives under each reader's KOReader Collections integration group, making Hardcover-list collections discoverable even when Grimmory is disabled.
+- **Connecting a KOReader device moved to My Account** - the sync-server address and the BridgeSync plugin download now live in a step-by-step "Connect a KOReader device" card on the Account page, instead of being buried in admin settings.
+- **Docs got a clarity pass** - the site now leads with "what do you actually need?" and states plainly that Storyteller is optional (the bridge does its own audio/ebook alignment with built-in Whisper transcription); BookFusion uploads, the per-user KOSync login model, and StoryGraph are now documented.
+- **BridgeSync handles large libraries and competing sync requests more reliably** - annotation and statistics uploads are bounded and acknowledgment-gated, paged results are drained completely, and overlapping work is serialized and coalesced. On-device status, safer payload handling, xpointer repair, semantic update checks, and translated interface strings make failures easier to diagnose and recover.
+- **EPUB position resolution is substantially faster** - BookBridge shares cached book paths (bounded to a configured LRU size) between the parser and sync manager, bypasses unnecessary scans for managed cache files, and avoids parsing the same EPUB twice while resolving generated XPath positions. (#318)
 
 ## Fixed
 
-- **Audiobookshelf listener recovery** - dropped Socket.IO listeners now revive automatically instead of requiring a restart.
-- **Split-root same-folder suggestions** - same-folder matching no longer over-suggests when split-root paths only look related, and selected source paths stay anchored when filenames are easy to confuse.
-- **Per-user connection test placement** - general settings no longer show stale global test buttons for credentials that now live per reader.
-- **BridgeSync update packaging** - plugin self-updates locate `_meta.lua` instead of depending on one zip layout.
-- **KOReader null-note handling** - BridgeSync strips JSON-null sentinels so empty notes do not crash KOReader.
+- **Shelf-watch matching is now scoped per reader** - global and custom polling
+  use each user's own library client and candidate pool, shared mappings are
+  claimed through `UserBook`, and per-user BookOrbit ebook/audio IDs are stored
+  in a link table so one reader's library identity cannot be used for another
+  reader. (#318)
+- **Manually selected KoSync hashes now stay selected** - previous and served-file hashes remain linked as siblings, so devices and progress resolve through either EPUB build without a manifest refresh replacing the chosen primary hash. (#316)
+- **Mark Complete and audiobook completion are more reliable** - BookBridge filters clients by book type and support and records completion only after a successful remote update; Audiobookshelf's finished flag resolves progress to the book duration, Mark Complete persists service-native audio-position timestamps, and significance checks normalize every client to a percentage delta before applying thresholds. (#318)
+- **Fresh external KoSync progress no longer loses zero-delta discrepancy resolution** - leader selection now retains an explicit recent external activity signal instead of rolling a device back to a stale service position when its ordinary delta happens to be zero.
+- **Background work shuts down and resumes safely** - deleting a mapping cancels its transcription worker without allowing a late save to recreate it, while restart recovery serializes pending full Forge uploads. (#313, #314)
+- **Routine incomplete or temporarily locked data no longer aborts maintenance work** - suggestion scans skip unusable Audiobookshelf duration records, and KOReader statistics writes retry ordinary SQLite lock contention. (#312, #315)
+- **Audiobookshelf instant sync applies live debounce changes safely** - listener replacements no longer leak debounce workers, and self-write suppression remains active across longer debounce intervals.
+- **Multi-user access checks tightened across several endpoints** - cover proxy endpoints verify book ownership before serving images, the Forge active-tasks API scopes non-admin callers to books they own, and admin-only diagnostic endpoints carry an explicit admin guard matching the existing before-request check.
+- **BridgeSync 0.5.4 is more reliable under real device conditions** - managed paths on Kobo and Kindle storage tolerate case-only mount-directory differences, managed files count as deleted only after both the EPUB and its sidecar are removed, reading-session uploads are acknowledged and retried per session without inflating reading statistics on retry, and book deletion cleans up user membership rows explicitly.
+- **Locator spine-position resolver and stabilization fixes from automated review** - synthetic inter-spine separators, trailing empty navigation/cover documents, CFI values that were off by over 100K characters, silent zero-error XPath failures, and un-round-trippable regenerated CFI are all resolved or rejected before reaching Grimmory or BookOrbit. See `docs/automated-review/BUG_REPORT.md` for the full defect analysis.
 
-## Upgrading
+## Operational Notes
 
-Database migrations apply automatically on startup. KOReader users must update the BridgeSync plugin to this release's version or newer to use highlight and note sync, sweep, close-capture, and the updater reliability improvements.
-
-## Known limitations
-
-- Web-reader annotation sync depends on the matching source credentials being configured for each reader.
-- Highlight and note sync is available through the updated BridgeSync KOReader plugin only; older plugin versions and plain KOSync progress clients will keep syncing position but will not sync annotations.
-- BookOrbit annotation relay requires ownership to be clear before BookBridge will write highlights into a BookOrbit account.
+Database migrations apply automatically on startup. BookFusion support now covers progress, highlight, and book-upload sync, including the Storyteller ReadAloud edition. Web-reader annotation sync depends on the matching source credentials being configured for each reader. Restart BookBridge after updating, and install the latest bundled BridgeSync plugin on KOReader devices to receive the plugin-side reliability improvements.

@@ -8,7 +8,7 @@ import tempfile
 import os
 import json
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, call, patch
 import sys
 
 # Add project root to Python path
@@ -42,6 +42,7 @@ class MockContainer:
         self.mock_sync_clients = Mock()
         self.mock_forge_service = Mock()
         self.mock_forge_service.active_tasks = set()
+        self.mock_user_client_registry = Mock()
 
         # Configure the sync manager to return our mock clients
         self.mock_sync_manager.abs_client = self.mock_abs_client
@@ -77,6 +78,9 @@ class MockContainer:
 
     def forge_service(self):
         return self.mock_forge_service
+
+    def user_client_registry(self):
+        return self.mock_user_client_registry
 
     def sync_clients(self):
         """Return mock sync clients for integrations."""
@@ -701,6 +705,65 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
         finally:
             src.web_server.get_kosync_id_for_ebook = original_get_kosync
 
+    def test_match_endpoint_creates_abs_audio_only_mapping(self):
+        """Audio-only ABS mappings do not require an EPUB or KOSync hash."""
+        from src.db.models import Book
+
+        self.mock_abs_client.get_all_audiobooks.return_value = [
+            {
+                'id': 'audio-only-abs-1',
+                'media': {'metadata': {'title': 'Audio Only Title'}, 'duration': 1800},
+            }
+        ]
+        self.mock_database_service.get_book.return_value = None
+        self.mock_database_service.get_book_by_audio_source.return_value = None
+        self.mock_abs_client.is_configured.return_value = True
+
+        response = self.client.post('/match', data={
+            'audiobook_id': 'audio-only-abs-1',
+            'audio_source': 'ABS',
+            'audio_source_id': 'audio-only-abs-1',
+            'audio_title': 'Audio Only Title',
+            'audio_duration': '1800',
+            'audio_provider_book_id': 'audio-only-abs-1',
+            'audio_only': 'true',
+        })
+
+        self.assertEqual(response.status_code, 302)
+        saved_book = self.mock_database_service.save_book.call_args[0][0]
+        self.assertIsInstance(saved_book, Book)
+        self.assertEqual(saved_book.abs_id, 'audio-only-abs-1')
+        self.assertEqual(saved_book.audio_source, 'ABS')
+        self.assertEqual(saved_book.audio_source_id, 'audio-only-abs-1')
+        self.assertEqual(saved_book.sync_mode, 'audiobook_only')
+        self.assertEqual(saved_book.status, 'active')
+        self.assertIsNone(saved_book.ebook_filename)
+        self.assertIsNone(saved_book.kosync_doc_id)
+        self.mock_abs_client.add_to_collection.assert_called_once()
+
+    def test_match_endpoint_creates_booklore_audio_only_mapping(self):
+        """Library-backed audiobook sources use their namespaced bridge key."""
+        self.mock_database_service.get_book.return_value = None
+        self.mock_database_service.get_book_by_audio_source.return_value = None
+
+        response = self.client.post('/match', data={
+            'audio_source': 'BookLore',
+            'audio_source_id': 'grimmory-audio-7',
+            'audio_title': 'Grimmory Audio Only',
+            'audio_duration': '2400',
+            'audio_provider_book_id': 'grimmory-audio-7',
+            'audio_only': 'true',
+        })
+
+        self.assertEqual(response.status_code, 302)
+        saved_book = self.mock_database_service.save_book.call_args[0][0]
+        self.assertEqual(saved_book.abs_id, 'booklore:grimmory-audio-7')
+        self.assertEqual(saved_book.audio_source, 'BookLore')
+        self.assertEqual(saved_book.sync_mode, 'audiobook_only')
+        self.assertEqual(saved_book.status, 'active')
+        self.assertIsNone(saved_book.ebook_filename)
+        self.assertIsNone(saved_book.kosync_doc_id)
+
     def test_storyteller_unlink_removes_from_collection_by_uuid(self):
         """Unlinking Storyteller should remove the prior UUID from Storyteller collection."""
         from src.db.models import Book
@@ -749,6 +812,35 @@ class CleanFlaskIntegrationTest(unittest.TestCase):
             'Synced with KOReader'
         )
         self.mock_database_service.delete_book.assert_called_once_with('delete-st-1')
+
+    def test_delete_mapping_defers_audio_cleanup_for_active_worker(self):
+        """Issue #313: delete the row first and let the cancelled worker clean its cache."""
+        from src.db.models import Book
+
+        test_book = Book(
+            abs_id='delete-active-worker',
+            abs_title='Delete Active Worker',
+            status='processing',
+        )
+        self.mock_database_service.get_book.return_value = test_book
+        self.mock_manager.cancel_background_job.return_value = True
+        sequence = MagicMock()
+        sequence.attach_mock(self.mock_manager.cancel_background_job, 'cancel')
+        sequence.attach_mock(self.mock_database_service.delete_book, 'delete')
+
+        with patch('src.web_server.cleanup_mapping_resources') as mock_cleanup:
+            sequence.attach_mock(mock_cleanup, 'cleanup')
+            response = self.client.post('/delete/delete-active-worker')
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            sequence.mock_calls,
+            [
+                call.cancel('delete-active-worker'),
+                call.delete('delete-active-worker'),
+                call.cleanup(test_book, defer_audio_cache=True),
+            ],
+        )
 
     def test_delete_mapping_infers_storyteller_uuid_from_filename(self):
         """Deleting a mapping should infer Storyteller UUID from filename when DB UUID is missing."""

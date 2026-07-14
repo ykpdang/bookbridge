@@ -21,6 +21,7 @@ class MockContainer:
     def sync_manager(self): return self.mock_sync_manager
     def abs_client(self): return Mock()
     def booklore_client(self): return Mock()
+    def bookfusion_client(self): return Mock()
     def storyteller_client(self): return Mock()
     def hardcover_client(self): return Mock()
     def storygraph_client(self): return Mock()
@@ -64,6 +65,7 @@ class TestSettingsComprehensive(unittest.TestCase):
             'KOSYNC_ENABLED',
             'STORYTELLER_ENABLED',
             'BOOKLORE_ENABLED',
+            'BOOKFUSION_ENABLED',
             'GRIMMORY_READING_SESSIONS',
             'CWA_ENABLED',
             'CWA_SYNC_ENABLED',
@@ -152,7 +154,7 @@ class TestSettingsComprehensive(unittest.TestCase):
         test_data = {
             'TZ': 'Europe/Paris',
             'SYNC_PERIOD_MINS': '15',
-            'ABS_SERVER': 'http://test.com'
+            'ABS_SERVER': 'http://test.com',
         }
         
         response = self.client.post('/settings', data=test_data)
@@ -217,6 +219,15 @@ class TestSettingsComprehensive(unittest.TestCase):
         self.assertIn('name="ABS_SERVER"', html)
         self.assertIn('name="BOOKLORE_SERVER"', html)
         self.assertIn('name="BOOKLORE_SHELF_WATCH_NAME"', html)
+
+    def test_settings_get_points_device_sync_collections_to_user_integrations(self):
+        html = self._render_settings_template_source()
+
+        self.assertIn('KOReader Collections', html)
+        self.assertIn('Settings -> Users -> (user) -> Integrations', html)
+        self.assertNotIn('name="DEVICE_SYNC_COLLECTION_SOURCE"', html)
+        self.assertNotIn('name="DEVICE_SYNC_HARDCOVER_LISTS"', html)
+        self.assertNotIn('name="DEVICE_SYNC_HARDCOVER_LIST_NAMES"', html)
 
     @patch('src.web_server.restart_server')
     def test_custom_whisper_model_is_saved_without_being_forced_to_builtin(self, mock_restart):

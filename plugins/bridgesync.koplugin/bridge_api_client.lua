@@ -6,6 +6,7 @@ local logger = require("logger")
 local socketutil = require("socketutil")
 
 local KOSYNC_ACCEPT = "application/vnd.koreader.v1+json"
+local MAX_JSON_BODY_BYTES = 900 * 1024
 
 -- A JSON null decodes to a non-nil sentinel (a function/userdata in KOReader's
 -- json lib), which is truthy and, if it reaches a KOReader annotation field,
@@ -205,6 +206,12 @@ function APIClient:_requestJSON(method, path, json_body, timeout_opts)
     if self.server_url == "" then
         return false, nil, "Server URL not configured"
     end
+    if type(json_body) ~= "string" then
+        return false, nil, "Invalid JSON request body"
+    end
+    if #json_body > MAX_JSON_BODY_BYTES then
+        return false, nil, "Request body is too large"
+    end
 
     local url = self.server_url .. path
     self:_log("info", method, url)
@@ -323,6 +330,15 @@ function APIClient:uploadSessions(sessions)
         block_timeout = 20,
         total_timeout = 60,
         attempts = 2,
+    })
+end
+
+function APIClient:uploadClientLogs(payload)
+    local body = json.encode(payload)
+    return self:_requestJSON("POST", "/koreader/device-sync/logs", body, {
+        block_timeout = 5,
+        total_timeout = 10,
+        attempts = 1,
     })
 end
 

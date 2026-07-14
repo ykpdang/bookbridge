@@ -19,6 +19,8 @@ from src.api.storyteller_api import StorytellerAPIClient
 from src.api.cwa_client import CWAClient
 from src.api.cwa_sync_api import CWASyncApi
 from src.api.bookorbit_client import BookOrbitClient
+from src.api.bookfusion_client import BookFusionClient
+from src.api.bookfusion_upload_client import BookFusionUploadClient
 from src.api.booklore_client import BookloreClient
 from src.api.hardcover_client import HardcoverClient
 from src.api.storygraph_client import StorygraphClient
@@ -28,6 +30,7 @@ from src.sync_clients.abs_ebook_sync_client import ABSEbookSyncClient
 from src.sync_clients.kosync_sync_client import KoSyncSyncClient
 from src.sync_clients.storyteller_sync_client import StorytellerSyncClient
 from src.sync_clients.booklore_sync_client import BookloreSyncClient
+from src.sync_clients.bookfusion_sync_client import BookFusionSyncClient
 from src.sync_clients.booklore_audio_sync_client import BookLoreAudioSyncClient
 from src.sync_clients.bookorbit_sync_client import BookOrbitSyncClient
 from src.sync_clients.bookorbit_audio_sync_client import BookOrbitAudioSyncClient
@@ -48,6 +51,8 @@ class UserClients:
     storyteller_client: object
     cwa_client: object
     bookorbit_client: object
+    bookfusion_client: object
+    bookfusion_upload_client: object
     booklore_client: object
     hardcover_client: object
     storygraph_client: object
@@ -112,6 +117,8 @@ class UserClientRegistry:
         cwa_client = CWAClient(credentials=creds)
         cwa_sync_api = CWASyncApi(cwa_client=cwa_client, credentials=creds)
         bookorbit_client = BookOrbitClient(ollama_client=self.ollama_client, credentials=creds)
+        bookfusion_client = BookFusionClient(credentials=creds, database_service=db, user_id=user_id)
+        bookfusion_upload_client = BookFusionUploadClient(credentials=creds, database_service=db, user_id=user_id)
         booklore_client = BookloreClient(database_service=db, ollama_client=self.ollama_client, credentials=creds)
         hardcover_client = HardcoverClient(credentials=creds)
         storygraph_client = StorygraphClient(credentials=creds)
@@ -134,9 +141,10 @@ class UserClientRegistry:
             "KoSync": KoSyncSyncClient(kosync_client, ep),
             "Storyteller": StorytellerSyncClient(storyteller_client, ep, db),
             "BookLore": BookloreSyncClient(booklore_client, ep),
+            "BookFusion": BookFusionSyncClient(bookfusion_client, ep, database_service=db, user_id=user_id),
             "BookLoreAudio": BookLoreAudioSyncClient(booklore_client, ep, alignment_service=align),
-            "BookOrbit": BookOrbitSyncClient(bookorbit_client, ep),
-            "BookOrbitAudio": BookOrbitAudioSyncClient(bookorbit_client, ep, alignment_service=align),
+            "BookOrbit": BookOrbitSyncClient(bookorbit_client, ep, database_service=db, user_id=user_id),
+            "BookOrbitAudio": BookOrbitAudioSyncClient(bookorbit_client, ep, alignment_service=align, database_service=db, user_id=user_id),
             "CWA": CWASyncClient(cwa_sync_api, cwa_client, ep),
             "Hardcover": HardcoverSyncClient(hardcover_client, ep, abs_client, db, ollama_client=self.ollama_client, booklore_client=booklore_client, bookorbit_client=bookorbit_client),
             "StoryGraph": StorygraphSyncClient(storygraph_client, ep, abs_client, db, ollama_client=self.ollama_client, booklore_client=booklore_client, bookorbit_client=bookorbit_client),
@@ -149,6 +157,8 @@ class UserClientRegistry:
             storyteller_client=storyteller_client,
             cwa_client=cwa_client,
             bookorbit_client=bookorbit_client,
+            bookfusion_client=bookfusion_client,
+            bookfusion_upload_client=bookfusion_upload_client,
             booklore_client=booklore_client,
             hardcover_client=hardcover_client,
             storygraph_client=storygraph_client,

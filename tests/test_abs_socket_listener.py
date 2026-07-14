@@ -2,6 +2,7 @@
 Tests for ABSSocketListener debounce logic and KoSync PUT instant sync trigger.
 """
 
+import os
 import threading
 import time
 import unittest
@@ -15,6 +16,12 @@ class TestABSSocketListenerDebounce(unittest.TestCase):
 
     def setUp(self):
         """Create listener with mocked dependencies."""
+        self.env = patch.dict(
+            os.environ,
+            {"ABS_SOCKET_DEBOUNCE_SECONDS": "1"},
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
         self.mock_db = MagicMock()
         self.mock_sync = MagicMock()
 
@@ -25,8 +32,6 @@ class TestABSSocketListenerDebounce(unittest.TestCase):
                 database_service=self.mock_db,
                 sync_manager=self.mock_sync,
             )
-        # Override debounce window to 1s for fast tests
-        self.listener._debounce_window = 1
 
     def _make_active_book(self, abs_id: str, title: str = "Test Book", user_id=None):
         book = MagicMock()
@@ -85,6 +90,28 @@ class TestABSSocketListenerDebounce(unittest.TestCase):
         # Give the daemon thread a moment
         time.sleep(0.1)
         self.mock_sync.sync_cycle.assert_called_once_with(target_abs_id="book-3", user_id=None)
+
+    def test_debounce_setting_change_applies_without_recreating_listener(self):
+        """A Settings UI change must affect an already-running listener."""
+        with patch.dict(os.environ, {"ABS_SOCKET_DEBOUNCE_SECONDS": "30"}):
+            with patch("src.services.abs_socket_listener.socketio.Client"):
+                listener = ABSSocketListener(
+                    abs_server_url="http://abs.local:13378",
+                    abs_api_token="test-token",
+                    database_service=self.mock_db,
+                    sync_manager=self.mock_sync,
+                )
+
+        book = self._make_active_book("dynamic-window", "Dynamic Window")
+        self.mock_db.get_book.return_value = book
+        listener._pending["dynamic-window"] = time.time() - 2
+
+        listener._check_and_fire()
+
+        time.sleep(0.1)
+        self.mock_sync.sync_cycle.assert_called_once_with(
+            target_abs_id="dynamic-window", user_id=None
+        )
 
     def test_no_double_fire(self):
         """Same event should not trigger sync twice."""
@@ -172,7 +199,6 @@ class TestABSSocketListenerDebounce(unittest.TestCase):
                 sync_manager=self.mock_sync,
                 user_id=7,
             )
-        listener._debounce_window = 1
         book = self._make_active_book("crawler-carl", "Dungeon Crawler Carl")
         self.mock_db.get_book.return_value = book
 
@@ -216,6 +242,34 @@ class TestABSSocketListenerDebounce(unittest.TestCase):
         time.sleep(0.1)
         self.mock_sync.sync_cycle.assert_not_called()
 
+    def test_long_debounce_still_suppresses_self_triggered_event(self):
+        """The suppression window must cover debounce plus scheduling slack."""
+        from src.services import write_tracker
+
+        os.environ["ABS_SOCKET_DEBOUNCE_SECONDS"] = "120"
+        with write_tracker._writes_lock:
+            write_tracker._recent_writes.clear()
+        self.addCleanup(write_tracker._recent_writes.clear)
+        write_tracker.record_write("ABS", "slow-debounce", user_id=3)
+        with write_tracker._writes_lock:
+            key = "3:ABS:slow-debounce"
+            _, pct = write_tracker._recent_writes[key]
+            write_tracker._recent_writes[key] = (time.time() - 90, pct)
+
+        book = self._make_active_book("slow-debounce", "Slow Debounce", user_id=3)
+        self.mock_db.get_book.return_value = book
+        self.listener._pending["slow-debounce"] = time.time() - 121
+
+        with self.assertLogs("src.services.abs_socket_listener", level="DEBUG") as logs:
+            self.listener._check_and_fire()
+
+        time.sleep(0.1)
+        self.mock_sync.sync_cycle.assert_not_called()
+        self.assertIn(
+            "ABS Socket.IO: Ignoring self-triggered event for 'Slow Debounce'",
+            "\n".join(logs.output),
+        )
+
     def test_global_listener_fans_out_to_all_claimants(self):
         """The global listener fires for EVERY user that claimed a shared book,
         not just the single owner column — otherwise co-claimants on the shared
@@ -238,6 +292,11 @@ class TestABSSocketListenerDebounce(unittest.TestCase):
             for c in self.mock_sync.sync_cycle.call_args_list
         }
         self.assertEqual(fired, {("shared-book", 3), ("shared-book", 5)})
+
+    def test_stop_signals_debounce_worker(self):
+        """Stopping a listener must terminate its private debounce loop."""
+        self.listener.stop()
+        self.assertTrue(self.listener._debounce_stop_event.is_set())
 
 
 class TestKosyncPutInstantSync(unittest.TestCase):

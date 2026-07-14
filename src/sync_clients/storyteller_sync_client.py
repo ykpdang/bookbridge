@@ -37,7 +37,11 @@ class StorytellerSyncClient(SyncClient):
         """Resolve the best EPUB context for Storyteller href/fragment operations."""
         current = getattr(book, "ebook_filename", None)
         if current and str(current).startswith("storyteller_"):
-            return current
+            try:
+                self.ebook_parser.resolve_book_path(current)
+                return current
+            except Exception:
+                pass
 
         storyteller_uuid = getattr(book, "storyteller_uuid", None)
         if storyteller_uuid:

@@ -819,6 +819,7 @@
             <input type="hidden" name="audio_cover_url" id="input_audio_cover_url">
             <input type="hidden" name="ebook_source" id="input_ebook_source">
             <input type="hidden" name="ebook_source_id" id="input_ebook_source_id">
+            <input type="hidden" name="audio_only" id="input_audio_only" value="">
             <input type="hidden" name="forge_stage_mode" id="input_forge_stage_mode">
 
             <div class="selection-container">
@@ -934,6 +935,13 @@
                     <div class="scrollable-content">
                         {% if ebooks %}
                         <div class="resource-grid">
+                            <label class="audiobook-option eb-option resource-card ghost-card audio-only-option"
+                                data-audio-only="true" onclick="selectItem(this, 'ebook_filename')">
+                                <input type="radio" name="ebook_filename" value="">
+                                <div class="resource-icon">🎧</div>
+                                <div class="resource-title">Audio only (no ebook)</div>
+                                <span class="source-badge">Audio only</span>
+                            </label>
                             {% set single_eb_match = ebooks|length == 1 %}
                             {% for eb in ebooks %}
                             <label
@@ -967,6 +975,12 @@
                             <h3>No ebooks found</h3>
                             <p>Try a different search term</p>
                         </div>
+                        <label class="audiobook-option eb-option resource-card ghost-card audio-only-option"
+                            data-audio-only="true" onclick="selectItem(this, 'ebook_filename')">
+                            <input type="radio" name="ebook_filename" value="">
+                            <div class="resource-icon">🎧</div>
+                            <div class="resource-title">Audio only (no ebook)</div>
+                        </label>
                         {% endif %}
                     </div>
                 </div>
@@ -1139,6 +1153,21 @@
                 document.getElementById('input_audio_cover_url').value = element.dataset.audioCoverUrl || '';
             }
 
+            if (groupName === 'ebook_filename') {
+                document.getElementById('input_audio_only').value = element.dataset.audioOnly === 'true' ? 'true' : '';
+                if (element.dataset.audioOnly === 'true') {
+                    document.querySelectorAll('.st-option input').forEach(input => { input.checked = input.value === ''; });
+                    document.querySelectorAll('.st-option').forEach(el => el.classList.remove('selected'));
+                    const stNone = document.querySelector('.st-option input[value=""]');
+                    if (stNone) stNone.closest('.st-option').classList.add('selected');
+                }
+            }
+
+            if (groupName === 'storyteller_uuid') {
+                document.getElementById('input_audio_only').value = '';
+                document.querySelectorAll('.audio-only-option').forEach(el => el.classList.remove('selected'));
+            }
+
             // If ebook option, populate hidden inputs for Forge
             if (groupName === 'ebook_filename') {
                 document.getElementById('input_source_type').value = element.dataset.sourceType || '';
@@ -1160,6 +1189,7 @@
             const st = document.querySelector('input[name="storyteller_uuid"]:checked');
             const eb = document.querySelector('input[name="ebook_filename"]:checked');
             const audioSource = document.getElementById('input_audio_source').value;
+            const audioOnly = document.getElementById('input_audio_only').value === 'true';
 
             const btn = document.getElementById('submitBtn');
             const msg = document.getElementById('validationMsg');
@@ -1173,14 +1203,16 @@
 
             let hasText = (stVal !== "") || (ebVal !== "");
 
-            if (hasText) {
+            if (hasText || (hasAudio && audioOnly)) {
                 btn.disabled = false;
                 btn.style.opacity = "1";
                 msg.style.display = "none";
             } else {
                 btn.disabled = true;
                 btn.style.opacity = "0.5";
-                msg.textContent = "Please select a text source (Storyteller or Standard Ebook)";
+                msg.textContent = hasAudio
+                    ? "Select a text source or choose Audio only"
+                    : "Please select a text source (Storyteller or Standard Ebook)";
                 msg.style.display = "block";
             }
 

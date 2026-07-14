@@ -847,6 +847,7 @@
                     <input type="hidden" name="ebook_source_id" id="selected_ebook_source_id" value="">
                     <input type="hidden" name="ebook_source_path" id="selected_ebook_source_path" value="">
                     <input type="hidden" name="storyteller_uuid" id="selected_storyteller_uuid" value="">
+                    <input type="hidden" name="audio_only" id="selected_audio_only" value="">
 
                     {% set single_ab_match = audiobooks|length == 1 %}
                     <h3 class="section-title"><span class="section-number">1</span>Select Audiobook</h3>
@@ -917,6 +918,12 @@
                     {% if ebooks %}
                     <div class="selection-grid-scroll">
                         <div class="resource-grid" id="ebook-card-grid">
+                        <div class="resource-card eb-card audio-only-card ghost-card"
+                            data-audio-only="true" onclick="selectAudioOnly(this)">
+                            <div class="resource-icon">🎧</div>
+                            <div class="resource-title">Audio only (no ebook)</div>
+                            <span class="source-badge">Audio only</span>
+                        </div>
                         {% for eb in ebooks %}
                         <div class="resource-card eb-card {% if single_eb_match %}selected{% endif %}"
                             data-value="{{ eb.name }}"
@@ -947,6 +954,11 @@
                     {% else %}
                     <div style="color: rgba(255,255,255,0.4); font-size: 13px; margin: 12px 0;">No ebooks found for this
                         search.</div>
+                    <div class="resource-card eb-card audio-only-card ghost-card"
+                        data-audio-only="true" onclick="selectAudioOnly(this)">
+                        <div class="resource-icon">🎧</div>
+                        <div class="resource-title">Audio only (no ebook)</div>
+                    </div>
                     {% endif %}
 
                     <button type="submit" class="btn btn-success add-to-queue-btn" id="addToQueueBtn" disabled
@@ -974,7 +986,14 @@
                         onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 40 60%22%3E%3Crect fill=%22%23667eea%22 width=%2240%22 height=%2260%22/%3E%3Ctext x=%2250%25%22 y=%2250%25%22 dominant-baseline=%22middle%22 text-anchor=%22middle%22 font-size=%2224%22 fill=%22white%22%3E📖%3C/text%3E%3C/svg%3E';">
                     <div class="queue-item-info">
                         <p class="queue-item-title" title="{{ item.abs_title }}">{{ item.abs_title }}</p>
-                        {% if item.storyteller_uuid %}
+                        {% if item.audio_only %}
+                        <p class="queue-item-ebook">
+                            <span style="color: #fbbf24; font-size: 11px;">🎧 Audio only</span>
+                            {% if item.audio_source %}
+                            <span class="source-badge {{ item.audio_source.lower().replace(' ', '') }}">{{ item.audio_source }}</span>
+                            {% endif %}
+                        </p>
+                        {% elif item.storyteller_uuid %}
                         <p class="queue-item-ebook">
                             <span style="color: #a78bfa; font-size: 11px;">⚡ Storyteller</span>{% if item.ebook_display_name %} + {{ item.ebook_display_name }}{% endif %}
                         </p>
@@ -1042,6 +1061,7 @@
         let selectedAudioSource = null;
         let selectedEbookFilename = null;
         let selectedStorytellerUuid = null;
+        let selectedAudioOnly = false;
         let batchSubmitInFlight = false;
 
         function showBatchSubmitFeedback(targetId, message) {
@@ -1139,6 +1159,8 @@
             });
             element.classList.add('selected');
             selectedEbookFilename = filename;
+            selectedAudioOnly = false;
+            document.getElementById('selected_audio_only').value = '';
             document.getElementById('selected_ebook_filename').value = filename;
             document.getElementById('selected_ebook_display_name').value = display_name || filename;
             document.getElementById('selected_ebook_source').value = element.dataset.sourceType || '';
@@ -1153,14 +1175,34 @@
             });
             element.classList.add('selected');
             selectedStorytellerUuid = uuid;
+            selectedAudioOnly = false;
+            document.getElementById('selected_audio_only').value = '';
+            document.querySelectorAll('.audio-only-card').forEach(el => el.classList.remove('selected'));
             document.getElementById('selected_storyteller_uuid').value = uuid;
+            updateAddButton();
+        }
+
+        function selectAudioOnly(element) {
+            document.querySelectorAll('.eb-card').forEach(el => el.classList.remove('selected'));
+            document.querySelectorAll('.st-card').forEach(el => el.classList.remove('selected'));
+            element.classList.add('selected');
+            selectedAudioOnly = true;
+            selectedEbookFilename = null;
+            selectedStorytellerUuid = null;
+            document.getElementById('selected_audio_only').value = 'true';
+            document.getElementById('selected_ebook_filename').value = '';
+            document.getElementById('selected_ebook_display_name').value = '';
+            document.getElementById('selected_ebook_source').value = '';
+            document.getElementById('selected_ebook_source_id').value = '';
+            document.getElementById('selected_ebook_source_path').value = '';
+            document.getElementById('selected_storyteller_uuid').value = '';
             updateAddButton();
         }
 
         function updateAddButton() {
             const btn = document.getElementById('addToQueueBtn');
-            // Valid if: audiobook selected AND (ebook selected OR a real storyteller UUID selected)
-            if (selectedAudioSource && (selectedEbookFilename || selectedStorytellerUuid)) {
+            // Valid if: audiobook selected AND (text selected OR audio-only selected)
+            if (selectedAudioSource && (selectedEbookFilename || selectedStorytellerUuid || selectedAudioOnly)) {
                 btn.disabled = false;
             } else {
                 btn.disabled = true;

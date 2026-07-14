@@ -22,10 +22,13 @@ class BookOrbitAudioSyncClient(SyncClient):
     within-file == absolute.
     """
 
-    def __init__(self, bookorbit_client: BookOrbitClient, ebook_parser: EbookParser, alignment_service=None):
+    def __init__(self, bookorbit_client: BookOrbitClient, ebook_parser: EbookParser,
+                 alignment_service=None, database_service=None, user_id: int = None):
         super().__init__(ebook_parser)
         self.client = bookorbit_client
         self.alignment_service = alignment_service
+        self._database_service = database_service
+        self._user_id = user_id
         self.delta_abs_thresh = float(os.getenv("SYNC_DELTA_ABS_SECONDS", 60))
 
     def is_configured(self) -> bool:
@@ -38,7 +41,11 @@ class BookOrbitAudioSyncClient(SyncClient):
         return {"audiobook"}
 
     def supports_book(self, book: Book) -> bool:
-        return getattr(book, "audio_source", None) == "BookOrbit"
+        if getattr(book, "audio_source", None) != "BookOrbit":
+            return False
+        if self._database_service is not None and self._user_id is not None:
+            return bool(self._database_service.resolve_bookorbit_audio_id(self._user_id, book))
+        return True
 
     @staticmethod
     def _coerce_id(value):
@@ -50,6 +57,21 @@ class BookOrbitAudioSyncClient(SyncClient):
             return value
 
     def _resolve_book_id(self, book: Book):
+        """Resolve the BookOrbit audio book ID for this mapping.
+
+        Prefers per-user UserBookOrbitLink audio_id, then shared legacy
+        audio_provider_book_id / audio_source_id.
+        """
+        # Per-user resolution first
+        if self._database_service is not None and self._user_id is not None:
+            resolved = self._database_service.resolve_bookorbit_audio_id(self._user_id, book)
+            if resolved:
+                return self._coerce_id(resolved)
+            if self._database_service.get_user_bookorbit_link(
+                self._user_id, getattr(book, "abs_id", None)
+            ) is not None:
+                return None
+        # Legacy fallback: shared Book fields
         return self._coerce_id(
             getattr(book, "audio_provider_book_id", None)
             or getattr(book, "audio_source_id", None)

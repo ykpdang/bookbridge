@@ -23,6 +23,7 @@ class ClientPoller:
     _POLLABLE = [
         ('Storyteller', 'STORYTELLER'),
         ('BookLore', 'BOOKLORE'),
+        ('BookFusion', 'BOOKFUSION'),
         ('BookLoreAudio', 'BOOKLORE_AUDIO'),
         ('BookOrbit', 'BOOKORBIT'),
         ('BookOrbitAudio', 'BOOKORBIT_AUDIO'),
@@ -242,13 +243,67 @@ class ClientPoller:
             # "Up Next" shelf-watch runs on the same cadence as its source's poll
             # when {SOURCE}_POLL_MODE=custom. In global mode the check is invoked
             # from sync_manager._sync_cycle_internal instead.
+            # Per-user: run shelf-watch once per active user so each user's
+            # shelves, clients, and BookOrbit links are processed independently.
             watch_svc = self._shelf_watch_services.get(client_name)
             if watch_svc:
-                try:
-                    watch_svc.process_watch_shelf()
-                except Exception as e:
-                    logger.debug(f"ClientPoller: shelf-watch run failed: {e}")
+                user_targets = []
+                if self._registry and hasattr(self._db, 'list_users'):
+                    try:
+                        user_targets = [u.id for u in self._db.list_users()
+                                        if getattr(u, 'active', 1)]
+                    except Exception:
+                        user_targets = []
+                if not user_targets:
+                    user_targets = [None]
+                for uid in user_targets:
+                    self._run_shelf_watch_for_user(watch_svc, client_name, uid)
             self._poll_client(client_name)
+
+    def _run_shelf_watch_for_user(self, watch_svc, client_name, user_id):
+        """Run shelf-watch for one user with that user's context bound.
+
+        Binds the user's client bundle, user_id, and per-user credentials so
+        that SuggestionsService helpers (``uc()``, ``user_setting()``) resolve
+        the same user's library and settings.
+        """
+        from src.utils.user_context import (
+            set_current_user_id, reset_current_user_id,
+            set_current_user_credentials, reset_current_user_credentials,
+        )
+
+        uid_token = None
+        creds_token = None
+        try:
+            if user_id is not None and self._registry is not None:
+                try:
+                    bundle = self._registry.get_clients(user_id)
+                except Exception:
+                    bundle = None
+
+                try:
+                    uid_token = set_current_user_id(user_id)
+                except Exception:
+                    pass
+
+                try:
+                    creds = self._db.get_user_credentials(user_id) or {}
+                    from src.utils.user_config import _ALLOW_GLOBAL_FALLBACK_KEY, PER_USER_CREDENTIAL_KEYS
+                    user = self._db.get_user(user_id) if hasattr(self._db, 'get_user') else None
+                    creds = {k: v for k, v in creds.items() if k in PER_USER_CREDENTIAL_KEYS}
+                    creds[_ALLOW_GLOBAL_FALLBACK_KEY] = bool(user and getattr(user, 'is_admin', False))
+                    creds_token = set_current_user_credentials(creds)
+                except Exception:
+                    pass
+
+            watch_svc.process_watch_shelf(user_id=user_id)
+        except Exception as e:
+            logger.debug(f"ClientPoller: shelf-watch run failed for user {user_id}: {e}")
+        finally:
+            if creds_token is not None:
+                reset_current_user_credentials(creds_token)
+            if uid_token is not None:
+                reset_current_user_id(uid_token)
 
     def _poll_client(self, client_name: str) -> None:
         """Poll this client for every target user (or globally) and trigger

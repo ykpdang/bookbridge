@@ -160,6 +160,25 @@ class TestDatabaseServiceIntegration(unittest.TestCase):
         self.assertTrue(self.db_service.set_book_status('st-1', 'pending'))
         self.assertEqual(self.db_service.get_book('st-1').status, 'pending')
 
+    def test_worker_update_after_delete_does_not_reinsert_book(self):
+        """Issue #313: worker persistence must not resurrect a deleted mapping."""
+        abs_id = 'stale-data-book'
+        book = self.Book(abs_id=abs_id, abs_title='Stale', status='processing')
+
+        # First save persists the row and returns a detached-with-identity object.
+        saved = self.db_service.save_book(book)
+
+        # The mapping is deleted out from under the still-running worker.
+        self.assertTrue(self.db_service.delete_book(abs_id))
+        self.assertIsNone(self.db_service.get_book(abs_id))
+
+        # Worker finishes and attempts its update-only persistence.
+        saved.status = 'active'
+        result = self.db_service.update_book_if_exists(saved)
+
+        self.assertIsNone(result)
+        self.assertIsNone(self.db_service.get_book(abs_id))
+
     def test_delete_book(self):
         """Test deleting a book record with cascading deletes for states and hardcover details."""
         test_abs_id = 'test-book-delete'
@@ -292,6 +311,92 @@ class TestDatabaseServiceIntegration(unittest.TestCase):
                 session.query(self.ReadingSession).filter(self.ReadingSession.abs_id == test_abs_id).count(),
                 0,
             )
+
+    def test_delete_book_removes_membership_links_without_foreign_key_cascades(self):
+        """Book deletion must not leave user or BookFusion references orphaned."""
+        from src.db.models import KosyncDocument, UserBook, UserBookFusionLink
+
+        user = self.db_service.create_user('delete-link-user', 'pw', role='admin')
+        abs_id = 'test-book-delete-memberships'
+        doc_hash = 'z' * 32
+        self.db_service.save_book(self.Book(
+            abs_id=abs_id,
+            abs_title='Delete Memberships',
+            ebook_filename='delete-memberships.epub',
+            kosync_doc_id=doc_hash,
+            status='active',
+            user_id=user.id,
+        ))
+        self.db_service.link_user_book(user.id, abs_id)
+        self.db_service.set_user_bookfusion_link(
+            user.id, abs_id, '12345', title='Delete Memberships'
+        )
+        self.db_service.save_kosync_document(KosyncDocument(
+            document_hash=doc_hash,
+            linked_abs_id=abs_id,
+            user_id=user.id,
+        ))
+
+        self.assertTrue(self.db_service.delete_book(abs_id))
+
+        with self.db_service.get_session() as session:
+            self.assertEqual(
+                session.query(UserBook).filter(UserBook.abs_id == abs_id).count(), 0
+            )
+            self.assertEqual(
+                session.query(UserBookFusionLink).filter(
+                    UserBookFusionLink.abs_id == abs_id
+                ).count(),
+                0,
+            )
+        self.assertIsNone(
+            self.db_service.get_kosync_document(doc_hash).linked_abs_id
+        )
+
+    def test_cleanup_orphaned_book_references_repairs_legacy_rows(self):
+        """Legacy missing-book references are removed or safely unlinked."""
+        from src.db.models import (
+            KosyncDocument,
+            UserBook,
+            UserBookFusionLink,
+        )
+
+        user = self.db_service.create_user('orphan-cleanup-user', 'pw', role='admin')
+        missing_abs_id = 'missing-book-reference'
+        doc_hash = 'y' * 32
+        with self.db_service.get_session() as session:
+            session.add(UserBook(user_id=user.id, abs_id=missing_abs_id))
+            session.add(UserBookFusionLink(
+                user_id=user.id,
+                abs_id=missing_abs_id,
+                bookfusion_id='99999',
+            ))
+            session.add(KosyncDocument(
+                document_hash=doc_hash,
+                linked_abs_id=missing_abs_id,
+                user_id=user.id,
+            ))
+
+        counts = self.db_service.cleanup_orphaned_book_references()
+
+        self.assertEqual(counts, {
+            'user_books': 1,
+            'user_bookfusion_links': 1,
+            'kosync_documents': 1,
+        })
+        with self.db_service.get_session() as session:
+            self.assertEqual(
+                session.query(UserBook).filter(UserBook.abs_id == missing_abs_id).count(), 0
+            )
+            self.assertEqual(
+                session.query(UserBookFusionLink).filter(
+                    UserBookFusionLink.abs_id == missing_abs_id
+                ).count(),
+                0,
+            )
+        self.assertIsNone(
+            self.db_service.get_kosync_document(doc_hash).linked_abs_id
+        )
 
     def test_koreader_stats_include_linked_and_unlinked_books(self):
         """KOReader dashboard queries should include unlinked activity alongside linked books."""

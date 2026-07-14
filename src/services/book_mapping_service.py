@@ -21,7 +21,8 @@ class BookMappingService:
     """Creates `Book` records for shelf-watch auto-matches and ebook-only fallbacks."""
 
     def __init__(self, database_service, booklore_client, ebook_parser,
-                 abs_client, sync_clients, bookorbit_client=None):
+                 abs_client, sync_clients, bookorbit_client=None,
+                 user_client_registry=None):
         self.database_service = database_service
         self.booklore_client = booklore_client
         self.bookorbit_client = bookorbit_client
@@ -29,6 +30,7 @@ class BookMappingService:
         self.abs_client = abs_client
         # `sync_clients` is a dict-like provider (DI Dict provider yields a dict)
         self.sync_clients = sync_clients
+        self._user_client_registry = user_client_registry
 
     def _library_client_for_source(self, source_name: Optional[str]):
         """Pick the library client that hosts the ebook, by source label."""
@@ -36,18 +38,40 @@ class BookMappingService:
             return self.bookorbit_client
         return self.booklore_client
 
+    def _resolve_library_client_for_user(self, source_name: Optional[str],
+                                          user_id: Optional[int] = None):
+        """Pick the library client for *source_name*, scoped to *user_id* when
+        a registry is available. Legacy callers without a user scope use the
+        shared singleton; an explicit user's unavailable bundle never falls
+        through to another user's client."""
+        if user_id is None or self._user_client_registry is None:
+            return self._library_client_for_source(source_name)
+        try:
+            bundle = self._user_client_registry.get_clients(user_id)
+            if source_name == 'BookOrbit':
+                return getattr(bundle, 'bookorbit_client', None)
+            else:
+                return getattr(bundle, 'booklore_client', None)
+        except Exception as exc:
+            logger.warning("Shelf-watch: could not resolve %s client for user %s: %s", source_name, user_id, exc)
+            return None
+
     def _compute_kosync_id(self, ebook_filename: str, source_ebook_id: Optional[str],
-                           source_name: Optional[str] = 'BookLore') -> Optional[str]:
+                           source_name: Optional[str] = 'BookLore',
+                           user_id: Optional[int] = None) -> Optional[str]:
         """Compute the KOSync document hash for a library-hosted ebook.
 
         Mirrors the library-API branch of `get_kosync_id_for_ebook` in
         `web_server.py`. Filesystem fallbacks are intentionally omitted: the
         shelf-watch flow is always anchored on a library book so we can rely on
         the source's download path (Grimmory or BookOrbit).
+
+        When *user_id* is provided and a registry is available, downloads via
+        the user's own library client instead of the global singleton.
         """
         if not source_ebook_id:
             return None
-        client = self._library_client_for_source(source_name)
+        client = self._resolve_library_client_for_user(source_name, user_id)
         if not client or not client.is_configured():
             return None
         try:
@@ -63,10 +87,14 @@ class BookMappingService:
             logger.warning(f"Shelf-watch: ebook parser failed to compute kosync hash: {e}")
             return None
 
-    def _automatch_progress_trackers(self, book: Book) -> None:
+    def _automatch_progress_trackers(self, book: Book, user_id: Optional[int] = None) -> None:
         """Run Hardcover/StoryGraph auto-match if configured. Mirrors process_queue lines 4142-4148."""
         try:
-            sync_clients = dict(self.sync_clients) if self.sync_clients else {}
+            if user_id is not None and self._user_client_registry is not None:
+                bundle = self._user_client_registry.get_clients(user_id)
+                sync_clients = dict(getattr(bundle, 'sync_clients', None) or {})
+            else:
+                sync_clients = dict(self.sync_clients) if self.sync_clients else {}
         except Exception:
             return
         hardcover = sync_clients.get('Hardcover')
@@ -97,6 +125,7 @@ class BookMappingService:
         ebook_source_id: Optional[str] = None,
         booklore_ebook_id: Optional[str] = None,
         kosync_doc_id: Optional[str] = None,
+        user_id: Optional[int] = None,
     ) -> Optional[Book]:
         """Create or update a full sync mapping for a shelf-watch auto-match.
 
@@ -114,7 +143,9 @@ class BookMappingService:
 
         # Callers that already know the KOSync hash (e.g. the filesystem read path) pass it
         # directly; library-anchored callers compute it from the source download.
-        kosync_doc_id = kosync_doc_id or self._compute_kosync_id(ebook_filename, booklore_ebook_id, ebook_source)
+        kosync_doc_id = kosync_doc_id or self._compute_kosync_id(
+            ebook_filename, booklore_ebook_id, ebook_source, user_id=user_id,
+        )
         if not kosync_doc_id:
             logger.warning(
                 f"Shelf-watch: could not compute kosync id for '{ebook_filename}' "
@@ -133,6 +164,17 @@ class BookMappingService:
             target_book.audio_source = "BookLore"
             target_book.audio_provider_book_id = str(audio_provider_book_id or audio_source_id)
             target_book.audio_cover_url = audio_cover_url or target_book.audio_cover_url or f"/api/booklore/audiobook-cover/{audio_source_id}"
+        elif audio_source.lower() == 'bookorbit':
+            bridge_key = f"bookorbit:{audio_source_id}"
+            existing_book = (
+                self.database_service.get_book(bridge_key)
+                or self.database_service.get_book_by_audio_source("BookOrbit", audio_source_id)
+            )
+            target_book = existing_book or Book(abs_id=bridge_key, sync_mode="audiobook")
+            target_book.abs_id = bridge_key
+            target_book.audio_source = "BookOrbit"
+            target_book.audio_provider_book_id = str(audio_provider_book_id or audio_source_id)
+            target_book.audio_cover_url = audio_cover_url or target_book.audio_cover_url
         else:
             bridge_key = audio_source_id
             existing_book = self.database_service.get_book(bridge_key)
@@ -154,22 +196,63 @@ class BookMappingService:
         target_book.ebook_filename = ebook_filename
         target_book.original_ebook_filename = ebook_filename
         target_book.ebook_source = ebook_source or target_book.ebook_source
-        target_book.ebook_source_id = ebook_source_id or target_book.ebook_source_id
+        preserve_shared_orbit_id = False
+        if user_id is not None and str(ebook_source or '').lower() == 'bookorbit' and existing_book:
+            try:
+                preserve_shared_orbit_id = self.database_service.has_user_bookorbit_link(
+                    target_book.abs_id
+                )
+            except Exception:
+                preserve_shared_orbit_id = False
+        if not preserve_shared_orbit_id:
+            target_book.ebook_source_id = ebook_source_id or target_book.ebook_source_id
         target_book.kosync_doc_id = kosync_doc_id
         target_book.status = "pending"
         target_book.sync_mode = "audiobook"
         target_book.duration = audio_duration if audio_duration is not None else target_book.duration
 
         saved_book = self.database_service.save_book(target_book)
-        self._automatch_progress_trackers(saved_book)
+        self._automatch_progress_trackers(saved_book, user_id=user_id)
 
-        if audio_source.lower() != 'booklore':
+        # ABS collection only for actual ABS audio sources — not BookOrbit
+        if audio_source.lower() not in ('booklore', 'bookorbit'):
             try:
                 from src.utils.user_config import user_setting
                 abs_collection = user_setting('ABS_COLLECTION_NAME', 'Synced with KOReader')
-                self.abs_client.add_to_collection(saved_book.abs_id, abs_collection)
+                abs_client = self.abs_client
+                if user_id is not None and self._user_client_registry is not None:
+                    bundle = self._user_client_registry.get_clients(user_id)
+                    abs_client = getattr(bundle, 'abs_client', None) or abs_client
+                if abs_client is not None:
+                    abs_client.add_to_collection(saved_book.abs_id, abs_collection)
             except Exception as e:
                 logger.warning(f"Shelf-watch: failed to add '{saved_book.abs_id}' to ABS collection: {e}")
+
+        # Persist per-user BookOrbit link when an explicit user context exists
+        if user_id is not None and (
+            audio_source.lower() == 'bookorbit'
+            or str(ebook_source or '').lower() == 'bookorbit'
+        ):
+            try:
+                self.database_service.set_user_bookorbit_link(
+                    user_id=user_id,
+                    abs_id=saved_book.abs_id,
+                    audio_id=(
+                        str(audio_provider_book_id or audio_source_id)
+                        if audio_source.lower() == 'bookorbit' else None
+                    ),
+                    ebook_id=str(ebook_source_id) if ebook_source_id else None,
+                    title=audio_title,
+                )
+            except Exception as e:
+                logger.debug("Shelf-watch: failed to set BookOrbit link for user %s: %s", user_id, e)
+
+        # Claim the book for the current user
+        if user_id is not None:
+            try:
+                self.database_service.link_user_book(user_id, saved_book.abs_id)
+            except Exception:
+                pass
 
         try:
             self.database_service.dismiss_suggestion(saved_book.abs_id)
@@ -188,18 +271,24 @@ class BookMappingService:
         ebook_source: str = "BookLore",
         ebook_source_id: Optional[str] = None,
         booklore_ebook_id: Optional[str] = None,
+        user_id: Optional[int] = None,
     ) -> Optional[Book]:
         """Create an ebook-only mapping when no audio candidate was found.
 
         Uses the same generated abs_id pattern as the manual ebook-only flow in
         `web_server.py` (lines 880-904): `ebook-{kosync_doc_id[:16]}`.
+
+        When *user_id* is provided and *ebook_source* is ``BookOrbit``, a
+        ``UserBookOrbitLink`` is persisted and a ``UserBook`` claim is created
+        so the mapping is attributed to the user's library.
         """
         if not ebook_filename:
             logger.warning("Shelf-watch: create_ebook_only_mapping missing ebook_filename")
             return None
 
         kosync_doc_id = self._compute_kosync_id(
-            ebook_filename, booklore_ebook_id or ebook_source_id, ebook_source
+            ebook_filename, booklore_ebook_id or ebook_source_id, ebook_source,
+            user_id=user_id,
         )
         if not kosync_doc_id:
             logger.warning(
@@ -213,11 +302,29 @@ class BookMappingService:
                 f"Shelf-watch: ebook-only mapping already exists for '{ebook_filename}' "
                 f"(abs_id={existing_by_hash.abs_id}); reusing"
             )
+            if user_id is not None:
+                self.database_service.link_user_book(user_id, existing_by_hash.abs_id)
+                if str(ebook_source or '').lower() == 'bookorbit' and ebook_source_id:
+                    self.database_service.set_user_bookorbit_link(
+                        user_id=user_id,
+                        abs_id=existing_by_hash.abs_id,
+                        ebook_id=str(ebook_source_id),
+                        title=ebook_title,
+                    )
             return existing_by_hash
 
         target_abs_id = f"ebook-{kosync_doc_id[:16]}"
         existing_by_id = self.database_service.get_book(target_abs_id)
         if existing_by_id:
+            if user_id is not None:
+                self.database_service.link_user_book(user_id, existing_by_id.abs_id)
+                if str(ebook_source or '').lower() == 'bookorbit' and ebook_source_id:
+                    self.database_service.set_user_bookorbit_link(
+                        user_id=user_id,
+                        abs_id=existing_by_id.abs_id,
+                        ebook_id=str(ebook_source_id),
+                        title=ebook_title,
+                    )
             return existing_by_id
 
         inferred_title = ebook_title or Path(ebook_filename).stem or target_abs_id
@@ -234,7 +341,26 @@ class BookMappingService:
         )
 
         saved_book = self.database_service.save_book(target_book)
-        self._automatch_progress_trackers(saved_book)
+        self._automatch_progress_trackers(saved_book, user_id=user_id)
+
+        # Persist per-user BookOrbit link when the ebook source is BookOrbit
+        if user_id is not None and ebook_source and ebook_source.lower() == 'bookorbit':
+            try:
+                self.database_service.set_user_bookorbit_link(
+                    user_id=user_id,
+                    abs_id=saved_book.abs_id,
+                    ebook_id=str(ebook_source_id) if ebook_source_id else None,
+                    title=inferred_title,
+                )
+            except Exception as e:
+                logger.debug("Shelf-watch: failed to set BookOrbit ebook link for user %s: %s", user_id, e)
+
+        # Claim the book for the current user
+        if user_id is not None:
+            try:
+                self.database_service.link_user_book(user_id, saved_book.abs_id)
+            except Exception:
+                pass
 
         try:
             self.database_service.dismiss_suggestion(saved_book.abs_id)
