@@ -44,8 +44,14 @@ class KOReaderDeviceSyncService:
         self.epub_cache_dir = Path(epub_cache_dir) if epub_cache_dir is not None else Path("/data/epub_cache")
 
     def _get_active_books(self) -> list:
+        # Audiobook-only mappings have no ebook file by design, so they're never
+        # relevant to this ebook-focused device manifest -- including them just
+        # produces a "no original ebook filename" warning every cycle, forever.
         return sorted(
-            self.database_service.get_books_by_status("active"),
+            (
+                book for book in self.database_service.get_books_by_status("active")
+                if getattr(book, "sync_mode", "audiobook") != "audiobook_only"
+            ),
             key=lambda book: (str(getattr(book, "abs_title", "") or "").lower(), str(book.abs_id)),
         )
 

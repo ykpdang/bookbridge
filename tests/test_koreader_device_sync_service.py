@@ -79,6 +79,36 @@ class TestKOReaderDeviceSyncService(unittest.TestCase):
         self.assertEqual(item["download_path"], "/koreader/device-sync/books/abs-1/download")
         self.assertEqual(item["filename"], "Dragon's Justice.epub")
 
+    def test_manifest_excludes_audiobook_only_book_without_warning(self):
+        """Audiobook-only mappings have no ebook file by design and must not be
+        pulled into the ebook device-sync manifest -- previously every cycle
+        logged a spurious "no original ebook filename" warning for them,
+        forever, since such a book can never satisfy that check.
+        """
+        self._write_book_file("kavita_187.epub")
+        ebook_book = Book(
+            abs_id="abs-ebook-1",
+            abs_title="Dragon's Justice",
+            ebook_filename="kavita_187.epub",
+            kosync_doc_id="hash-1",
+            status="active",
+        )
+        audio_only_book = Book(
+            abs_id="abs-audio-only-1",
+            abs_title="Exiles",
+            sync_mode="audiobook_only",
+            kosync_doc_id="forging_abs-audio-only-1",
+            status="active",
+        )
+        self.db.save_book(ebook_book)
+        self.db.save_book(audio_only_book)
+
+        with self.assertNoLogs("src.services.koreader_device_sync_service", level="WARNING"):
+            manifest = self.service.build_manifest()
+
+        self.assertEqual(len(manifest["books"]), 1)
+        self.assertEqual(manifest["books"][0]["abs_id"], "abs-ebook-1")
+
     def test_manifest_adds_suffix_for_filename_collisions(self):
         self._write_book_file("kavita_1.epub")
         self._write_book_file("kavita_2.epub")
